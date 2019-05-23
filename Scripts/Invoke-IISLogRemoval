@@ -1,0 +1,4 @@
+$Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument '-ExecutionPolicy Unrestricted -Command "& {Get-ChildItem -Path (Join-Path -Path $env:SystemDrive -ChildPath "inetpub\logs\LogFiles" -Resolve -ErrorAction Stop) -Recurse -File | Where-Object {$_.Extension -eq ".log" -and $_.LastWriteTime -lt (Get-Date).AddMonths(-1)} | ForEach-Object {Remove-Item -Path $_.FullName -Force -Verbose}}"' -Verbose
+$Trigger = New-ScheduledTaskTrigger -Daily -At (Get-Date).Date
+$Principal = New-ScheduledTaskPrincipal -UserID "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -Action $Action -Trigger $Trigger -Principal $Principal -TaskName "Remove Old IIS Logs" -Force
