@@ -1,11 +1,7 @@
 [CmdletBinding()]
 param (
-	[parameter(Mandatory = $false, HelpMessage = "Full path to customer specific XML-file.")]
-	[ValidateNotNullOrEmpty()]
-    [System.IO.FileInfo]
-	$Settings = (Get-ChildItem -Path (Join-Path -Path $env:RetuneDir -ChildPath Settings -Resolve) -Filter "*.xml" | Select-Object -First 1),
     $LogsDirectory = (Join-Path -Path $env:SystemRoot -ChildPath "Temp"),
-    $LogName = "RetuneLog.log",
+    $LogName = "CHUpgradeLog.log",
     [parameter(Mandatory = $false, HelpMessage = "Client Health share name (not including $)")]
 	[ValidateNotNullOrEmpty()]
     $CHShareName = "ClientHealth"
@@ -51,19 +47,9 @@ Begin {
 
     # Construct customer environment
     try {
-        # Attempt to import settings XML
-        $XML = New-Object -TypeName XML
-        $XML.Load($Settings.FullName)
-
-        # Import customer specific variables
-        $SiteCode = $XML.Settings.Setting.CMSiteCode
-        $SiteServer = $XML.Settings.Setting.CMSiteServer
-        $UpdateGroups = $XML.Settings.UpdateGroups.UpdateGroup
-
-        # Set script parameters
-        $initParams = @{}
-        $initParams.Add("ErrorAction", "Stop") # Uncomment this line to stop the script on any errors
-        $initParams.Add("WarningAction", "SilentlyContinue") # Uncomment this line to stop the script on any errors
+        Import-module ($Env:SMS_ADMIN_UI_PATH.Substring(0,$Env:SMS_ADMIN_UI_PATH.Length-5) + '\ConfigurationManager.psd1') 
+        $SiteCode = Get-PSDrive -PSProvider CMSITE 
+        Set-location $SiteCode":" 
     }
     catch {
         Write-CMLogEntry -Value "Error loading customer specific settings. Message: $($_.Exception.Message)" -Severity 2
@@ -74,7 +60,7 @@ Process {
     Write-CMLogEntry -Value "----------- Starting job Client Health Update." -Severity 1
 
     # Gather ConfigMgr Client Package information (mostly package 0-9)
-    $ClientPackage = Get-WmiObject -Namespace "root\SMS\site_$($SiteCode)" -Class SMS_Package -ComputerName $SiteServer @initParams | Where-Object {
+    $ClientPackage = Get-WmiObject -Namespace "root\SMS\site_$($SiteCode)" -Class SMS_Package -ComputerName $SiteCode.SiteServer | Where-Object {
         ($_.Name -match "Configuration Manager Client Package") -and
         ($_.Manufacturer -match "Microsoft Corporation") -and
         ## This part might be  unnecessary
@@ -87,7 +73,7 @@ Process {
 
         # Gather shared folders information
         try {
-            $SharedFolders = Get-WmiObject -Class Win32_Share -ComputerName $SiteServer @initParams
+            $SharedFolders = Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer
             [System.IO.FileInfo]$CMDir = (Join-Path -Path ($SharedFolders | Where-Object {$_.Name -match "SMS_$($SiteCode)"} | Select-Object -ExpandProperty Path) -ChildPath "Client" -Resolve)
             [System.IO.FileInfo]$CHDir = (Join-Path -Path ($SharedFolders | Where-Object {(($_.Name -match $CHShareName) -and ($_.Name -notmatch "Logs"))} | Select-Object -ExpandProperty Path) -ChildPath "Client" -Resolve)
         }
