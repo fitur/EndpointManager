@@ -48,9 +48,9 @@ Get-CMCollection | Where-Object {$_.CollectionID -notlike "SMS*"} | ForEach-Obje
     }
     
     # Evaluate refresh schedule
-    if ($_.RefreshSchedule.HourSpan -gt 0) {
+    if ($_.RefreshSchedule.HourSpan -ne 0) {
         $temp | Add-Member -MemberType NoteProperty -Name "RefreshSchedule" -Value "$($_.RefreshSchedule.HourSpan)h"
-    } elseif ($object.RefreshSchedule.DaySpan -gt 0) {
+    } elseif ($_.RefreshSchedule.DaySpan -ne 0) {
         $temp | Add-Member -MemberType NoteProperty -Name "RefreshSchedule" -Value "$($_.RefreshSchedule.DaySpan)d"
     }
 
