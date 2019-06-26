@@ -61,3 +61,8 @@ Get-CMCollection | Where-Object {$_.CollectionID -notlike "SMS*"} | ForEach-Obje
 }
 
 $Collections | Out-GridView -Title "$($SiteCode.Description) | All Custom Collections | Total ($($Collections | Measure-Object | Select-Object -ExpandProperty Count)) Incremental ($($Collections | Where-Object {($_.RefreshType -eq "Both") -or ($_.RefreshType -eq "Incremental")} | Measure-Object | Select-Object -ExpandProperty Count)) Manual ($($Collections | Where-Object {$_.RefreshType -eq "Manual"} | Measure-Object | Select-Object -ExpandProperty Count)) Empty ($($Collections | Where-Object {$_.MemberCount -lt 1} | Measure-Object | Select-Object -ExpandProperty Count))"
+
+# Set update schedule on all specific collections
+$Collections | Where-Object {($_.CollectionID -notlike "SMS*") -and ($_.ObjectPath -match "Application")} | ForEach-Object {
+    Set-CMCollection -CollectionId $_.CollectionId -RefreshType Periodic -RefreshSchedule (New-CMSchedule -Start (Get-Date -Format d) -DurationInterval 0 -RecurInterval Hours -RecurCount 4 -DurationCount 0) -WhatIf
+}
