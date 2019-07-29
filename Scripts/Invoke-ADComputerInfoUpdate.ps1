@@ -52,7 +52,7 @@ Begin {
 }
 Process{
     # Import AD computer information
-    $Computers = Get-ADComputer -Filter * -SearchBase "OU=Windows 10,OU=Computers,OU=Workplace,OU=Advania,DC=ramiad,DC=com" -Properties Enabled, Description, ManagedBy
+    $Computers = Get-ADComputer -Filter * -SearchBase "OU=Windows 10,OU=Computers,OU=XXX,OU=XXX,DC=XXX,DC=com" -Properties Enabled, Description, ManagedBy
     $UMComputers = $Computers | Where-Object {$_.Description -like ""}
     $MComputers = $Computers | Where-Object {$_.Description -notlike ""}
 
