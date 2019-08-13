@@ -49,10 +49,10 @@ Get-WmiObject -Namespace "root\SMS\site_$($SiteCode)" -Query 'select distinct Ma
         ## Inform which device is being parsed
         Write-Host "Creating collection for $Device"
 
-        $Collection = New-CMDeviceCollection -Name $Device -LimitingCollectionId (Get-CMDeviceCollection -Name "All Active Clients").CollectionID -RefreshSchedule ($Schedule = New-CMSchedule -Start "01/01/2016" -RecurInterval Days -RecurCount 1) -RefreshType Periodic -ErrorAction Stop
+        $Collection = New-CMDeviceCollection -Name $Device -LimitingCollectionId SMS00001 -RefreshSchedule ($Schedule = New-CMSchedule -Start "01/01/2016" -RecurInterval Days -RecurCount 1) -RefreshType Periodic -ErrorAction Stop
 
         ## Add query to above collection
         Add-CMDeviceCollectionQueryMembershipRule -CollectionId $Collection.CollectionID -RuleName $_.Model -QueryExpression "select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client from SMS_R_System inner join SMS_G_System_COMPUTER_SYSTEM on SMS_G_System_COMPUTER_SYSTEM.ResourceID = SMS_R_System.ResourceId where SMS_G_System_COMPUTER_SYSTEM.Manufacturer = ""$($_.Manufacturer)"" and SMS_G_System_COMPUTER_SYSTEM.Model = ""$($_.Model)""" -ErrorAction Stop
-        Move-CMObject -ObjectId $Collection.CollectionID -FolderPath "C01:\DeviceCollection\_Client\4. Hardware Inventory\Computers Based On Model\$Manufacturer" -ErrorAction SilentlyContinue
+        #Move-CMObject -ObjectId $Collection.CollectionID -FolderPath "C01:\DeviceCollection\_Client\4. Hardware Inventory\Computers Based On Model\$Manufacturer" -ErrorAction SilentlyContinue
     }
 }
