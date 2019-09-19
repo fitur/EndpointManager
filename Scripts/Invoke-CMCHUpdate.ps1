@@ -73,16 +73,15 @@ Process {
 
         # Gather shared folders information
         try {
-            $SharedFolders = Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer
-            [System.IO.FileInfo]$CMDir = (Join-Path -Path ($SharedFolders | Where-Object {$_.Name -match "SMS_$($SiteCode)"} | Select-Object -ExpandProperty Path) -ChildPath "Client" -Resolve)
-            [System.IO.FileInfo]$CHDir = (Join-Path -Path ($SharedFolders | Where-Object {(($_.Name -match $CHShareName) -and ($_.Name -notmatch "Logs"))} | Select-Object -ExpandProperty Path) -ChildPath "Client" -Resolve)
+            $CMDir = ("\\{0}\{1}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object {$_.Name -match "SMS_$($SiteCode)"} | Select-Object -ExpandProperty Name))), "Client")
+            $CHDir = ("\\{0}\{1}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object {(($_.Name -match $CHShareName) -and ($_.Name -notmatch "Logs"))} | Select-Object -ExpandProperty Name))), "Client")
         }
         catch {
             Write-CMLogEntry -Value "Error gathering directories. Message: $($_.Exception.Message)" -Severity 2
         }
 
         # Begin loop
-        if ([System.Version](Get-Item (Join-Path -Path $CMDir -ChildPath "ccmsetup.exe" -Resolve) | Select-Object -ExpandProperty VersionInfo).FileVersion -gt [System.Version](Get-Item (Join-Path -Path $CHDir -ChildPath "ccmsetup.exe") -ErrorAction SilentlyContinue | Select-Object -ExpandProperty VersionInfo).FileVersion) {
+        if ([System.Version](Get-Item "filesystem::$(Join-Path -Path $CMDir -ChildPath "ccmsetup.exe")" | Select-Object -ExpandProperty VersionInfo).FileVersion -gt [System.Version](Get-Item "filesystem::$(Join-Path -Path $CHDir -ChildPath "ccmsetup.exe")" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty VersionInfo).FileVersion) {
             
             # Copy setup files to Client Health directory
             try {
