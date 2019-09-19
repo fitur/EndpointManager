@@ -86,7 +86,7 @@ Process {
             # Copy setup files to Client Health directory
             try {
                 Write-CMLogEntry -Value "Attempting to copy ConfigMgr setup files to directory $($CHDir.DirectoryName)" -Severity 1
-                Copy-Item -Path $CMDir.FullName -Destination $CHDir.DirectoryName -Recurse -Force -Verbose
+                Copy-Item -Path "filesystem::$($CMDir.FullName)" -Destination "filesystem::$($CHDir.DirectoryName)" -Recurse -Force -Verbose
             }
             catch {
                 Write-CMLogEntry -Value "Failed to copy installation files to Client Health directory. Message: $($_.Exception.Message)" -Severity 2
@@ -96,11 +96,8 @@ Process {
             try {
                 Write-CMLogEntry -Value "Attempting to edit Client Health configuration XML." -Severity 1
                 $ConfigXML = New-Object -TypeName XML
-                $ConfigXML.Load((Join-Path -Path (Split-Path -Path $CHDir) -ChildPath "config.xml" -Resolve))
-                $node = $ConfigXML.Configuration.ChildNodes
-                $newChild = $ConfigXML.CreateElement("Version")
-                $newChild.set_InnerXML((Get-Item (Join-Path -Path $CHDir -ChildPath "ccmsetup.exe" -Resolve) | Select-Object -ExpandProperty VersionInfo).FileVersion) 
-                $ConfigXML.Configuration.ReplaceChild($newChild, $node.Item(1)) | Out-Null
+                $ConfigXML.Load((Join-Path -Path $(Split-Path -Path $CHDir) -ChildPath "config.xml"))
+                $ConfigXML.Configuration.Client[0].'#text' = [string]((Get-Item "filesystem::$(Join-Path -Path $CHDir -ChildPath "ccmsetup.exe")" | Select-Object -ExpandProperty VersionInfo).FileVersion)
                 $ConfigXML.Save((Join-Path -Path (Split-Path -Path $CHDir) -ChildPath ($ConfigXML.BaseURI | Split-Path -Leaf)))
             }
             catch {
