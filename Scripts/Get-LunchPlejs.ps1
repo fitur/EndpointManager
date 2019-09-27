@@ -5,7 +5,7 @@ $Radius = 1000 # Meters
 $Random = 5 # Random objects
 $PollText = '/poll "Vart käkar vi idag?"' # Poll text
 $TransportType = "walking" # walking, driving
-$GoogleMaps_API_Key = "AIzaSyDj7Uy8ApUV6wVZGCKdQ8gH1rUfOCSq_XE"
+$GoogleMaps_API_Key = ""
 
 # Gather from Google Maps
 $Location = (Invoke-RestMethod -Method Get -Uri "https://maps.googleapis.com/maps/api/geocode/json?address=$($Address)&key=$($GoogleMaps_API_Key)").results | Select-Object -First 1
