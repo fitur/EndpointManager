@@ -22,6 +22,11 @@ if (($Nearby | Measure-Object).Count -gt 0) {
     }
 }
 
+# Remove places without opening_hours
+$Places | Where-Object {
+    (!$_.opening_hours.periods[$((Get-Date).DayOfWeek.value__)].open.time)
+} | ForEach-Object {$Places.Remove($_) | Out-Null}
+
 # Filter detailed array and select $number random objects
 $Places | Where-Object {
     ($_.opening_hours.periods[$((Get-Date).DayOfWeek.value__)].open.time).SubString(0,2) -le (Get-Date).AddMinutes(30).Hour -and
