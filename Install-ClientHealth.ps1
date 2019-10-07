@@ -203,7 +203,7 @@ Process {
     # Create, edit and import GPO
     try {
         # Create GPO
-        $GPO = New-GPO -Domain (Get-WmiObject Win32_ComputerSystem | Select-Object -ExpandProperty Domain) -Name "[Temp]ConfigMgr Client Health" -ErrorAction Stop
+        # $GPO = New-GPO -Domain (Get-WmiObject Win32_ComputerSystem | Select-Object -ExpandProperty Domain) -Name "[Temp]ConfigMgr Client Health" -ErrorAction Stop
     }
     catch [System.Exception] {
         Write-CMLogEntry -Value "Error importing GPO. Message: $($_.Exception.Message)" -Severity 2
