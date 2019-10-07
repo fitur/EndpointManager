@@ -6,7 +6,7 @@ $Random = 5 # Number of random objects to add to poll
 $PollText = '/poll "Vart käkar vi på fredag?"' # Poll text
 $TransportType = "walking" # walking, driving
 $GoogleMaps_API_Key = $env:GoogleAPI # Google Maps API key
-$LunchTime = 11 # Hour to start lunch
+$LunchHour = 11 # Hour to start lunch
 $DayOfWeek = (Get-Date).DayOfWeek.value__ # Set to 5 if not run on friday
 
 # Gather from Google Maps
@@ -29,8 +29,8 @@ $Places | Where-Object { (!$_.opening_hours.periods[$($DayOfWeek)].open.time) } 
 
 # Filter detailed array and select $number random objects
 $Places | Where-Object {
-    ($_.opening_hours.periods[$($DayOfWeek)].open.time).SubString(0, 2) -le $LunchTime -and # Opening hours before $LunchTime
-    ($_.opening_hours.periods[$($DayOfWeek)].close.time).SubString(0, 2) -gt $($LunchTime + 2) -and # Opening hours after $LunchTime + 2 hours
+    ($_.opening_hours.periods[$($DayOfWeek)].open.time).SubString(0, 2) -le $LunchHour -and # Opening hours before $LunchHour
+    ($_.opening_hours.periods[$($DayOfWeek)].close.time).SubString(0, 2) -gt $($LunchHour + 2) -and # Opening hours after $LunchHour + 2 hours
     ($_.rating -ge $Rating) # Rating equal to or above $Rating
 } | Get-Random -Count $Random | ForEach-Object -Process {
     $_ | Add-Member -MemberType NoteProperty -Name "distance" -Value (Invoke-RestMethod -Method Get -Uri "https://maps.googleapis.com/maps/api/distancematrix/json?origins=$($Coordinates)&destinations=$($_.formatted_address -replace " ","+")&mode=$($TransportType)&units=metric&key=$($GoogleMaps_API_Key)")
