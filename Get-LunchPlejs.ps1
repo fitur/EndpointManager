@@ -5,7 +5,7 @@ $Radius = 1000 # Meters radius
 $Random = 5 # Number of random objects to add to poll
 $PollText = '/poll "Vart käkar vi på fredag?"' # Poll text
 $TransportType = "walking" # walking, driving
-$GoogleMaps_API_Key = "" # Google Maps API key
+$GoogleMaps_API_Key = $env:GoogleAPI # Google Maps API key
 $LunchTime = 11 # Hour to start lunch
 $DayOfWeek = (Get-Date).DayOfWeek.value__ # Set to 5 if not run on friday
 
