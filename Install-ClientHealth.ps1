@@ -4,52 +4,52 @@ param (
     $LogsDirectory = (Join-Path -Path $env:SystemRoot -ChildPath "Temp"),
     $LogName = "ClientHealthInstallation.log",
     [parameter(Mandatory = $false, HelpMessage = "Client Health share name (not including $)")]
-	[ValidateNotNullOrEmpty()]
+    [ValidateNotNullOrEmpty()]
     $CHShareName = "ClientHealth",
     $URI = "https://gallery.technet.microsoft.com/ConfigMgr-Client-Health-ccd00bd7"
 )
 Begin {
     # Functions
-	function Write-CMLogEntry {
-		param (
-			[parameter(Mandatory = $true, HelpMessage = "Value added to the log file.")]
-			[ValidateNotNullOrEmpty()]
-			[string]$Value,
-			[parameter(Mandatory = $true, HelpMessage = "Severity for the log entry. 1 for Informational, 2 for Warning and 3 for Error.")]
-			[ValidateNotNullOrEmpty()]
-			[ValidateSet("1", "2", "3")]
-			[string]$Severity,
-			[parameter(Mandatory = $false, HelpMessage = "Name of the log file that the entry will written to.")]
-			[ValidateNotNullOrEmpty()]
-			[string]$FileName = $LogName
-		)
-		# Determine log file location
-		$LogFilePath = Join-Path -Path $LogsDirectory -ChildPath $FileName
+    function Write-CMLogEntry {
+        param (
+            [parameter(Mandatory = $true, HelpMessage = "Value added to the log file.")]
+            [ValidateNotNullOrEmpty()]
+            [string]$Value,
+            [parameter(Mandatory = $true, HelpMessage = "Severity for the log entry. 1 for Informational, 2 for Warning and 3 for Error.")]
+            [ValidateNotNullOrEmpty()]
+            [ValidateSet("1", "2", "3")]
+            [string]$Severity,
+            [parameter(Mandatory = $false, HelpMessage = "Name of the log file that the entry will written to.")]
+            [ValidateNotNullOrEmpty()]
+            [string]$FileName = $LogName
+        )
+        # Determine log file location
+        $LogFilePath = Join-Path -Path $LogsDirectory -ChildPath $FileName
 		
-		# Construct time stamp for log entry
-		$Time = -join @((Get-Date -Format "HH:mm:ss.fff"), "+", (Get-WmiObject -Class Win32_TimeZone | Select-Object -ExpandProperty Bias))
+        # Construct time stamp for log entry
+        $Time = -join @((Get-Date -Format "HH:mm:ss.fff"), "+", (Get-WmiObject -Class Win32_TimeZone | Select-Object -ExpandProperty Bias))
 		
-		# Construct date for log entry
-		$Date = (Get-Date -Format "MM-dd-yyyy")
+        # Construct date for log entry
+        $Date = (Get-Date -Format "MM-dd-yyyy")
 		
-		# Construct context for log entry
-		$Context = $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+        # Construct context for log entry
+        $Context = $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
 		
-		# Construct final log entry
-		$LogText = "<![LOG[$($Value)]LOG]!><time=""$($Time)"" date=""$($Date)"" component=""ClientHealthUpdate"" context=""$($Context)"" type=""$($Severity)"" thread=""$($PID)"" file="""">"
+        # Construct final log entry
+        $LogText = "<![LOG[$($Value)]LOG]!><time=""$($Time)"" date=""$($Date)"" component=""ClientHealthUpdate"" context=""$($Context)"" type=""$($Severity)"" thread=""$($PID)"" file="""">"
 		
-		# Add value to log file
-		try {
-			Add-Content -Value $LogText -LiteralPath $LogFilePath -ErrorAction Stop
-		}
-		catch [System.Exception] {
-			Write-Warning -Message "Unable to append log entry to $($LogName) file. Error message: $($_.Exception.Message)"
-		}
-	}
+        # Add value to log file
+        try {
+            Add-Content -Value $LogText -LiteralPath $LogFilePath -ErrorAction Stop
+        }
+        catch [System.Exception] {
+            Write-Warning -Message "Unable to append log entry to $($LogName) file. Error message: $($_.Exception.Message)"
+        }
+    }
 
     # Construct customer environment
     try {
-        Import-Module ($Env:SMS_ADMIN_UI_PATH.Substring(0,$Env:SMS_ADMIN_UI_PATH.Length-5) + '\ConfigurationManager.psd1')
+        Import-Module ($Env:SMS_ADMIN_UI_PATH.Substring(0, $Env:SMS_ADMIN_UI_PATH.Length - 5) + '\ConfigurationManager.psd1')
         Import-Module GroupPolicy
         $SiteCode = Get-PSDrive -PSProvider CMSITE 
         Set-location $SiteCode":" 
@@ -64,13 +64,13 @@ Process {
 
     # Generate download URI for Client Health
     $WebRequest = Invoke-WebRequest -Uri $URI
-    $DownloadURI = "{0}{1}" -f ($URI | Split-Path -Parent), ($WebRequest.Links | Where-Object {$_.innerText -like "ConfigMgrClientHealth-*.zip"} | Select-Object -ExpandProperty data-url)
+    $DownloadURI = "{0}{1}" -f ($URI | Split-Path -Parent), ($WebRequest.Links | Where-Object { $_.innerText -like "ConfigMgrClientHealth-*.zip" } | Select-Object -ExpandProperty data-url)
 
     # Gather shared folders information - Part 1
     try {
-        $CMDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object {$_.Name -match "SMS_$($SiteCode)"} | Select-Object -ExpandProperty Name))))
-        $CHDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object {(($_.Name -match $CHShareName) -and ($_.Name -notmatch "Logs"))} | Select-Object -ExpandProperty Name))))
-        $CHLogsDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object {(($_.Name -match $CHShareName) -and ($_.Name -match "Logs"))} | Select-Object -ExpandProperty Name))))
+        $CMDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object { $_.Name -match "SMS_$($SiteCode)" } | Select-Object -ExpandProperty Name))))
+        $CHDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object { (($_.Name -match $CHShareName) -and ($_.Name -notmatch "Logs")) } | Select-Object -ExpandProperty Name))))
+        $CHLogsDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object { (($_.Name -match $CHShareName) -and ($_.Name -match "Logs")) } | Select-Object -ExpandProperty Name))))
     }
     catch [System.Exception] {
         Write-CMLogEntry -Value "Error gathering directories. Message: $($_.Exception.Message)" -Severity 2
@@ -88,7 +88,7 @@ Process {
                 )
 
                 # Generate variables
-                $LocalPath = (Join-Path -Path ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer | Where-Object {$_.Name -match "SMS_$($SiteCode.SiteCode)"} | Select-Object -ExpandProperty Path).SubString(0,3)) -ChildPath $CHShareName)
+                $LocalPath = (Join-Path -Path ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer | Where-Object { $_.Name -match "SMS_$($SiteCode.SiteCode)" } | Select-Object -ExpandProperty Path).SubString(0, 3)) -ChildPath $CHShareName)
 
                 # Create directory & set ACL
                 if (!(Test-Path -Path $LocalPath)) {
@@ -97,7 +97,7 @@ Process {
             
                     # Set ACL
                     $ACL = Get-Acl -Path $LocalPath -ErrorAction Stop
-                    $ROAccessRule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule("$(Get-WmiObject -Class Win32_ComputerSystem | Select-Object -ExpandProperty Domain)\Domain Computers","ReadAndExecute, Synchronize","ContainerInherit, ObjectInherit","None" ,"Allow")
+                    $ROAccessRule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule("$(Get-WmiObject -Class Win32_ComputerSystem | Select-Object -ExpandProperty Domain)\Domain Computers", "ReadAndExecute, Synchronize", "ContainerInherit, ObjectInherit", "None" , "Allow")
                     $ACL.AddAccessRule($ROAccessRule)
                     $ACL | Set-Acl -Path $LocalPath -ErrorAction Stop
                 }
@@ -118,7 +118,7 @@ Process {
                 if (!(Get-SmbShare -Name "$($CHShareName)Logs$" -ErrorAction SilentlyContinue)) {
                     # Set Logs ACL
                     $ACL = Get-Acl -Path (Join-Path -Path $LocalPath -ChildPath "Logs")
-                    $RWAccessRule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule("$(Get-WmiObject -Class Win32_ComputerSystem | Select-Object -ExpandProperty Domain)\Domain Computers","FullControl","ContainerInherit, ObjectInherit","None" ,"Allow")
+                    $RWAccessRule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule("$(Get-WmiObject -Class Win32_ComputerSystem | Select-Object -ExpandProperty Domain)\Domain Computers", "FullControl", "ContainerInherit, ObjectInherit", "None" , "Allow")
                     $ACL.SetAccessRule($RWAccessRule)
                     $ACL | Set-Acl -Path (Join-Path -Path $LocalPath -ChildPath "Logs")
 
@@ -128,7 +128,7 @@ Process {
 
                 # Copy CM Client installation files
                 if (!(Test-Path -Path (Join-Path -Path $LocalPath -ChildPath "Client"))) {
-                    $CMDir = Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object {$_.Name -match "SMS_$($SiteCode)"} | Select-Object -ExpandProperty Path
+                    $CMDir = Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object { $_.Name -match "SMS_$($SiteCode)" } | Select-Object -ExpandProperty Path
                     Copy-Item -Path (Join-Path -Path $CMDir -ChildPath "Client") -Destination $LocalPath -Recurse -Force
                 }
             }
@@ -140,9 +140,9 @@ Process {
 
     # Gather shared folders information - Part 2
     try {
-        $CMDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object {$_.Name -match "SMS_$($SiteCode)"} | Select-Object -ExpandProperty Name))))
-        $CHDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object {(($_.Name -match $CHShareName) -and ($_.Name -notmatch "Logs"))} | Select-Object -ExpandProperty Name))))
-        $CHLogsDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object {(($_.Name -match $CHShareName) -and ($_.Name -match "Logs"))} | Select-Object -ExpandProperty Name))))
+        $CMDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object { $_.Name -match "SMS_$($SiteCode)" } | Select-Object -ExpandProperty Name))))
+        $CHDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object { (($_.Name -match $CHShareName) -and ($_.Name -notmatch "Logs")) } | Select-Object -ExpandProperty Name))))
+        $CHLogsDir = ("\\{0}" -f (Join-Path -Path $SiteCode.SiteServer -ChildPath ((Get-WmiObject -Class Win32_Share -ComputerName $SiteCode.SiteServer -ErrorAction Stop | Where-Object { (($_.Name -match $CHShareName) -and ($_.Name -match "Logs")) } | Select-Object -ExpandProperty Name))))
     }
     catch [System.Exception] {
         Write-CMLogEntry -Value "Error gathering directories. Message: $($_.Exception.Message)" -Severity 2
