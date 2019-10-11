@@ -35,13 +35,15 @@ function Get-ComputerInfo {
     }
     
     process {
-        
+        $Computer = [PSCustomObject]@{
+            Name = (Get-ADComputer -Identity $ComputerName).Name
+        }
     }
     
     end {
-        
+        return $Computer
     }
 }
 
 
-Get-ComputerInfo -ComputerName "ws12345" -SearchBase "ou=Group64,ou=Computers,dc=demo,dc=SS64,dc=com" -LoadModules $false
+Get-ComputerInfo -ComputerName "ws07710" -LoadModules $false
