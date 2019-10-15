@@ -10,6 +10,10 @@ function Import-CMEnvironment {
 }
 
 function Get-CMDeviceModels {
+    begin {
+        ## Load environment
+        Import-CMEnvironment
+    }
     process {
         try {
             $ModelData = Get-WmiObject -ComputerName $SiteCode.SiteServer -Namespace "root\SMS\site_$($SiteCode)" -Query 'select distinct Manufacturer, Model from SMS_G_System_COMPUTER_SYSTEM' -ErrorAction Stop | Where-Object {
@@ -137,7 +141,7 @@ function New-CMDeviceCollectionPerModel {
             $DeviceCollection = ("{0} {1}" -f $Manufacturer, $Model)
         
             ## Create collection if not exists
-            if ($DeviceCollection -notin $CurrentCollections) {
+            if ($DeviceCollection -notin $CurrentCollections.Name) {
         
                 ## Inform which device is being parsed
                 Write-Host "Creating collection for $DeviceCollection"
