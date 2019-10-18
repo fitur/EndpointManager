@@ -26,18 +26,18 @@ begin {
 }
 process {
     try {
+        # If response returns 5 digit name, proceed
+        if ($WebService.GetMDTComputerByMacAddress($SecretKey, $MACAddress) -match "\d{5}") {
+            exit 0
+        }
         # If MAC address doesn't exist in MDT DB
-        if ([string]::IsNullOrEmpty($WebService.GetMDTComputerByMacAddress($SecretKey, $MACAddress))) {
+        elseif ([string]::IsNullOrEmpty($WebService.GetMDTComputerByMacAddress($SecretKey, $MACAddress))) {
             # Crash TS
             exit 1
         }
         # If multiple objects with same MAC address
         elseif (($WebService.GetMDTComputerByMacAddress($SecretKey, $MACAddress) | Measure-Object).Count -gt 1) {
             exit 1
-        }
-        # If response returns 5 digit name, proceed
-        elseif ($WebService.GetMDTComputerByMacAddress($SecretKey, $MACAddress) -match "\d{5}") {
-            exit 0
         }
     }
     catch [System.Exception] {
