@@ -56,7 +56,7 @@ Begin {
 		$TSEnvironment = New-Object -ComObject Microsoft.SMS.TSEnvironment -ErrorAction Continue
 	}
 	catch [System.Exception] {
-		Write-CMLogEntry -Value "Unable to construct Microsoft.SMS.TSEnvironment object. Error message at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)" -Severity 3, exit 1
+		Write-CMLogEntry -Value "Unable to construct Microsoft.SMS.TSEnvironment object. Error message at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)" -Severity 3; exit 1
 	}
 
 	# Construct new web service proxy
