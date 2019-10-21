@@ -5,12 +5,15 @@ param (
     $URI,
     [parameter(Mandatory = $true, HelpMessage = "ConfigMgr webservice secret key")]
     [ValidateNotNullOrEmpty()]
-    $SecretKey
+    $SecretKey,
+    [parameter(Mandatory = $false, HelpMessage = "MAC address")]
+    [ValidateNotNullOrEmpty()]
+    $MACAddress = (Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object { $null -ne $_.IPAddress } | Select-Object -ExpandProperty MacAddress)
 )
 begin {
     # Load CM environment
     try {
-        $TSEnvironment = New-Object -ComObject Microsoft.SMS.TSEnvironment -ErrorAction Continue
+        $TSProgressUI = New-Object -ComObject Microsoft.SMS.TsProgressUI -ErrorAction Continue
     }
     catch [System.Exception] {
         Write-Warning -Message "Unable to construct Microsoft.SMS.TSEnvironment object. Error message at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"; exit 1
@@ -32,12 +35,19 @@ process {
         }
         # If MAC address doesn't exist in MDT DB
         elseif ([string]::IsNullOrEmpty($WebService.GetMDTComputerByMacAddress($SecretKey, $MACAddress))) {
-            # Crash TS
-            exit 1
+            # Hide progress UI, show dialog and terminate TS
+            $TSProgressUI.CloseProgressDialog()
+            $TSProgressUI.ShowMessage("Kunde inte hitta MAC-adress i MDT-databasen. `nÄr datorn registrerad i IM? `n`nInstallationen avslutas och datorn stängs av.","Fel i task squence",0)
+            Start-Process -FilePath wpeutil -ArgumentList 'shutdown' -WindowStyle Hidden
+            #exit 1
         }
         # If multiple objects with same MAC address
         elseif (($WebService.GetMDTComputerByMacAddress($SecretKey, $MACAddress) | Measure-Object).Count -gt 1) {
-            exit 1
+            # Hide progress UI, show dialog and terminate TS
+            $TSProgressUI.CloseProgressDialog()
+            $TSProgressUI.ShowMessage("Hittade flera identiska MAC-adresser i MDT-databasen. `nKontakta Advania för rensning av MDT-objekt. `n`nInstallationen avslutas och datorn stängs av.","Fel i task squence",0)
+            Start-Process -FilePath wpeutil -ArgumentList 'shutdown' -WindowStyle Hidden
+            #exit 1
         }
     }
     catch [System.Exception] {
