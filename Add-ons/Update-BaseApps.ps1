@@ -156,4 +156,4 @@ function Invoke-BuildChrome {
 # Script
 
 
-Invoke-BuildChrome -SourcePath "C:\Users\peola001\Downloads\WPPaketering\Source" -DestinationPath "C:\Users\peola001\Downloads\WPPaketering\Packages"
+#Invoke-BuildChrome -SourcePath "C:\Users\peola001\Downloads\WPPaketering\Source" -DestinationPath "C:\Users\peola001\Downloads\WPPaketering\Packages"
