@@ -1,7 +1,8 @@
 ﻿Get-CMCollection -CollectionType Device | Where-Object { ($_.MemberCount -lt 10) -and ($_.IsReferenceCollection -eq $false) -and ($_.IsBuiltIn -eq $false) -and ($_.LastChangeTime -lt (Get-Date).AddMonths(-10)) } | ForEach-Object -Begin { $RetiredCollections = New-Object -TypeName System.Collections.ArrayList } -Process {
-    Write-Host "Evaluating collection: $($_.Name)"
-
+    # Set temporary collection variable
     $TempCollection = $_
+    Write-Host "Evaluating collection: $($_.Name)"
+    
     if ([string]::IsNullOrEmpty((Get-CMDeployment | Where-Object { $_.CollectionID -eq $TempCollection.CollectionID }))) {
         
         # Export CM collection
