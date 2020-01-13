@@ -179,7 +179,7 @@ Process {
             $ConfigXML.Configuration.Log[1].Enable = [string]($false)
 
             # Options
-            $ConfigXML.Configuration.Option[5].StartRebootApplication = [string]($false)
+            $ConfigXML.Configuration.Option[6].StartRebootApplication = [string]($false)
 
             # Save XML
             $ConfigXML.Save("$(Join-Path -Path $CHDir -ChildPath ($ConfigXML.BaseURI | Split-Path -Leaf))")
@@ -191,10 +191,10 @@ Process {
 
     # Edit ConfigMgrClientHealth.ps1 if neccessary
     try {
-        $CHPSScript = Get-Content -Path "filesystem::$(Join-Path -Path $CHDir -ChildPath "ConfigMgrClientHealth.ps1")"
-        $CHScriptLine = $CHPSScript.IndexOf(($CHPSScript | Select-String -SimpleMatch '(($Webservice -eq $null)) -or ($Webservice -eq ""))'))
-        $CHPSScript[$CHScriptLine] = 'if (($SQLLogging -like "true") -and (($Webservice -eq $null) -or ($Webservice -eq ""))) {'
-        $CHPSScript | Out-File -FilePath "filesystem::$(Join-Path -Path $CHDir -ChildPath "ConfigMgrClientHealth.ps1")" -Force
+        #$CHPSScript = Get-Content -Path "filesystem::$(Join-Path -Path $CHDir -ChildPath "ConfigMgrClientHealth.ps1")"
+        #$CHScriptLine = $CHPSScript.IndexOf(($CHPSScript | Select-String -SimpleMatch '(($Webservice -eq $null)) -or ($Webservice -eq ""))'))
+        #$CHPSScript[$CHScriptLine] = 'if (($SQLLogging -like "true") -and (($Webservice -eq $null) -or ($Webservice -eq ""))) {'
+        #$CHPSScript | Out-File -FilePath "filesystem::$(Join-Path -Path $CHDir -ChildPath "ConfigMgrClientHealth.ps1")" -Force
     }
     catch [System.Exception] {
         Write-CMLogEntry -Value "Error editing ps1. Message: $($_.Exception.Message)" -Severity 2
