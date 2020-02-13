@@ -1,4 +1,4 @@
-#Requires -Modules GroupPolicy
+ #Requires -Modules GroupPolicy
 [CmdletBinding()]
 param (
     $LogsDirectory = (Join-Path -Path $env:SystemRoot -ChildPath "Temp"),
@@ -110,6 +110,7 @@ Process {
 
                 # Download and extract Client Health
                 if (!(Test-Path ("{0}\{1}" -f $LocalPath, ($DownloadURI | Split-Path -Leaf)))) {
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                     Invoke-WebRequest -Uri $DownloadURI -OutFile ("{0}\{1}" -f $LocalPath, ($DownloadURI | Split-Path -Leaf)) -ErrorAction Stop
                     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
                     [System.IO.Compression.ZipFile]::ExtractToDirectory($("{0}\{1}" -f $LocalPath, ($DownloadURI | Split-Path -Leaf)), $LocalPath)
@@ -152,6 +153,14 @@ Process {
     # Edit XML configuration version number
     if ($CHDir -match $CHShareName) {
         try {
+            # Get siteserver FQDN
+            try {
+                $SiteServer = Invoke-Command -ComputerName $SiteCode.SiteServer -Verbose -ScriptBlock {[System.Net.Dns]::GetHostByName($env:computerName)} -ErrorAction Stop | Select-Object -ExpandProperty HostName
+            }
+            catch [System.Exception] {
+                $SiteServer = $SiteCode.SiteServer
+            }
+
             $ConfigXML = New-Object -TypeName XML
             $ConfigXML.Load("$(Join-Path -Path $CHDir -ChildPath "config.xml")")
 
@@ -168,15 +177,15 @@ Process {
             # Client Install Property
             $temp = $ConfigXML.SelectNodes("//ClientInstallProperty")
             $temp[0].InnerXml = [string]("SMSSITECODE=$($SiteCode.SiteCode)")
-            $temp[1].InnerXml = [string]("MP=$($SiteCode.SiteServer)")
-            $temp[2].InnerXml = [string]("FSP=$($SiteCode.SiteServer)")
+            $temp[1].InnerXml = [string]("MP=$SiteServer")
+            $temp[2].InnerXml = [string]("FSP=$SiteServer")
             $temp[3].InnerXml = [string]("DNSSUFFIX=$(Get-WmiObject Win32_Computersystem | Select-Object -ExpandProperty Domain)")
             $temp[4].InnerXml = [string]("/Source:$(Join-Path -Path $CHDir -ChildPath "Client")")
-            $temp[5].InnerXml = [string]("/MP=$($SiteCode.SiteServer)")
+            $temp[5].InnerXml = [string]("/MP=$SiteServer")
 
             # Log
             $ConfigXML.Configuration.Log[0].Share = [string]($CHLogsDir)
-            $ConfigXML.Configuration.Log[1].Server = [string]($SiteCode.SiteServer)
+            $ConfigXML.Configuration.Log[1].Server = [string]($SiteServer)
             $ConfigXML.Configuration.Log[1].Enable = [string]($false)
 
             # Options
@@ -210,3 +219,4 @@ Process {
         Write-CMLogEntry -Value "Error importing GPO. Message: $($_.Exception.Message)" -Severity 2
     }
 }
+ 
