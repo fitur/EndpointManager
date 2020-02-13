@@ -63,6 +63,7 @@ Process {
     Write-CMLogEntry -Value "----------- Starting Client Health installation." -Severity 1
 
     # Generate download URI for Client Health
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $WebRequest = Invoke-WebRequest -Uri $URI
     $DownloadURI = "{0}{1}" -f ($URI | Split-Path -Parent), ($WebRequest.Links | Where-Object { $_.innerText -like "ConfigMgrClientHealth-*.zip" } | Select-Object -ExpandProperty data-url)
 
