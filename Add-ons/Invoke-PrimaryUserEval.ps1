@@ -187,7 +187,7 @@ Process {
         }
 
         # Emtpy variable list
-        Remove-Variable -Name ADPrimaryUser, ADComputer, CMPrimaryUsers, CMPrimaryUser, CMUserToAdd, CMUser -Force 
+        Remove-Variable -Name ADPrimaryUser, ADComputer, CMPrimaryUsers, CMPrimaryUser, CMUserToAdd, CMUser -Force -ErrorAction SilentlyContinue
     }
     # Add line to end of evaluation
     Write-CMLogEntry -Value "----------- End of primary user evaluation" -Severity 1
