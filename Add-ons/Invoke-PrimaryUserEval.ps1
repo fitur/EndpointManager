@@ -1,13 +1,13 @@
-﻿#Requires -Modules ActiveDirectory
-#Requires -Modules ConfigurationManager
+#Requires -Modules ActiveDirectory, ConfigurationManager
 [CmdletBinding()]
 param (
     $LogsDirectory = (Join-Path -Path $env:SystemRoot -ChildPath "Temp"),
     $LogName = "PrimaryUserEvaluation.log",
+    $VerboseLog = $false,
     [parameter(Mandatory = $true, HelpMessage = "Limiting Collection ID. Will use All Systems if not specified.")]
     [ValidateNotNullOrEmpty()]
     $LimColID = "SMS00001",
-    [parameter(Mandatory = $true, HelpMessage = "Remove faulty User Device Affinity relationshop. ")]
+    [parameter(Mandatory = $false, HelpMessage = "Remove faulty User Device Affinity relationshop. ")]
     [ValidateNotNullOrEmpty()]
     [ValidateSet($true,$false)]
     $RemoveFaultyUDA = $false
@@ -30,19 +30,19 @@ Begin {
         )
         # Determine log file location
         $LogFilePath = Join-Path -Path $LogsDirectory -ChildPath $FileName
-		
+        
         # Construct time stamp for log entry
         $Time = -join @((Get-Date -Format "HH:mm:ss.fff"), "+", (Get-WmiObject -Class Win32_TimeZone | Select-Object -ExpandProperty Bias))
-		
+        
         # Construct date for log entry
         $Date = (Get-Date -Format "MM-dd-yyyy")
-		
+        
         # Construct context for log entry
         $Context = $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
-		
+        
         # Construct final log entry
         $LogText = "<![LOG[$($Value)]LOG]!><time=""$($Time)"" date=""$($Date)"" component=""ClientHealthUpdate"" context=""$($Context)"" type=""$($Severity)"" thread=""$($PID)"" file="""">"
-		
+        
         # Add value to log file
         try {
             Add-Content -Value $LogText -LiteralPath $LogFilePath -ErrorAction Stop
@@ -52,7 +52,7 @@ Begin {
         }
 
         # Add 0.5 second delay
-        Start-Sleep -Milliseconds 500 -ErrorAction Stop
+        #Start-Sleep -Milliseconds 250 -ErrorAction Stop
     }
 
     # Construct customer environment
@@ -74,120 +74,120 @@ Process {
     Write-CMLogEntry -Value "Gathering required Active Directory information." -Severity 1
     try {
         $Domain = Get-ADDomain -ErrorAction Stop | Select-Object -ExpandProperty Name
-        if (![string]::IsNullOrEmpty($Domain)) {
+        if (!$null -eq ($Domain)) {
             Write-CMLogEntry -Value "Domain name set to $Domain." -Severity 1
+        }
+        else {
+            Write-CMLogEntry -Value "Domain name variable is empty. Exiting." -Severity 3; exit 1
         }
     }
     catch [System.Exception] {
-        Write-CMLogEntry -Value "Error gathering CM devices. Message: $($_.Exception.Message)" -Severity 2; exit 1
+        Write-CMLogEntry -Value "Error gathering AD domain information. Message: $($_.Exception.Message)" -Severity 2; exit 1
+    }
+
+    # Gather limiting CM collection information
+    Write-CMLogEntry -Value "Gathering limiting CM collection information" -Severity 1
+    try {
+        $CMCollectionInformation = Get-CMCollection -Id $LimColID -CollectionType Device -ErrorAction Stop
+        if ($CMCollectionInformation.MemberCount -gt 0) {
+            Write-CMLogEntry -Value "Limiting CM collection $LimColID evaluates to $($CMCollectionInformation.Name) with $($CMCollectionInformation.MemberCount) members." -Severity 1
+        }
+        else {
+            Write-CMLogEntry -Value "Limiting CM collection $LimColID evaluates to $($CMCollectionInformation.Name) but is empty. Exiting." -Severity 3; exit 1
+        }
+    }
+    catch [System.Exception] {
+        Write-CMLogEntry -Value "Error gathering limiting CM collection information. Message: $($_.Exception.Message)" -Severity 2; exit 1
     }
 
     # Gather CM devices based on collection membership
     Write-CMLogEntry -Value "Gathering CM devices in collection ID $LimColID." -Severity 1
     try {
-        $Computers = Get-CMDevice -CollectionId $LimColID -Fast -ErrorAction Stop
-        if (![string]::IsNullOrEmpty($Computers)) {
-            Write-CMLogEntry -Value "Found $($Computers.Count) devices." -Severity 1
+        $CMDevices = Get-CMDevice -CollectionId $LimColID -Fast -ErrorAction Stop
+        if (!$null -eq ($CMDevices)) {
+            Write-CMLogEntry -Value "Found $($CMDevices.Count) devices." -Severity 1
+        }
+        else {
+            Write-CMLogEntry -Value "CM Devices variable is empty. Exiting." -Severity 3; exit 1
         }
     }
     catch [System.Exception] {
-        Write-CMLogEntry -Value "Error gathering CM devices. Message: $($_.Exception.Message)" -Severity 2; exit 1
+        Write-CMLogEntry -Value "Error gathering CM devices. Message: $($_.Exception.Message)" -Severity 3; exit 1
     }
 
-    #
-    foreach ($Computer in $Computers) {
-        Write-CMLogEntry -Value "- Evaluating $($Computer.Name) with resource ID $($Computer.ResourceID) ($($Computers.IndexOf($Computer)+1)/$($Computers.Count))." -Severity 1
+    # Repeat process for each CM device
+    foreach ($CMDevice in $CMDevices) {
+        Write-CMLogEntry -Value "-- Evaluating $($CMDevice.Name) with resource ID $($CMDevice.ResourceID) ($($CMDevices.IndexOf($CMDevice)+1)/$($CMDevices.Count))." -Severity 1
         try {
 
             # Gather AD device information
-            $ADComputer = Get-ADComputer -Identity $Computer.Name -Properties ManagedBy -ErrorAction Stop
-            if (![string]::IsNullOrEmpty($ADComputer)) {
-                Write-CMLogEntry -Value "- Found Active Directory device $($ADComputer.Name) with GUID $($ADComputer.ObjectGUID)." -Severity 1
+            $ADComputer = Get-ADComputer -Identity $CMDevice.Name -Properties ManagedBy -ErrorAction Stop
+            if (!$null -eq ($ADComputer)) {
+                if ($VerboseLog -eq $true){Write-CMLogEntry -Value "---- Found Active Directory device $($ADComputer.Name) with GUID $($ADComputer.ObjectGUID)." -Severity 1}
 
                 # Gather AD user based on AD device attribute ManagedBy
                 $ADPrimaryUser = Get-ADUser -Identity $ADComputer.ManagedBy -ErrorAction Stop
-                if (![string]::IsNullOrEmpty($ADPrimaryUser)) {
-                    Write-CMLogEntry -Value "- Found Active Directory user $($ADPrimaryUser.Name) with GUID $($ADPrimaryUser.ObjectGUID)." -Severity 1
+                if (!$null -eq ($ADPrimaryUser)) {
+                    if ($VerboseLog -eq $true){Write-CMLogEntry -Value "---- Found Active Directory user $($ADPrimaryUser.Name) with GUID $($ADPrimaryUser.ObjectGUID)." -Severity 1}
 
-                    # Gather CM primary users for device
-                    $CMPrimaryUsers = Get-CMUserDeviceAffinity -DeviceId $Computer.ResourceID -ErrorAction Stop | Where-Object {$_.Types -eq 1}
-                    if (![string]::IsNullOrEmpty($CMPrimaryUser)) {
-                        Write-CMLogEntry -Value "- Found $($CMPrimaryUsers | Measure-Object | Select-Object -ExpandProperty Count) Config Manager primary user(s)." -Severity 1
+                    # Gather CM primary users for device. If empty or incorrect, add to queue
+                    $CMPrimaryUsers = Get-CMUserDeviceAffinity -DeviceId $CMDevice.ResourceID -ErrorAction Stop | Where-Object {$_.Types -eq 1}
+                    if (!$null -eq ($CMPrimaryUsers)) {
+                        if ($VerboseLog -eq $true){Write-CMLogEntry -Value "---- Found $($CMPrimaryUsers | Measure-Object | Select-Object -ExpandProperty Count) CM primary user(s):" -Severity 1}
 
                         # Separate rows for each primary user in log
                         foreach ($CMPrimaryUser in $CMPrimaryUsers) {
-                            Write-CMLogEntry -Value "-- User $($CMPrimaryUser.UniqueUserName) with GUID $($CMPrimaryUser.UniqueIdentifier.Guid)." -Severity 1
+                            if ($VerboseLog -eq $true){Write-CMLogEntry -Value "------ User $($CMPrimaryUser.UniqueUserName) with GUID $($CMPrimaryUser.UniqueIdentifier.Guid)." -Severity 1}
                         }
 
-                        # Evaluate if AD user is CM primary user
+                        # Evaluate if AD user is CM primary user, else add to queue
                         if (("$($Domain)\$($ADPrimaryUser.Name)") -in $CMPrimaryUsers.UniqueUserName) {
-                            Write-CMLogEntry -Value "-- User $($ADPrimaryUser.Name) already primary user on $($Computer.Name)." -Severity 1
+                            if ($VerboseLog -eq $true){Write-CMLogEntry -Value "---- User $($ADPrimaryUser.Name) already primary user on $($CMDevice.Name)." -Severity 1}
                         }
                         else {
-                            Write-CMLogEntry -Value "-- User $($ADPrimaryUser.Name) is not primary user on $($Computer.Name)." -Severity 2
-
-                            # Gather CM user based on AD user information
-                            $CMADUser = Get-CMUser -Name ("$($Domain)\$($ADPrimaryUser.Name)") -ErrorAction Stop
-                            if (![string]::IsNullOrEmpty($CMADUser)) {
-                                Write-CMLogEntry -Value "--- Found Config Manager user $($CMADUser.SMSID) with GUID $($CMADUser.UniqueIdentifier.Guid). Adding User affinity to device $($Computer.Name)." -Severity 1
-
-                                # Add CM user to device
-                                $Eval = Add-CMUserAffinityToDevice -DeviceId $Computer.ResourceID -UserId $CMADUser.ResourceID -ErrorAction Stop
-                            }
-                            else {
-                                Write-CMLogEntry -Value "--- Couldn't find a valid Config Manager user for Active Directory user $($ADPrimaryUser.Name)." -Severity 2
-                            }
+                            Write-CMLogEntry -Value "---- User $($ADPrimaryUser.Name) is not primary user on $($CMDevice.Name). Adding to queue." -Severity 2
+                            $CMUserToAdd = $ADPrimaryUser.Name
                         }
-
-                        # Remove faulty UDA if parameter set to true
-                        if ($RemoveFaultyUDA) {
-                            Write-CMLogEntry -Value "-- Script parameter RemoveFaultyUDA set to true." -Severity 1
-
-                            # Gather CM user based on AD user information
-                            $CMADUser = Get-CMUser -Name ("$($Domain)\$($ADPrimaryUser.Name)") -ErrorAction Stop
-                            if (![string]::IsNullOrEmpty($CMADUser)) {
-
-                                # Remove all faulty primary users unless set as ManagedBy on AD device
-                                $CMPrimaryUsers | Where-Object {$_.UniqueUserName -ne $CMADUser.SMSID} | ForEach-Object {
-                                    Write-CMLogEntry -Value "--- Removing $($_.UniqueUserName) from $($Computer.Name)" -Severity 1
-
-                                    # Run removal command
-                                    $Eval = Remove-CMUserAffinityFromDevice -DeviceName $_.ResourceName -UserName $_.UniqueUserName -Force -ErrorAction Stop
-                                }
-                            }
-                            else {
-                                Write-CMLogEntry -Value "--- Couldn't find a valid Config Manager user for Active Directory user $($ADPrimaryUser.Name)." -Severity 2
-                            }
-                        }
-
                     }
                     else {
-                        Write-CMLogEntry -Value "- Couldn't find Config Manager user relationship for object $($Computer.Name). Adding User affinity to device $($Computer.Name)." -Severity 1
+                        Write-CMLogEntry -Value "---- Couldn't find CM user relation for device $($CMDevice.Name). Adding to queue." -Severity 2
+                        $CMUserToAdd = $ADPrimaryUser.Name
+                    }
 
-                        # Gather CM user based on AD user information
-                        $CMADUser = Get-CMUser -Name ("$($Domain)\$($ADPrimaryUser.Name)") -ErrorAction Stop
-                        if (![string]::IsNullOrEmpty($CMADUser)) {
-                            Write-CMLogEntry -Value "-- Found Config Manager user $($CMADUser.SMSID) with GUID $($CMADUser.UniqueIdentifier.Guid). Adding User affinity to device $($Computer.Name)." -Severity 1
+                    # Process queue if not empty
+                    if (!$null -eq $CMUserToAdd) {
+                        Write-CMLogEntry -Value "------ Processing queue for $($CMDevice.Name)." -Severity 1
 
-                            # Run addition of UDA
-                            $Eval = Add-CMUserAffinityToDevice -DeviceId $Computer.ResourceID -UserId $CMADUser.ResourceID -ErrorAction Stop
+                        # Gather CM user object
+                        $CMUser = Get-CMUser -Name ("$($Domain)\$CMUserToAdd") -ErrorAction Stop
+                        if (!$null -eq $CMUser) {
+                            Write-CMLogEntry -Value "------ Adding $($CMUser.SMSID) to $($CMDevice.Name)" -Severity 1
+                            try {
+                                Add-CMUserAffinityToDevice -DeviceId $CMDevice.ResourceID -UserId $CMUser.ResourceID -ErrorAction Stop
+                            }
+                            catch [System.Exception] {
+                                Write-CMLogEntry -Value "------ Failed to add UDA. Message: $($_.Exception.Message)" -Severity 3
+                            }
                         }
                         else {
-                            Write-CMLogEntry -Value "-- Couldn't find a valid Config Manager user for Active Directory user $($ADPrimaryUser.Name)." -Severity 2
+                            Write-CMLogEntry -Value "------ Failed to find valid CM user for $CMUserToAdd." -Severity 2
                         }
                     }
                 }
                 else {
-                    Write-CMLogEntry -Value "- Couldn't find Active Directory user for object $($ADComputer.Name)." -Severity 1
+                    Write-CMLogEntry -Value "---- Couldn't find Active Directory user for object $($ADComputer.Name)." -Severity 1
                 }
             }
             else {
-                Write-CMLogEntry -Value "- Couldn't find Active Directory device for object $Computer." -Severity 1
+                Write-CMLogEntry -Value "---- Couldn't find a valid AD device for object $($CMDevice.Name)." -Severity 2
             }
         }
         catch [System.Exception] {
-            Write-CMLogEntry -Value "Error gathering AD device information for object $($Computer.Name) ($($Computers.IndexOf($Computer)+1)/$($Computers.Count)). Message: $($_.Exception.Message)" -Severity 2
+            Write-CMLogEntry -Value "---- Error gathering device information for object $($CMDevice.Name) ($($CMDevices.IndexOf($CMDevice)+1)/$($CMDevices.Count)). Message: $($_.Exception.Message)" -Severity 2
         }
+
+        # Emtpy variable list
+        Remove-Variable -Name ADPrimaryUser, ADComputer, CMPrimaryUsers, CMPrimaryUser, CMUserToAdd, CMUser -Force 
     }
     # Add line to end of evaluation
     Write-CMLogEntry -Value "----------- End of primary user evaluation" -Severity 1
