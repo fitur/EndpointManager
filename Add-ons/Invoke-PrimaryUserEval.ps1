@@ -74,7 +74,7 @@ Process {
     Write-CMLogEntry -Value "Gathering required Active Directory information." -Severity 1
     try {
         $Domain = Get-ADDomain -ErrorAction Stop | Select-Object -ExpandProperty Name
-        if (!$null -eq ($Domain)) {
+        if ($null -ne ($Domain)) {
             Write-CMLogEntry -Value "Domain name set to $Domain." -Severity 1
         }
         else {
@@ -104,7 +104,7 @@ Process {
     Write-CMLogEntry -Value "Gathering CM devices in collection ID $LimColID." -Severity 1
     try {
         $CMDevices = Get-CMDevice -CollectionId $LimColID -Fast -ErrorAction Stop
-        if (!$null -eq ($CMDevices)) {
+        if ($null -ne ($CMDevices)) {
             Write-CMLogEntry -Value "Found $($CMDevices.Count) devices." -Severity 1
         }
         else {
@@ -122,17 +122,17 @@ Process {
 
             # Gather AD device information
             $ADComputer = Get-ADComputer -Identity $CMDevice.Name -Properties ManagedBy -ErrorAction Stop
-            if (!$null -eq ($ADComputer)) {
+            if ($null -ne ($ADComputer)) {
                 if ($VerboseLog -eq $true){Write-CMLogEntry -Value "---- Found Active Directory device $($ADComputer.Name) with GUID $($ADComputer.ObjectGUID)." -Severity 1}
 
                 # Gather AD user based on AD device attribute ManagedBy
                 $ADPrimaryUser = Get-ADUser -Identity $ADComputer.ManagedBy -ErrorAction Stop
-                if (!$null -eq ($ADPrimaryUser)) {
+                if ($null -ne ($ADPrimaryUser)) {
                     if ($VerboseLog -eq $true){Write-CMLogEntry -Value "---- Found Active Directory user $($ADPrimaryUser.Name) with GUID $($ADPrimaryUser.ObjectGUID)." -Severity 1}
 
                     # Gather CM primary users for device. If empty or incorrect, add to queue
                     $CMPrimaryUsers = Get-CMUserDeviceAffinity -DeviceId $CMDevice.ResourceID -ErrorAction Stop | Where-Object {$_.Types -eq 1}
-                    if (!$null -eq ($CMPrimaryUsers)) {
+                    if ($null -ne ($CMPrimaryUsers)) {
                         if ($VerboseLog -eq $true){Write-CMLogEntry -Value "---- Found $($CMPrimaryUsers | Measure-Object | Select-Object -ExpandProperty Count) CM primary user(s):" -Severity 1}
 
                         # Separate rows for each primary user in log
@@ -155,12 +155,12 @@ Process {
                     }
 
                     # Process queue if not empty
-                    if (!$null -eq $CMUserToAdd) {
+                    if ($null -ne $CMUserToAdd) {
                         Write-CMLogEntry -Value "------ Processing queue for $($CMDevice.Name)." -Severity 1
 
                         # Gather CM user object
                         $CMUser = Get-CMUser -Name ("$($Domain)\$CMUserToAdd") -ErrorAction Stop
-                        if (!$null -eq $CMUser) {
+                        if ($null -ne $CMUser) {
                             Write-CMLogEntry -Value "------ Adding $($CMUser.SMSID) to $($CMDevice.Name)" -Severity 1
                             try {
                                 Add-CMUserAffinityToDevice -DeviceId $CMDevice.ResourceID -UserId $CMUser.ResourceID -ErrorAction Stop
