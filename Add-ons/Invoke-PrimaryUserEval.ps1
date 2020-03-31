@@ -1,4 +1,4 @@
-#Requires -Modules ActiveDirectory, ConfigurationManager
+#Requires -Modules ActiveDirectory #, ConfigurationManager
 [CmdletBinding()]
 param (
     $LogsDirectory = (Join-Path -Path $env:SystemRoot -ChildPath "Temp"),
@@ -7,10 +7,10 @@ param (
     [parameter(Mandatory = $true, HelpMessage = "Limiting Collection ID. Will use All Systems if not specified.")]
     [ValidateNotNullOrEmpty()]
     $LimColID = "SMS00001",
-    [parameter(Mandatory = $false, HelpMessage = "Remove faulty User Device Affinity relationshop. ")]
+    [parameter(Mandatory = $false, HelpMessage = "Dry run instead of actual modification.")]
     [ValidateNotNullOrEmpty()]
     [ValidateSet($true,$false)]
-    $RemoveFaultyUDA = $false
+    $DryRun = $false
 
 )
 Begin {
@@ -63,7 +63,16 @@ Begin {
         Set-location $SiteCode":" 
     }
     catch {
-        Write-CMLogEntry -Value "Error loading customer specific settings. Message: $($_.Exception.Message)" -Severity 2
+        Write-CMLogEntry -Value "Error loading customer specific settings. Message: $($_.Exception.Message)" -Severity 2; exit 1
+    }
+
+    # Create empty array lists
+    try {
+        $AdditionQueue = New-Object -TypeName System.Collections.ArrayList -ErrorAction Stop
+        $FailedAdditions = New-Object -TypeName System.Collections.ArrayList -ErrorAction Stop
+    }
+    catch [System.Exception] {
+        Write-CMLogEntry -Value "Failed to create array lists. Message: $($_.Exception.Message)" -Severity 2; exit 1
     }
 }
 Process {
@@ -146,32 +155,18 @@ Process {
                         }
                         else {
                             Write-CMLogEntry -Value "---- User $($ADPrimaryUser.Name) is not primary user on $($CMDevice.Name). Adding to queue." -Severity 2
-                            $CMUserToAdd = $ADPrimaryUser.Name
+                            [void]$AdditionQueue.Add([PSCustomObject]@{
+                                Device = $CMDevice.Name
+                                User = ("{0}\{1}" -f $Domain, $ADPrimaryUser.Name)
+                            })
                         }
                     }
                     else {
                         Write-CMLogEntry -Value "---- Couldn't find CM user relation for device $($CMDevice.Name). Adding to queue." -Severity 2
-                        $CMUserToAdd = $ADPrimaryUser.Name
-                    }
-
-                    # Process queue if not empty
-                    if ($null -ne $CMUserToAdd) {
-                        Write-CMLogEntry -Value "------ Processing queue for $($CMDevice.Name)." -Severity 1
-
-                        # Gather CM user object
-                        $CMUser = Get-CMUser -Name ("$($Domain)\$CMUserToAdd") -ErrorAction Stop
-                        if ($null -ne $CMUser) {
-                            Write-CMLogEntry -Value "------ Adding $($CMUser.SMSID) to $($CMDevice.Name)" -Severity 1
-                            try {
-                                Add-CMUserAffinityToDevice -DeviceId $CMDevice.ResourceID -UserId $CMUser.ResourceID -ErrorAction Stop
-                            }
-                            catch [System.Exception] {
-                                Write-CMLogEntry -Value "------ Failed to add UDA. Message: $($_.Exception.Message)" -Severity 3
-                            }
-                        }
-                        else {
-                            Write-CMLogEntry -Value "------ Failed to find valid CM user for $CMUserToAdd." -Severity 2
-                        }
+                        [void]$AdditionQueue.Add([PSCustomObject]@{
+                            Device = $CMDevice.Name
+                            User = ("{0}\{1}" -f $Domain, $ADPrimaryUser.Name)
+                        })
                     }
                 }
                 else {
@@ -185,10 +180,51 @@ Process {
         catch [System.Exception] {
             Write-CMLogEntry -Value "---- Error gathering device information for object $($CMDevice.Name) ($($CMDevices.IndexOf($CMDevice)+1)/$($CMDevices.Count)). Message: $($_.Exception.Message)" -Severity 2
         }
-
+        
         # Emtpy variable list
         Remove-Variable -Name ADPrimaryUser, ADComputer, CMPrimaryUsers, CMPrimaryUser, CMUserToAdd, CMUser -Force -ErrorAction SilentlyContinue
     }
+
+    # Process queue if not empty
+    foreach ($DeviceToAdd in $AdditionQueue) {
+        Write-CMLogEntry -Value "-- Processing queue for $($CMDevice.Name) ($($AdditionQueue.IndexOf($DeviceToAdd)+1)/$($AdditionQueue.Count))." -Severity 1
+
+        # Gather CM objects
+        $CMUser = Get-CMUser -Name $DeviceToAdd.User -ErrorAction Stop
+        $CMDevice = Get-CMDevice -Name $DeviceToAdd.Device -Fast -ErrorAction Stop 
+        if ($null -ne $CMUser) {
+            Write-CMLogEntry -Value "---- Adding $($CMUser.SMSID) to $($CMDevice.Name)" -Severity 1
+            try {
+                Add-CMUserAffinityToDevice -DeviceId $CMDevice.ResourceID -UserId $CMUser.ResourceID -ErrorAction Stop -WhatIf:$DryRun
+            }
+            catch [System.Exception] {
+                # Add failed addition attempt to array list
+                Write-CMLogEntry -Value "------ Failed to add UDA. Message: $($_.Exception.Message)" -Severity 3
+                [void]$FailedAdditions.Add([PSCustomObject]@{
+                    Date =  Get-Date -Format G
+                    Device = $CMDevice.Name
+                    User = $DeviceToAdd.User
+                    Error = $_.Exception.Message
+                })
+            }
+        }
+        else {
+            # Add failed addition attempt to array list
+            Write-CMLogEntry -Value "------ Failed to find valid CM user for $($DeviceToAdd.User)." -Severity 2
+            [void]$FailedAdditions.Add([PSCustomObject]@{
+                Date =  Get-Date -Format G
+                Device = $CMDevice.Name
+                User = $DeviceToAdd.User
+                Error = "User doesn't exist in CM."
+            })
+        }
+    }
+
+    # Dump Failed Additions array list to file
+    if ($null -ne $FailedAdditions) {
+        $FailedAdditions | Export-Csv -Path ("{0}\{1}.csv" -f $LogsDirectory, "PrimaryUserFailedAdditions") -Force -NoTypeInformation -Append -ErrorAction SilentlyContinue
+    }
+
     # Add line to end of evaluation
     Write-CMLogEntry -Value "----------- End of primary user evaluation" -Severity 1
 }
