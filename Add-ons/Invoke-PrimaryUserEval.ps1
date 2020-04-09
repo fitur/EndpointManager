@@ -29,7 +29,7 @@ Begin {
             [string]$FileName = $LogName
         )
         # Determine log file location
-        $LogFilePath = Join-Path -Path $LogsDirectory -ChildPath $FileName
+        $LogFilePath =  ("filesystem::{0}" -f (Join-Path -Path $LogsDirectory -ChildPath $FileName))
         
         # Construct time stamp for log entry
         $Time = -join @((Get-Date -Format "HH:mm:ss.fff"), "+", (Get-WmiObject -Class Win32_TimeZone | Select-Object -ExpandProperty Bias))
@@ -57,10 +57,10 @@ Begin {
 
     # Construct customer environment
     try {
-        Import-Module ($Env:SMS_ADMIN_UI_PATH.Substring(0, $Env:SMS_ADMIN_UI_PATH.Length - 5) + '\ConfigurationManager.psd1')
-        Import-Module GroupPolicy
-        $SiteCode = Get-PSDrive -PSProvider CMSITE 
-        Set-location $SiteCode":" 
+        Import-Module ($Env:SMS_ADMIN_UI_PATH.Substring(0, $Env:SMS_ADMIN_UI_PATH.Length - 5) + '\ConfigurationManager.psd1') -ErrorAction Stop
+        Import-Module GroupPolicy -ErrorAction Stop
+        $SiteCode = Get-PSDrive -PSProvider CMSITE -ErrorAction Stop
+        Set-location $SiteCode":" -ErrorAction Stop
     }
     catch {
         Write-CMLogEntry -Value "Error loading customer specific settings. Message: $($_.Exception.Message)" -Severity 2; exit 1
@@ -195,7 +195,9 @@ Process {
         if ($null -ne $CMUser) {
             Write-CMLogEntry -Value "---- Adding $($CMUser.SMSID) to $($CMDevice.Name)" -Severity 1
             try {
-                Add-CMUserAffinityToDevice -DeviceId $CMDevice.ResourceID -UserId $CMUser.ResourceID -ErrorAction Stop -WhatIf:$DryRun
+                if ($DryRun -ne $true) {
+                    Add-CMUserAffinityToDevice -DeviceId $CMDevice.ResourceID -UserId $CMUser.ResourceID -ErrorAction Stop -WhatIf:$DryRun
+                }
             }
             catch [System.Exception] {
                 # Add failed addition attempt to array list
