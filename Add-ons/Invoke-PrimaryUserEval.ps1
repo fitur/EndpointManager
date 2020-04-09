@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param (
     $LogsDirectory = (Join-Path -Path $env:SystemRoot -ChildPath "Temp"),
-    $LogName = "PrimaryUserEvaluation.log",
+    $LogName = "PrimaryUserEvaluation",
     $VerboseLog = $false,
     [parameter(Mandatory = $true, HelpMessage = "Limiting Collection ID. Will use All Systems if not specified.")]
     [ValidateNotNullOrEmpty()]
@@ -26,7 +26,7 @@ Begin {
             [string]$Severity,
             [parameter(Mandatory = $false, HelpMessage = "Name of the log file that the entry will written to.")]
             [ValidateNotNullOrEmpty()]
-            [string]$FileName = $LogName
+            [string]$FileName = "$LogName-$(Get-Date -Format yyyy-MM).log"
         )
         # Determine log file location
         $LogFilePath =  ("filesystem::{0}" -f (Join-Path -Path $LogsDirectory -ChildPath $FileName))
