@@ -1,4 +1,4 @@
-#Requires -Modules ActiveDirectory #, ConfigurationManager
+#Requires -Modules ActiveDirectory
 [CmdletBinding()]
 param (
     $LogsDirectory = (Join-Path -Path $env:SystemRoot -ChildPath "Temp"),
@@ -224,7 +224,7 @@ Process {
 
     # Dump Failed Additions array list to file
     if ($null -ne $FailedAdditions) {
-        $FailedAdditions | Export-Csv -Path ("{0}\{1}.csv" -f $LogsDirectory, "PrimaryUserFailedAdditions") -Force -NoTypeInformation -Append -ErrorAction SilentlyContinue
+        $FailedAdditions | Export-Csv -Path ("filesystem::{0}\{1}.csv" -f $LogsDirectory, "PrimaryUserFailedAdditions") -Force -NoTypeInformation -Append -ErrorAction SilentlyContinue
     }
 
     # Add line to end of evaluation
