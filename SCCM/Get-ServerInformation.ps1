@@ -36,6 +36,8 @@ $OSInfo | ForEach-Object {
 # Hämta processorinformation
 $temp = [PSCustomObject]@{
     Type = "CPU"
-    Name = "$($CPUInfo | Select-Object -First 1 -ExpandProperty Name) ($($CPUInfo | Measure-Object | Select-Object -ExpandProperty Count) kärnor)"
+    Name = "$($CPUInfo | Select-Object -First 1 -ExpandProperty Name) ($($CPUInfo | Measure-Object -Sum NumberOfCores | Select-Object -ExpandProperty Sum) kärnor)"
 }
 [void]$InfoArray.Add($temp)
+
+New-Object -typen
