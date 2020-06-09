@@ -10,7 +10,7 @@
     }
 }
 process {
-    tru {
+    try {
         # Get Windows 10 release history from Microsoft
         $W10RelHistoryURI = "https://winreleaseinfoprod.blob.core.windows.net/winreleaseinfoprod/en-US.html"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
