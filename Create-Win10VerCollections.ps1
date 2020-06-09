@@ -1,4 +1,4 @@
-begin {
+ begin {
     try {
         # Load CM module
         Import-module ($Env:SMS_ADMIN_UI_PATH.Substring(0,$Env:SMS_ADMIN_UI_PATH.Length-5) + '\ConfigurationManager.psd1') -ErrorAction Stop
@@ -48,7 +48,7 @@ process {
 
     # Create device collections in CM
     foreach ($W10Version in $W10Versions) {
-        $Query = "select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client from SMS_R_System inner join SMS_G_System_OPERATING_SYSTEM on SMS_G_System_OPERATING_SYSTEM.ResourceId = SMS_R_System.ResourceId where SMS_G_System_OPERATING_SYSTEM.Name like 'Microsoft Windows 10 Enterprise%' and SMS_G_System_OPERATING_SYSTEM.Version = '$($W10Version.OSBuild)'"
+        $Query = "select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client from SMS_R_System inner join SMS_G_System_OPERATING_SYSTEM on SMS_G_System_OPERATING_SYSTEM.ResourceId = SMS_R_System.ResourceId where SMS_G_System_OPERATING_SYSTEM.Name like 'Microsoft Windows 10 Enterprise%' and SMS_G_System_OPERATING_SYSTEM.Version = '$(([System.version]$W10Version.OSBuild).Major)'"
         $Collection = New-CMCollection -CollectionType Device -Comment "End-of-life: $($W10Version.EOL)" -LimitingCollectionId "SMS00001" -Name "All Windows 10 - $($W10Version.Version)" -RefreshType Periodic -RefreshSchedule (New-CMSchedule -Start (Get-Date).Date -RecurInterval Days -RecurCount 1)
         Add-CMDeviceCollectionQueryMembershipRule -CollectionId $Collection.CollectionID -RuleName "Windows 10 version" -QueryExpression $Query
         Remove-Variable -Name Query -ErrorAction SilentlyContinue
