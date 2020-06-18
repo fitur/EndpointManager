@@ -24,11 +24,19 @@ process {
     Get-ADGroupMember -Identity $ADGroup | ForEach-Object {
         Write-Host "Found $($_.name)"
 
-        $CMComputers = Get-CMUserDeviceAffinity -UserName "KATALOG\$($_.Name)" | Where-Object {(($_.Sources -eq 4) -or ($_.Sources -eq 7)) -and ($_.Types -eq 1) -and ($_.UniqueUserName -match $_.Name)}
+        #$CMComputers = Get-CMUserDeviceAffinity -UserName "KATALOG\$($_.Name)" | Where-Object {(($_.Sources -eq 4) -or ($_.Sources -eq 7)) -and ($_.Types -eq 1) -and ($_.UniqueUserName -match $_.Name)}
+        $CMComputers = Get-CMUserDeviceAffinity -UserName "KATALOG\$($_.Name)"
         Write-Host "$($_.name) has got $($CMComputers | Measure-Object | Select-Object -ExpandProperty Count) computer(s): $($CMComputers.ResourceName)"
 
-        foreach ($CMComputer in $CMComputers) {
-            $ws.AddCMComputerToCollection($SecretKey, $CMComputer.ResourceName, $CollectionID)
+        if (($CMComputers | Measure-Object).Count -eq 1) {
+            #$ws.AddCMComputerToCollection($SecretKey, $CMComputer.ResourceName, $CollectionID)
+            Write-Host "Adding primnary computer $($CMComputers.ResourceName)"
+        }
+        else {
+            foreach ($CMComputer in ($CMComputers | Where-Object {(($_.Sources -eq 4) -or ($_.Sources -eq 7)) -and ($_.Types -eq 1) -and ($_.UniqueUserName -match $_.Name)})) {
+                #$ws.AddCMComputerToCollection($SecretKey, $CMComputer.ResourceName, $CollectionID)
+                Write-Host "Adding primary computer $($CMComputer.ResourceName)"
+            }
         }
 
         Remove-Variable CMComputer* -ErrorAction SilentlyContinue
