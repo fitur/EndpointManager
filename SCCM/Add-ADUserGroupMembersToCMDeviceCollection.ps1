@@ -1,8 +1,8 @@
-$URI = "http://sccm07.katalog.local/ConfigMgrWebService/ConfigMgr.asmx"
-$SecretKey = "5b48f57b-0d36-43dd-a40b-8133a11a7d8d"
+$URI = "*"
+$SecretKey = "*"
 $WS = New-WebServiceProxy -Uri $URI
-$CollectionID = "PS100466"
-$ADGroup = "SF"
+$CollectionID = "*"
+$ADGroup = "*"
 
 Get-ADGroupMember -Identity $ADGroup | ForEach-Object {
     Write-Host "Found $($_.name)"
