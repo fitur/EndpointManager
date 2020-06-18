@@ -16,10 +16,10 @@ begin {
     $URI = "http://{0}{1}/{2}" -f $Server, $ConfigMgrwebServicePath, "ConfigMgr.asmx"
 }
 process {
-    $SecretKey = "5b48f57b-0d36-43dd-a40b-8133a11a7d8d"
+    $SecretKey = "*"
     $WS = New-WebServiceProxy -Uri $URI
-    $CollectionID = "PS100466"
-    $ADGroup = "SF"
+    $CollectionID = "PS100467"
+    $ADGroup = "SLF_EoV_IT"
 
     Get-ADGroupMember -Identity $ADGroup | ForEach-Object {
         Write-Host "Found $($_.name)"
@@ -29,13 +29,15 @@ process {
         Write-Host "$($_.name) has got $($CMComputers | Measure-Object | Select-Object -ExpandProperty Count) computer(s): $($CMComputers.ResourceName)"
 
         if (($CMComputers | Measure-Object).Count -eq 1) {
-            #$ws.AddCMComputerToCollection($SecretKey, $CMComputer.ResourceName, $CollectionID)
-            Write-Host "Adding primnary computer $($CMComputers.ResourceName)"
+            foreach ($CMComputer in ($CMComputers | Where-Object {($_.Types -eq 1) -and ($_.UniqueUserName -match $_.Name)})) {
+                Write-Host "Adding primary computer $($CMComputer.ResourceName)"
+                $ws.AddCMComputerToCollection($SecretKey, $CMComputer.ResourceName, $CollectionID)
+            }
         }
         else {
             foreach ($CMComputer in ($CMComputers | Where-Object {(($_.Sources -eq 4) -or ($_.Sources -eq 7)) -and ($_.Types -eq 1) -and ($_.UniqueUserName -match $_.Name)})) {
-                #$ws.AddCMComputerToCollection($SecretKey, $CMComputer.ResourceName, $CollectionID)
                 Write-Host "Adding primary computer $($CMComputer.ResourceName)"
+                $ws.AddCMComputerToCollection($SecretKey, $CMComputer.ResourceName, $CollectionID)
             }
         }
 
