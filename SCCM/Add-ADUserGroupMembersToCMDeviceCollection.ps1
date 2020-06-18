@@ -16,10 +16,15 @@ begin {
     $URI = "http://{0}{1}/{2}" -f $Server, $ConfigMgrwebServicePath, "ConfigMgr.asmx"
 }
 process {
-    $SecretKey = "*"
+    $SecretKey = "5b48f57b-0d36-43dd-a40b-8133a11a7d8d"
     $WS = New-WebServiceProxy -Uri $URI
-    $CollectionID = "PS100467"
-    $ADGroup = "SLF_EoV_IT"
+    $ADGroup = "SF"
+
+    $CollectionName = "$ADGroup - DM"
+    if ($null -eq ($Collection = Get-CMDeviceCollection -Name $CollectionName -ErrorAction SilentlyContinue)) {
+        $Collection = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionId SMS00001 -RefreshType None -ErrorAction Stop
+    }
+    $CollectionID = $Collection.CollectionID
 
     Get-ADGroupMember -Identity $ADGroup | ForEach-Object {
         Write-Host "Found $($_.name)"
