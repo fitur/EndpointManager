@@ -1,15 +1,24 @@
-function Import-CMEnvironment {
-    try {
-        Import-Module ($Env:SMS_ADMIN_UI_PATH.Substring(0, $Env:SMS_ADMIN_UI_PATH.Length - 5) + '\ConfigurationManager.psd1') -ErrorAction Stop
-        $SiteCode = Get-PSDrive -PSProvider CMSITE -ErrorAction Stop
-        #Set-location $SiteCode":" -ErrorAction Stop
-    }
-    catch [System.Exception] {
-        Write-Warning -Message $_.Exception.Message
-    }
+try {
+    Import-Module ($Env:SMS_ADMIN_UI_PATH.Substring(0, $Env:SMS_ADMIN_UI_PATH.Length - 5) + '\ConfigurationManager.psd1') -ErrorAction Stop
+    $SiteCode = Get-PSDrive -PSProvider CMSITE -ErrorAction Stop
+    #Set-location $SiteCode":" -ErrorAction Stop
+}
+catch [System.Exception] {
+    Write-Warning -Message $_.Exception.Message
 }
 
-$Query = "select distinct SMS_R_System.Name, SMS_G_System_SYSTEM_CONSOLE_USAGE.TopConsoleUser, SMS_G_System_COMPUTER_SYSTEM.UserName, SMS_G_System_COMPUTER_SYSTEM.Manufacturer, SMS_G_System_COMPUTER_SYSTEM.Model, SMS_G_System_PC_BIOS.SerialNumber, SMS_G_System_OPERATING_SYSTEM.Caption, SMS_G_System_OPERATING_SYSTEM.BuildNumber, SMS_G_System_X86_PC_MEMORY.TotalPhysicalMemory, SMS_R_System.LastLogonTimestamp from  SMS_R_System left join SMS_G_System_SYSTEM_CONSOLE_USAGE on SMS_G_System_SYSTEM_CONSOLE_USAGE.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_COMPUTER_SYSTEM on SMS_G_System_COMPUTER_SYSTEM.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_PC_BIOS on SMS_G_System_PC_BIOS.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_OPERATING_SYSTEM on SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_X86_PC_MEMORY on SMS_G_System_X86_PC_MEMORY.ResourceID = SMS_R_System.ResourceId where SMS_R_System.Name in (select Name from SMS_R_System where ((DATEDIFF(day, SMS_R_SYSTEM.AgentTime, getdate()) <=60) and AgentName = 'SMS_AD_SYSTEM_DISCOVERY_AGENT')) and SMS_R_System.Name in (select Name from SMS_R_System where ((DATEDIFF(day, SMS_R_SYSTEM.AgentTime, getdate()) <=60) and AgentName = 'Heartbeat Discovery'))"
+$Query = @"
+select distinct SMS_R_System.Name, SMS_R_System.IPAddresses, SMS_R_System.SystemOUName, SMS_CombinedDeviceResources.CurrentLogonUser, SMS_G_System_SYSTEM_CONSOLE_USAGE.TopConsoleUser, SMS_G_System_COMPUTER_SYSTEM.UserName, SMS_G_System_COMPUTER_SYSTEM.Manufacturer, SMS_G_System_COMPUTER_SYSTEM.Model, SMS_G_System_PC_BIOS.SerialNumber, SMS_G_System_OPERATING_SYSTEM.Caption, SMS_G_System_OPERATING_SYSTEM.BuildNumber, SMS_G_System_X86_PC_MEMORY.TotalPhysicalMemory, SMS_R_System.LastLogonTimestamp
+from SMS_R_System
+left join SMS_CombinedDeviceResources on SMS_CombinedDeviceResources.Name = SMS_R_System.Name
+left join SMS_G_System_SYSTEM_CONSOLE_USAGE on SMS_G_System_SYSTEM_CONSOLE_USAGE.ResourceID = SMS_R_System.ResourceId
+left join SMS_G_System_COMPUTER_SYSTEM on SMS_G_System_COMPUTER_SYSTEM.ResourceID = SMS_R_System.ResourceId
+left join SMS_G_System_PC_BIOS on SMS_G_System_PC_BIOS.ResourceID = SMS_R_System.ResourceId
+left join SMS_G_System_OPERATING_SYSTEM on SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+left join SMS_G_System_X86_PC_MEMORY on SMS_G_System_X86_PC_MEMORY.ResourceID = SMS_R_System.ResourceId
+where SMS_R_System.Name in (select Name from SMS_R_System where ((DATEDIFF(day, SMS_R_SYSTEM.AgentTime, getdate()) <=60) and AgentName = 'SMS_AD_SYSTEM_DISCOVERY_AGENT')) and SMS_R_System.Name in (select Name from SMS_R_System where ((DATEDIFF(day, SMS_R_SYSTEM.AgentTime, getdate()) <=60) and AgentName = 'Heartbeat Discovery'))
+"@
+
 $Devices = Get-WmiObject -ComputerName $SiteCode.SiteServer -Namespace "root\SMS\site_$($SiteCode)" -Query $Query
 
 # Placeholder
@@ -19,13 +28,13 @@ foreach ($Device in $Devices) {
     if (![string]::IsNullOrEmpty($Device.SMS_G_System_SYSTEM_CONSOLE_USAGE.TopConsoleUser)) {
         $TempADPrimaryUserObject = Get-ADUser -Identity ($Device.SMS_G_System_SYSTEM_CONSOLE_USAGE.TopConsoleUser | Split-Path -Leaf) -Properties DisplayName, Office, Department, Description
     }
-    if (![string]::IsNullOrEmpty($Device.SMS_G_System_COMPUTER_SYSTEM.UserName)) {
-        $TempADCurrentUserObject = Get-ADUser -Identity ($Device.SMS_G_System_COMPUTER_SYSTEM.UserName | Split-Path -Leaf) -Properties DisplayName, Office, Department, Description
+    if (![string]::IsNullOrEmpty($Device.SMS_CombinedDeviceResources.CurrentLogonUser)) {
+        $TempADCurrentUserObject = Get-ADUser -Identity ($Device.SMS_CombinedDeviceResources.CurrentLogonUser | Split-Path -Leaf) -Properties DisplayName, Office, Department, Description
     }
 
     $temp = New-Object -TypeName PSCustomObject
     $temp | Add-Member -MemberType NoteProperty -Name "Computer" -Value $Device.SMS_R_System.Name
-    #$temp | Add-Member -MemberType NoteProperty -Name "Computer OU" -Value ($Device.SystemOUName | Select-Object -Last 1)
+    $temp | Add-Member -MemberType NoteProperty -Name "Computer OU" -Value ($Device.SMS_R_System.SystemOUName | Select-Object -Last 1)
     #$temp | Add-Member -MemberType NoteProperty -Name "IPv4 Address" -Value $TempADDeviceObject.IPv4Address
 
     if (![string]::IsNullOrEmpty($Device.SMS_G_System_SYSTEM_CONSOLE_USAGE.TopConsoleUser)) {
@@ -57,4 +66,5 @@ foreach ($Device in $Devices) {
     $temp | Add-Member -MemberType NoteProperty -Name "Serial Number" -Value $Device.SMS_G_System_PC_BIOS.SerialNumber
 
     $CMDeviceInfo.Add($temp)
-}
+    Remove-Variable temp
+} 
