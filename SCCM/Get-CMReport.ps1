@@ -26,7 +26,7 @@ Begin {
 }
 Process {
     Write-Host "Hämtar SCCM- och AD-data från $($SiteCode.SiteServer)"
-    $Query = "select distinct SMS_R_System.Name, SMS_R_User.DisplayName, SMS_R_System.IPAddresses, SMS_R_System.SystemOUName, SMS_CombinedDeviceResources.CurrentLogonUser, SMS_G_System_SYSTEM_CONSOLE_USAGE.TopConsoleUser, SMS_G_System_COMPUTER_SYSTEM.UserName, SMS_G_System_COMPUTER_SYSTEM.Manufacturer, SMS_G_System_COMPUTER_SYSTEM.Model, SMS_G_System_PC_BIOS.SerialNumber, SMS_G_System_OPERATING_SYSTEM.Caption, SMS_G_System_OPERATING_SYSTEM.BuildNumber, SMS_G_System_X86_PC_MEMORY.TotalPhysicalMemory, SMS_R_System.LastLogonTimestamp from SMS_R_System left join SMS_CombinedDeviceResources on SMS_CombinedDeviceResources.Name = SMS_R_System.Name left join SMS_G_System_SYSTEM_CONSOLE_USAGE on SMS_G_System_SYSTEM_CONSOLE_USAGE.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_COMPUTER_SYSTEM on SMS_G_System_COMPUTER_SYSTEM.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_PC_BIOS on SMS_G_System_PC_BIOS.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_OPERATING_SYSTEM on SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_X86_PC_MEMORY on SMS_G_System_X86_PC_MEMORY.ResourceID = SMS_R_System.ResourceId left join SMS_R_User on SMS_R_User.UniqueUserName = SMS_G_System_SYSTEM_CONSOLE_USAGE.TopConsoleUser where SMS_R_System.Name in (select Name from SMS_R_System where ((DATEDIFF(day, SMS_R_SYSTEM.AgentTime, getdate()) <=60) and AgentName = 'SMS_AD_SYSTEM_DISCOVERY_AGENT')) and SMS_R_System.Name in (select Name from SMS_R_System where ((DATEDIFF(day, SMS_R_SYSTEM.AgentTime, getdate()) <=60) and AgentName = 'Heartbeat Discovery'))"
+    $Query = "select distinct SMS_R_System.Name, SMS_R_User.DisplayName, SMS_R_System.IPAddresses, SMS_R_System.SystemOUName, SMS_CombinedDeviceResources.CurrentLogonUser, SMS_G_System_SYSTEM_CONSOLE_USAGE.TopConsoleUser, SMS_G_System_COMPUTER_SYSTEM.UserName,  SMS_G_System_COMPUTER_SYSTEM.Domain, SMS_G_System_COMPUTER_SYSTEM.Manufacturer, SMS_G_System_COMPUTER_SYSTEM.Model, SMS_G_System_PC_BIOS.SerialNumber, SMS_G_System_OPERATING_SYSTEM.Caption, SMS_G_System_OPERATING_SYSTEM.BuildNumber, SMS_G_System_X86_PC_MEMORY.TotalPhysicalMemory, SMS_R_System.LastLogonTimestamp from SMS_R_System left join SMS_CombinedDeviceResources on SMS_CombinedDeviceResources.Name = SMS_R_System.Name left join SMS_G_System_SYSTEM_CONSOLE_USAGE on SMS_G_System_SYSTEM_CONSOLE_USAGE.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_COMPUTER_SYSTEM on SMS_G_System_COMPUTER_SYSTEM.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_PC_BIOS on SMS_G_System_PC_BIOS.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_OPERATING_SYSTEM on SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId left join SMS_G_System_X86_PC_MEMORY on SMS_G_System_X86_PC_MEMORY.ResourceID = SMS_R_System.ResourceId left join SMS_R_User on SMS_R_User.UniqueUserName = SMS_G_System_SYSTEM_CONSOLE_USAGE.TopConsoleUser where SMS_R_System.Name in (select Name from SMS_R_System where ((DATEDIFF(day, SMS_R_SYSTEM.AgentTime, getdate()) <=60) and AgentName = 'SMS_AD_SYSTEM_DISCOVERY_AGENT')) and SMS_R_System.Name in (select Name from SMS_R_System where ((DATEDIFF(day, SMS_R_SYSTEM.AgentTime, getdate()) <=60) and AgentName = 'Heartbeat Discovery'))"
     $Devices = Get-WmiObject -ComputerName $SiteCode.SiteServer -Namespace "root\SMS\site_$($SiteCode)" -Query $Query
 
     # Placeholder
@@ -59,7 +59,7 @@ Process {
         }
 
         if ((![string]::IsNullOrEmpty($Device.SMS_G_System_COMPUTER_SYSTEM.UserName)) -and ($CurrentUser -eq $true)) {
-            $temp | Add-Member -MemberType NoteProperty -Name "Current User" -Value $Device.SMS_G_System_COMPUTER_SYSTEM.UserName
+            $temp | Add-Member -MemberType NoteProperty -Name "Current User" -Value $Device.SMS_CombinedDeviceResources.CurrentLogonUser
         }
 
         if ((![string]::IsNullOrEmpty($TempADCurrentUserObject)) -and ($CurrentUser -eq $true)) {
@@ -69,10 +69,11 @@ Process {
         }
 
         $temp | Add-Member -MemberType NoteProperty -Name "Computer OU" -Value ($Device.SMS_R_System.SystemOUName | Select-Object -Last 1)
+        $temp | Add-Member -MemberType NoteProperty -Name "Computer Domain" -Value $Device.SMS_G_System_COMPUTER_SYSTEM.Domain
         $temp | Add-Member -MemberType NoteProperty -Name "Last Logon" -Value (Get-Date ("{0}-{1}-{2}" -f $Device.SMS_R_System.LastLogonTimestamp.Substring(0,4), $Device.SMS_R_System.LastLogonTimestamp.Substring(4,2), $Device.SMS_R_System.LastLogonTimestamp.Substring(6,2)) -Format d)
         $temp | Add-Member -MemberType NoteProperty -Name "Operating System Name" -Value $Device.SMS_G_System_OPERATING_SYSTEM.Caption
         $temp | Add-Member -MemberType NoteProperty -Name "Operating System Build Version" -Value $Device.SMS_G_System_OPERATING_SYSTEM.BuildNumber
-        $temp | Add-Member -MemberType NoteProperty -Name "Total Memory" -Value $Device.SMS_G_System_X86_PC_MEMORY.TotalPhysicalMemory
+        $temp | Add-Member -MemberType NoteProperty -Name "Total Memory" -Value ([math]::round($Device.SMS_G_System_X86_PC_MEMORY.TotalPhysicalMemory /1Mb, 0)) 
         $temp | Add-Member -MemberType NoteProperty -Name "Manufacturer" -Value $Device.SMS_G_System_COMPUTER_SYSTEM.Manufacturer
         $temp | Add-Member -MemberType NoteProperty -Name "Model" -Value $Device.SMS_G_System_COMPUTER_SYSTEM.Model
         $temp | Add-Member -MemberType NoteProperty -Name "Serial Number" -Value $Device.SMS_G_System_PC_BIOS.SerialNumber
