@@ -1,4 +1,4 @@
- #Requires -Modules GroupPolicy
+#Requires -Modules GroupPolicy
 [CmdletBinding()]
 param (
     $LogsDirectory = (Join-Path -Path $env:SystemRoot -ChildPath "Temp"),
@@ -79,6 +79,7 @@ Process {
 
     # Gather basic information, download Client Health and create new directories
     if ($CHDir -notmatch $CHShareName) {
+        Write-CMLogEntry -Value "Attempting to create root directories, hidden shares and permissions on $($SiteCode.SiteServer)" -Severity 1        
         try {
             ## Create Client Health share
             Invoke-Command -ComputerName $SiteCode.SiteServer -ArgumentList $SiteCode, $CHShareName, $DownloadURI -Verbose -ScriptBlock {
@@ -152,6 +153,7 @@ Process {
 
     # Edit XML configuration version number
     if ($CHDir -match $CHShareName) {
+        Write-CMLogEntry -Value "Attempting to edit Client Health configuration XML file" -Severity 1
         try {
             # Get siteserver FQDN
             try {
@@ -212,11 +214,10 @@ Process {
 
     # Create, edit and import GPO
     try {
-        # Create GPO
-        # $GPO = New-GPO -Domain (Get-WmiObject Win32_ComputerSystem | Select-Object -ExpandProperty Domain) -Name "[Temp]ConfigMgr Client Health" -ErrorAction Stop
+        Write-CMLogEntry -Value "Creating dummy group policy object '[Temp]ConfigMgr Client Health'" -Severity 1
+        $GPO = New-GPO -Domain (Get-WmiObject Win32_ComputerSystem | Select-Object -ExpandProperty Domain) -Name "[Temp]ConfigMgr Client Health" -ErrorAction Stop
     }
     catch [System.Exception] {
         Write-CMLogEntry -Value "Error importing GPO. Message: $($_.Exception.Message)" -Severity 2
     }
 }
- 
