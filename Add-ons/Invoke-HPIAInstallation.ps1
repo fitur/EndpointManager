@@ -49,20 +49,11 @@
         Start-BitsTransfer -Source $HPSLURI -Destination $HPSLDownloadPath -ErrorAction Stop
         Start-Process -FilePath $HPSLDownloadPath -ArgumentList "/VERYSILENT /NOREBOOT" -Wait
     }
+
+    # Import CM module
+    Import-Module ($Env:SMS_ADMIN_UI_PATH.Substring(0, $Env:SMS_ADMIN_UI_PATH.Length - 5) + '\ConfigurationManager.psd1') -ErrorAction Stop
 }
 process {
-    # Temporarily initiate CM environment
-    try {
-        Log -Message "Getting CM server information" -LogFile $LogFile
-        Invoke-CMEnvironment
-        $SiteServer = ("{0}.{1}" -f $SiteCode.SiteServer, (Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object -ExpandProperty Domain))
-        Set-Location $env:SystemDrive
-    }
-    catch [System.SystemException] {
-        $env:SystemDrive
-        Log -ErrorMessage "Failed to fetch CM server information!" -LogFile $LogFile
-    }
-
     # HPIA variables
     $URI = "http://ftp.hp.com/pub/caps-softpaq/cmit/HPIA.html"
     $WebReq = Invoke-WebRequest -Uri $URI -UseBasicParsing
@@ -74,12 +65,13 @@ process {
     $HPIAInstallExecutable = Get-Item $SoftPaqDownloadPath -ErrorAction Stop
 
     # Set script variables
+    $CMServer = Get-PSDrive -PSProvider CMSITE -ErrorAction Stop | Select-Object -ExpandProperty Root
     $OS = "Win10"
     $SSMONLY = "ssm"
     $Category1 = "bios"
     $Category2 = "driver"
     $Category3 = "firmware"
-    $RootPath = "\\sccm07\sources\HPIA" # Change me
+    $RootPath = "\\$CMServer\sources\HPIA" # Change me
     $RepositoryRoot = "$RootPath\Repository" # Change me
     $LogFile = "$RootPath\RepoUpdate.log"
 
