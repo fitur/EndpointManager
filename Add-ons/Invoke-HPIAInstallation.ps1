@@ -141,7 +141,17 @@ process {
                 Log -Message "Extracted HPIA binaries into model root directory" -LogFile $LogFile
             }
             catch [System.SystemException] {
-                Log -ErrorMessage "Failed to extract HPIA binaries into model root directory" -LogFile $LogFile
+                Log -ErrorMessage "Failed to extract HPIA binaries into model root directory!" -LogFile $LogFile
+            }
+
+            ## Copy BIOS PW file
+            try {
+                $BIOSPWFile = Get-ChildItem -Path $RootPath -Filter "*.bin" -ErrorAction Stop | Sort-Object -Descending LastWriteTime | Select-Object -First 1
+                Copy-Item -Path $BIOSPWFile.FullName -Destination ($ModelRepoPath | Split-Path -Parent) -ErrorAction Stop
+                Log -Message "Copied BIOS password file to $ModelRepoPath" -LogFile $LogFile
+            }
+            catch [System.SystemException] {
+                Log -ErrorMessage "Failed to copy BIOS password file!" -LogFile $LogFile
             }
         }
 
@@ -172,7 +182,7 @@ process {
     
         try {
             Log -Message "Invoking repository sync for $($Model.Model) repository (this will take some time)" -LogFile $LogFile
-            Invoke-RepositorySync -ErrorAction Stop
+            Invoke-RepositorySync -Quiet -ErrorAction Stop
         }
         catch [System.SystemException] {
             Log -ErrorMessage "Failed to invoke repository sync for $($Model.Model)!" -LogFile $LogFile
