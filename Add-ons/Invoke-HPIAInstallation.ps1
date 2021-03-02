@@ -1,4 +1,7 @@
- begin {
+  begin {
+    # Modules
+    Import-Module ($Env:SMS_ADMIN_UI_PATH.Substring(0, $Env:SMS_ADMIN_UI_PATH.Length - 5) + '\ConfigurationManager.psd1') -ErrorAction Stop
+
     # Functions
     function Log {
         Param (
@@ -183,11 +186,6 @@ process {
             Log -ErrorMessage "Failed to invoke repository cleanup for $($Model.Model)!" -LogFile $LogFile
         }
 
-        Log -Message "----------------------------------------------------------------------------" -LogFile $LogFile
-        Log -Message "Repository Update Complete" -LogFile $LogFile
-        Log -Message "----------------------------------------------------------------------------" -LogFile $LogFile
-        Set-Location -Path $RepositoryRoot
-
         # Create CM package
         Invoke-CMEnvironment
         $CMPackageName = ("HPIA - $($Model.Model) - $($Model.OSVER)")
@@ -210,6 +208,13 @@ process {
             Set-Location $env:SystemDrive
         
             Log -Message "Redistributed SCCM package $CMPackageName ($($CMPackage.PackageID))" -LogFile $LogFile
+
         }
+
+        Log -Message "----------------------------------------------------------------------------" -LogFile $LogFile
     }
+
+    Log -Message "Repository Update Complete" -LogFile $LogFile
+    Log -Message "----------------------------------------------------------------------------" -LogFile $LogFile
+    Set-Location -Path $RepositoryRoot
 }
