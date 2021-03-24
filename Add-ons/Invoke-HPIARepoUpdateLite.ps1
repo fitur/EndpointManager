@@ -1,31 +1,39 @@
-$RepoDir = "\\sccm07\sources\HPIA\Repository"
+$RepoDir = "\\sccm07\sources\HPIA\RepoTest"
 $Models = Import-Csv (Join-Path -Path ($RepoDir | Split-Path -Parent) -ChildPath "Models.csv")
+$OSBuilds = Import-Csv (Join-Path -Path ($RepoDir | Split-Path -Parent) -ChildPath "OSBuilds.csv")
+$Blacklist = Import-Csv (Join-Path -Path ($RepoDir | Split-Path -Parent) -ChildPath "Blacklist.csv")
+
+# Step into directory
+Set-Location -Path $RepoDir -ErrorAction Stop
+
+# Initialize repo
+Initialize-Repository -Verbose -ErrorAction Stop
+Set-RepositoryConfiguration -Setting OnRemoteFileNotFound -Value LogAndContinue -Verbose
+Set-RepositoryConfiguration -Setting OfflineCacheMode -CacheValue Enable -Verbose
 
 # Get Windows verison number sub directories and run per object
-Get-ChildItem -Path $RepoDir -Name "10.0.*" | ForEach-Object {
-    switch ($_) {
-        "10.0.19042" { $HPIAOSNumber = "2009" }
-        "10.0.17763" { $HPIAOSNumber = "1809" }
-    }
-
-    # Step into directory
-    Set-Location -Path (Join-Path -Path $RepoDir -ChildPath $_) -ErrorAction Stop
-
-    # Initialize repo
-    Initialize-Repository -ErrorAction Stop
-
+$OSBuilds | ForEach-Object {
     # Add repository filter, run sync and clean repo for each model
     foreach ($Model in ($Models | Sort-Object -Unique ProdCode | Where-Object {$_.Model -match "HP"})) {
-        Write-Verbose -Verbose "Attempting to synchronize $($Model.Model) for OS-version $HPIAOSNumber."
-        Add-RepositoryFilter -Platform $Model.ProdCode -Category Bios,Firmware,Driver,Software -Characteristic SSM -Os win10 -OsVer $HPIAOSNumber -ReleaseType Recommended -ErrorAction SilentlyContinue
-        #Invoke-RepositorySync -Quiet -ErrorAction SilentlyContinue
-        #Invoke-RepositoryCleanup -ErrorAction SilentlyContinue
-        #Remove-RepositoryFilter -Platform $Model.ProdCode -Yes
-        Write-Verbose -Verbose "------------------------------------"
+        $TempBlacklist = $Blacklist | Where-Object {$_.ProdCode -eq $Model.ProdCode}
+        if ($_.OSBuild -in $TempBlacklist.OS) {
+            Write-Verbose -Verbose "$($Model.Model) blacklisted for this OS-version. Attempting to remove from repository filter for OS-version $($_.OSBuild)."
+            Remove-RepositoryFilter -Platform $Model.ProdCode -Yes
+        } else {
+            Write-Verbose -Verbose "Attempting to add $($Model.Model) to repository filter for OS-version $($_.OSBuild)."
+            Add-RepositoryFilter -Platform $Model.ProdCode -Category Bios,Firmware,Driver,Software -Characteristic SSM -Os win10 -OsVer $($_.OSBuild) -ReleaseType Recommended -ErrorAction SilentlyContinue
+        }
+
+        Remove-Variable TempBlacklist -ErrorAction SilentlyContinue
     }
 
-    Set-RepositoryConfiguration -Setting OnRemoteFileNotFound -Value LogAndContinue
-    Invoke-RepositorySync -Quiet -ErrorAction SilentlyContinue
-    Invoke-RepositoryCleanup -ErrorAction SilentlyContinue
-    #Remove-RepositoryFilter -Platform $Model.ProdCode -Yes
-} 
+    # Remove all unsupported OS builds
+    Get-RepositoryInfo | Select-Object -ExpandProperty Filters | Where-Object {($_.operatingSystem).split(":")[1] -notin $OSBuilds.OSBuild} | ForEach-Object {
+        Write-Verbose -Verbose "Removing obsolete OS build $(($_.operatingSystem).split(":")[1]) for platform $($_.platform)"
+        Remove-RepositoryFilter -Platform $_.platform -Os win10 -OsVer ([int](($_.operatingSystem).split(":")[1])) -Yes
+    }
+}
+
+# Run sync and cleanup
+Invoke-RepositorySync
+Invoke-RepositoryCleanup 
