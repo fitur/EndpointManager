@@ -1,5 +1,5 @@
 begin {
-    $HPIADir = "\\sccm07\HPIA$"
+    $HPIADir = "\\timmlmsccm002\HPIA$"
     $RepoDir = Join-Path -Path $HPIADir -ChildPath "Repository"
     $BinaryDir = Join-Path -Path $HPIADir -ChildPath "Binary"
     $ModuleDir = Join-Path -Path $HPIADir -ChildPath "Modules"
@@ -9,13 +9,18 @@ begin {
     $Blacklist = Import-Csv (Join-Path -Path $HPIADir -ChildPath "Blacklist.csv")
 
     # Import HP modules
-    Import-Module $ModuleDir\HP.Sinks\HP.Sinks.psm1
-    Import-Module $ModuleDir\HP.Utility\HP.Utility.psm1
-    Import-Module $ModuleDir\HP.Firmware\HP.Firmware.psm1
-    Import-Module $ModuleDir\HP.Softpaq\HP.Softpaq.psm1
-    Import-Module $ModuleDir\HP.Private\HP.Private.psm1
-    Import-Module $ModuleDir\HP.Repo\HP.Repo.psm1
-    Import-Module $ModuleDir\HP.ClientManagement\HP.ClientManagement.psm1
+    try {
+        Import-Module $ModuleDir\HP.Sinks\HP.Sinks.psm1
+        Import-Module $ModuleDir\HP.Utility\HP.Utility.psm1
+        Import-Module $ModuleDir\HP.Firmware\HP.Firmware.psm1
+        Import-Module $ModuleDir\HP.Softpaq\HP.Softpaq.psm1
+        Import-Module $ModuleDir\HP.Private\HP.Private.psm1
+        Import-Module $ModuleDir\HP.Repo\HP.Repo.psm1
+        Import-Module $ModuleDir\HP.ClientManagement\HP.ClientManagement.psm1
+    }
+    catch [System.SystemException] {
+        Write-Verbose -Verbose "Couldn't load HP script library modules"
+    }
 }
 process {
     # Step into directory
