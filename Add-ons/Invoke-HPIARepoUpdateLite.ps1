@@ -1,5 +1,5 @@
 begin {
-    $HPIADir = "\\timmlmsccm002\HPIA$"
+    $HPIADir = "\\dp4.edu.timra.se\HPIA$"
     $RepoDir = Join-Path -Path $HPIADir -ChildPath "Repository"
     $BinaryDir = Join-Path -Path $HPIADir -ChildPath "Binary"
     $ModuleDir = Join-Path -Path $HPIADir -ChildPath "Modules"
@@ -9,17 +9,19 @@ begin {
     $Blacklist = Import-Csv (Join-Path -Path $HPIADir -ChildPath "Blacklist.csv")
 
     # Import HP modules
-    try {
-        Import-Module $ModuleDir\HP.Sinks\HP.Sinks.psm1
-        Import-Module $ModuleDir\HP.Utility\HP.Utility.psm1
-        Import-Module $ModuleDir\HP.Firmware\HP.Firmware.psm1
-        Import-Module $ModuleDir\HP.Softpaq\HP.Softpaq.psm1
-        Import-Module $ModuleDir\HP.Private\HP.Private.psm1
-        Import-Module $ModuleDir\HP.Repo\HP.Repo.psm1
-        Import-Module $ModuleDir\HP.ClientManagement\HP.ClientManagement.psm1
-    }
-    catch [System.SystemException] {
-        Write-Verbose -Verbose "Couldn't load HP script library modules"
+    if ($null -eq (Get-Command -Name Get-RepositoryInfo*)) {
+        try {
+            Import-Module $ModuleDir\HP.Sinks\HP.Sinks.psm1
+            Import-Module $ModuleDir\HP.Utility\HP.Utility.psm1
+            Import-Module $ModuleDir\HP.Firmware\HP.Firmware.psm1
+            Import-Module $ModuleDir\HP.Softpaq\HP.Softpaq.psm1
+            Import-Module $ModuleDir\HP.Private\HP.Private.psm1
+            Import-Module $ModuleDir\HP.Repo\HP.Repo.psm1
+            Import-Module $ModuleDir\HP.ClientManagement\HP.ClientManagement.psm1
+        }
+        catch [System.SystemException] {
+            Write-Verbose -Verbose "Couldn't load HP script library modules"
+        }
     }
 }
 process {
@@ -38,10 +40,15 @@ process {
             $TempBlacklist = $Blacklist | Where-Object {$_.ProdCode -eq $Model.ProdCode}
             if ($_.OSBuild -in $TempBlacklist.OS) {
                 Write-Verbose -Verbose "$($Model.Model) blacklisted for this OS-version. Attempting to remove from repository filter for OS-version $($_.OSBuild)."
-                Remove-RepositoryFilter -Platform $Model.ProdCode -Yes
+                Remove-RepositoryFilter -Platform $Model.ProdCode -OsVer $_.OSBuild -Yes
             } else {
-                Write-Verbose -Verbose "Attempting to add $($Model.Model) to repository filter for OS-version $($_.OSBuild)."
-                Add-RepositoryFilter -Platform $Model.ProdCode -Category Bios,Firmware,Driver,Software -Characteristic SSM -Os win10 -OsVer $($_.OSBuild) -ReleaseType * -ErrorAction SilentlyContinue
+                if ($_.OSBuild -in (Get-HPDeviceDetails -Platform $Model.ProdCode -OSList | Select-Object -ExpandProperty OperatingSystemRelease)) {
+                    Write-Verbose -Verbose "Attempting to add $($Model.Model) to repository filter for OS-version $($_.OSBuild)."
+                    Add-RepositoryFilter -Platform $Model.ProdCode -Category Bios,Firmware,Driver,Software -Characteristic SSM -Os win10 -OsVer $_.OSBuild -ReleaseType * -ErrorAction SilentlyContinue
+                } else {
+                    Write-Verbose -Verbose "$($Model.Model) is not available for this OS-version. Attempting to remove from repository filter for OS-version $($_.OSBuild)."
+                    Remove-RepositoryFilter -Platform $Model.ProdCode -OsVer $_.OSBuild -Yes
+                }
             }
 
             Remove-Variable TempBlacklist -ErrorAction SilentlyContinue
@@ -57,4 +64,4 @@ process {
     # Run sync and cleanup
     Invoke-RepositorySync
     Invoke-RepositoryCleanup
-}
+} 
