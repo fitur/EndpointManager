@@ -33,6 +33,21 @@ begin {
         "Online" { $ArgumentString = ' /noninteractive /ReportFolder:"{0}"' -f $FullLogPath }
         "DriversOnly" { $ArgumentString = ' /Category:Drivers,Software /noninteractive /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullLogPath }
         "BIOSOnly" { $ArgumentString = ' /Category:BIOS,Firmware /noninteractive /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullLogPath }
+        "OSD" {
+            # Load CM environment
+            try {
+                $TSEnvironment = New-Object -ComObject Microsoft.SMS.TSEnvironment -ErrorAction Continue
+            }
+            catch [System.Exception] {
+                Write-Warning -Message "Unable to construct Microsoft.SMS.TSEnvironment object. Error message at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"; exit 1
+            }
+
+            # Gather TS variables
+            $FullLogPath = $TSEnvironment.Value("_SMSTSLogPath")
+
+            # Construct argument string
+            $ArgumentString = ' /Category:Drivers,Software /noninteractive /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullLogPath
+        }
     }
 }
 process {
