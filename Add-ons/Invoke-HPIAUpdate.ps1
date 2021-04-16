@@ -65,10 +65,11 @@ begin {
     # Create HPIA argument string
     if ($null -eq $PWBin) {
         $ArgumentString = '/Operation:Analyze /Action:Install /Selection:All'
-        Write-CMLogEntry -Value "HP BIOS password detected - adding $ArgumentString to argument string" -Severity 1
+        Write-CMLogEntry -Value "HP BIOS password detected." -Severity 1
     }
     else {
         $ArgumentString = '/Operation:Analyze /Action:Install /Selection:All /BIOSPwdFile:"{0}"' -f $PWBin
+        Write-CMLogEntry -Value "No HP BIOS password detected." -Severity 1
     }
 
     # Switch for UpdateType (background or interactive)
@@ -112,4 +113,4 @@ process {
         Write-CMLogEntry -Value "Error - Directory $($RepoDir) not available." -Severity 2
         exit 2;
     }
-} 
+}
