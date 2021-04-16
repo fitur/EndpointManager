@@ -65,7 +65,7 @@ begin {
     # Create HPIA argument string
     if ($null -eq $PWBin) {
         $ArgumentString = '/Operation:Analyze /Action:Install /Selection:All'
-        Write-CMLogEntry -Value "HP BIOS password detected." -Severity 1
+        Write-CMLogEntry -Value "HP BIOS password detected. Adjusting argument string." -Severity 1
     }
     else {
         $ArgumentString = '/Operation:Analyze /Action:Install /Selection:All /BIOSPwdFile:"{0}"' -f $PWBin
@@ -90,11 +90,10 @@ begin {
 
             # Gather TS variables
             $FullLogPath = $TSEnvironment.Value("_SMSTSLogPath")
-            Write-CMLogEntry -Value "Log path re-evaluated to $FullLogPath" -Severity 1
+            Write-CMLogEntry -Value "Running in OSD mode. Log path re-evaluated to $FullLogPath" -Severity 1
 
             # Construct argument string
             $ArgumentString = ' /Category:Drivers,Software /noninteractive /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullLogPath
-            Write-CMLogEntry -Value "Argument string: $ArgumentString" -Severity 1
         }
     }
 }
@@ -102,6 +101,7 @@ process {
     if (Test-Path -Path $RepoDir) {
         # Run HP Image Assistant
         try {
+            Write-CMLogEntry -Value "Running HPImageAssistant.exe with the following argument string: $ArgumentString" -Severity 1
             Start-Process '.\HPImageAssistant.exe' -ArgumentList $ArgumentString -Wait -ErrorAction Stop
             exit 0;
         }
