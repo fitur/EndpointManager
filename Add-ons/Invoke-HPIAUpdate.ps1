@@ -4,7 +4,7 @@ param (
     $RepoDir,
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    $LogsDir,
+    $ReportDir,
     [Parameter(Mandatory = $false)]
     [ValidateNotNullOrEmpty()]
     $UpdateType = "Live",
@@ -13,7 +13,7 @@ param (
     $PWBin = (Get-ChildItem -Filter *.bin | Select-Object -ExpandProperty FullName),
     [Parameter(Mandatory = $false)]
     [ValidateNotNullOrEmpty()]
-    $LogName = "HPIAUpdate.log",
+    $LogName = "Invoke-HPIAUpdate.log",
     [Parameter(Mandatory = $false)]
     [ValidateNotNullOrEmpty()]
     $LogsDirectory = (Join-Path -Path $env:SystemRoot -ChildPath "Temp")
@@ -58,42 +58,44 @@ begin {
 	}
 
     # Create variables
-    $HPModel = Get-CimInstance -Namespace root\wmi -ClassName MS_SystemInformation -ErrorAction Stop | Select-Object -ExpandProperty SystemProductName
-    $OSBuild = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop | Select-Object -ExpandProperty Version
-    $FullLogPath = Join-Path -Path $LogsDir -ChildPath $env:COMPUTERNAME
+    $FullReportDir = Join-Path -Path $ReportDir -ChildPath $env:COMPUTERNAME
+    $ArgumentString = '/Operation:Analyze /Action:Install /Selection:All /Noninteractive /SoftpaqDownloadFolder:"{0}\HPIA" /Debug' -f $env:SystemDrive
 
-    # Create HPIA argument string
-    if ($null -eq $PWBin) {
-        $ArgumentString = '/Operation:Analyze /Action:Install /Selection:All'
-        Write-CMLogEntry -Value "HP BIOS password detected. Adjusting argument string." -Severity 1
+    # Create HPIA argument string if BIOS password exist
+    if ($null -ne $PWBin) {
+        Write-CMLogEntry -Value "HP BIOS password detected. Adjusting argument string." -Severity 2
+        $ArgumentString = ($ArgumentString + ' /BIOSPwdFile:"{0}"' -f $PWBin)
     }
     else {
-        $ArgumentString = '/Operation:Analyze /Action:Install /Selection:All /BIOSPwdFile:"{0}"' -f $PWBin
         Write-CMLogEntry -Value "No HP BIOS password detected." -Severity 1
     }
 
     # Switch for UpdateType (background or interactive)
     switch ($UpdateType) {
-        "Live" { $ArgumentString = ($ArgumentString + ' /noninteractive /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullLogPath) }
-        "Background" { $ArgumentString = ' /Silent /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullLogPath }
-        "Online" { $ArgumentString = ' /noninteractive /ReportFolder:"{0}"' -f $FullLogPath }
-        "DriversOnly" { $ArgumentString = ' /Category:Drivers,Software /noninteractive /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullLogPath }
-        "BIOSOnly" { $ArgumentString = ' /Category:BIOS,Firmware /noninteractive /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullLogPath }
+        "Live" { $ArgumentString = ($ArgumentString + '  /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullReportDir) }
+        "Online" { $ArgumentString = ($ArgumentString + ' /Silent /ReportFolder:"{0}"' -f $FullReportDir) }
+        "DriversOnly" { $ArgumentString = ($ArgumentString + ' /Silent /Category:Drivers,Software /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullReportDir) }
+        "BIOSOnly" { $ArgumentString = ($ArgumentString + ' /Silent /Category:BIOS,Firmware /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullReportDir) }
         "OSD" {
             # Load CM environment
             try {
                 $TSEnvironment = New-Object -ComObject Microsoft.SMS.TSEnvironment -ErrorAction Continue
             }
             catch [System.Exception] {
-                Write-Warning -Message "Unable to construct Microsoft.SMS.TSEnvironment object. Error message at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"; exit 1
+                Write-CMLogEntry -Value "Unable to construct Microsoft.SMS.TSEnvironment object. Error message at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)" -Severity 3; exit 1
             }
 
-            # Gather TS variables
-            $FullLogPath = $TSEnvironment.Value("_SMSTSLogPath")
-            Write-CMLogEntry -Value "Running in OSD mode. Log path re-evaluated to $FullLogPath" -Severity 1
+            if ($null -ne $TSEnvironment) {
+                Write-CMLogEntry -Value "Running in OSD mode. Log path re-evaluated to $FullReportDir" -Severity 1
 
-            # Construct argument string
-            $ArgumentString = ' /Category:Drivers,Software /noninteractive /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullLogPath
+                # Gather TS variables
+                $FullReportDir = $TSEnvironment.Value("_SMSTSLogPath")
+
+                # Construct argument string
+                $ArgumentString = ($ArgumentString + ' /Silent /Category:Drivers,Software,Firmware /Offlinemode:"{0}" /ReportFolder:"{1}"' -f $RepoDir, $FullReportDir)
+            } else {
+                Write-CMLogEntry -Value "Failed to evaluate TS environment" -Severity 3; exit 1
+            }
         }
     }
 }
@@ -101,12 +103,12 @@ process {
     if (Test-Path -Path $RepoDir) {
         # Run HP Image Assistant
         try {
-            Write-CMLogEntry -Value "Running HPImageAssistant.exe with the following argument string: $ArgumentString" -Severity 1
+            Write-CMLogEntry -Value "Running HPIA with the following argument string: $ArgumentString" -Severity 1
             Start-Process '.\HPImageAssistant.exe' -ArgumentList $ArgumentString -Wait -ErrorAction Stop
             exit 0;
         }
         catch [System.SystemException] {
-            Write-CMLogEntry -Value "Error - Couuld not run HPIA. Message: $($_.Exception.Message)" -Severity 2
+            Write-CMLogEntry -Value "Error - Could not run HPIA. Message: $($_.Exception.Message)" -Severity 3
             exit 1;
         }
     } else {
