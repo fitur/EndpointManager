@@ -25,11 +25,17 @@ $HPIAVersion = (($WebReq.AllElements | Where-Object {($_.tagname -eq 'tr') -and 
 $HPIADescription = (($WebReq.AllElements | Where-Object {($_.tagname -eq 'tr') -and ($_.innerHTML -match $SoftPaqURL)}).innerHTML -split "`n" | Select-Object -Skip 1 -First 1) -replace "<TD>","" -replace "</TD>",""
 $HPIAInstallParams = '-f"{0}" -s -e' -f $HPIABinaryPath
 
-# Run installer
-Start-BitsTransfer -Source $SoftPaqURL -Destination $SoftPaqDownloadPath
-$HPIAInstallExecutable = Get-Item $SoftPaqDownloadPath -ErrorAction Stop
-Start-Process -FilePath $HPIAInstallExecutable.FullName -ArgumentList $HPIAInstallParams -Wait -ErrorAction Stop
-$HPIAPackage | Set-CMPackage -Version $HPIAVersion -Description $HPIADescription
+# Run installer if version is greater than current
+if ([System.Version]$HPIAVersion -gt [System.Version]$HPIAPackage.Version) {
+    Start-BitsTransfer -Source $SoftPaqURL -Destination $SoftPaqDownloadPath
+    $HPIAInstallExecutable = Get-Item $SoftPaqDownloadPath -ErrorAction Stop
+    Start-Process -FilePath $HPIAInstallExecutable.FullName -ArgumentList $HPIAInstallParams -Wait -ErrorAction Stop
+    $HPIAPackage | Set-CMPackage -Version $HPIAVersion -Description $HPIADescription
 
-# Distribute CM package
-$HPIAPackage | Invoke-CMContentRedistribution -DistributionPointName (Get-CMDistributionPointInfo | Sort-Object -Descending Groupcount | Select-Object -First 1 -ExpandProperty Name)
+    # Distribute CM package
+    if ((Get-CMDistributionStatus -Id $HPIAPackage.PackageID | Select-Object -ExpandProperty Targeted) -gt 0) {
+        $HPIAPackage | Invoke-CMContentRedistribution -ErrorAction Stop
+    } else {
+        $HPIAPackage | Start-CMContentDistribution -DistributionPointName (Get-CMDistributionPointInfo | Sort-Object -Descending Groupcount | Select-Object -First 1 -ExpandProperty Name)
+    }
+}
