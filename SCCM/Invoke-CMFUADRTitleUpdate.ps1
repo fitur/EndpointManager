@@ -16,17 +16,19 @@ begin {
     } 
     
     # Set URI and open webrequest
-    $URI = "https://en.wikipedia.org/wiki/Windows_10_version_history"
+    # old      $URI = "https://en.wikipedia.org/wiki/Windows_10_version_history"
+    $URI = "https://winreleaseinfoprod.blob.core.windows.net/winreleaseinfoprod/en-US.html"
     $WebRequest = Invoke-WebRequest -Uri $URI
 
     # Create array
     $W10Versions = New-Object -TypeName System.Collections.ArrayList
 
     # Scrape Wikipedia for W10 versions
-    ($WebRequest.ParsedHtml.getElementsByClassName("wikitable plainrowheaders")[0].outerText.Split([Environment]::NewLine) | Select-String -Pattern "^(\d{2}\S{2}\s)") | Sort-Object -Descending | ForEach-Object {[void]$W10Versions.Add(([string]$_).substring(0,4))}
-}
+    # old ($WebRequest.ParsedHtml.getElementsByClassName("wikitable plainrowheaders")[0].outerText.Split([Environment]::NewLine) | Select-String -Pattern "^(\d{2}\S{2}\s)") | Sort-Object -Descending | ForEach-Object {[void]$W10Versions.Add(([string]$_).substring(0,4))}
+    $WebRequest.RawContent.Split([Environment]::NewLine) | Select-String -Pattern "\s<td>(\d{2}\S{2})</td>" | ForEach-Object { [void]$W10Versions.Add((([string]$_).trim() -replace "<td>","" -replace "</td>","")) }
+ }
 process {
-    if ($W10Versions.Count -gt 8) {
+    if ($W10Versions.Count -ge 3) {
         try {
             Get-CMAutoDeploymentRule -Name $ADRName -Fast | ForEach-Object {
                 $Version = $W10Versions -match $_.Name.Substring($_.Name.Length-2) | Select-Object -First 1
