@@ -1,8 +1,19 @@
-$Servername = "ne-as-prn01"
-$Array = New-Object -TypeName System.Collections.ArrayList
+$LogName = "Microsoft-Windows-PrintService/Operational"
+$LogPath = "\\ne\system\SCCM\Logs\PrintAudit"
 
-Get-WinEvent Microsoft-Windows-PrintService/Operational -ComputerName $Servername | Where-Object {($_.Id -eq 307) -and ($_.TimeCreated -gt (Get-Date).AddDays(-31))} | ForEach-Object {
-    [void]$Array.Add(($_.Message -split " owned by " -split " on ")[1])
+Get-WinEvent -ListLog $LogName -OutVariable PrinterLogSettings | Select-Object -Property LogName, IsClassicLog, IsEnabled
+if ($PrinterLogSettings.IsEnabled -ne $true) {
+    $PrinterLogSettings.set_IsEnabled($true)
+    $PrinterLogSettings.SaveChanges()
 }
 
-$Array | Select-Object -Unique | Measure-Object | Select-Object -ExpandProperty Count 
+$LogPathAbsolute = New-Item -Path (Join-Path -Path $LogPath -ChildPath $env:COMPUTERNAME) -ItemType Directory -Force -ErrorAction SilentlyContinue
+
+Get-WinEvent -FilterHashTable @{LogName=$LogName; ID=307; StartTime=(Get-Date -OutVariable Now).AddDays(-1)} |
+Select-Object -Property TimeCreated,
+@{label='UserName';expression={$_.properties[2].value}},
+@{label='ComputerName';expression={$_.properties[3].value}},
+@{label='PrinterName';expression={$_.properties[4].value}},
+@{label='PrintSize';expression={$_.properties[6].value}},
+@{label='Pages';expression={$_.properties[7].value}} |
+Export-Csv -Path (Join-Path -Path $LogPathAbsolute -ChildPath ("Printing Audit - {0} - $($($Now).ToString('yyyy-MM-dd')).csv" -f $env:COMPUTERNAME)) -NoTypeInformation 
