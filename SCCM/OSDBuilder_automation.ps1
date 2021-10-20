@@ -1,7 +1,8 @@
- ## Variables
+## Variables
 $OSDBuilderPath = "D:\Scripts and Tools\OSDBuilder"
 $ISOPath = "D:\Scripts and Tools\ISO"
 $CMOSPath = "\\ne\system\SCCM\OS\OS Images\MS Client"
+$CMTSPrefix = "NLTG - Pilot"
 
 ## Install, import and initalize module
 try {
@@ -29,7 +30,7 @@ Get-Volume | Where-Object {($_.DriveType -eq "CD-ROM") -and ($_.OperationalStatu
 }
 
 ## Process each ISO
-Get-ChildItem -Path $ISOPath -Filter "*6.ISO" -Recurse -File | ForEach-Object {
+Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -File | ForEach-Object {
     ## Variables
     $_.FullName -match "(?<version>2\dH(1|2))" | Out-Null
     $OSVersion = $Matches.version
@@ -84,6 +85,9 @@ Get-ChildItem -Path $ISOPath -Filter "*6.ISO" -Recurse -File | ForEach-Object {
         $CMOSImage = New-CMOperatingSystemImage -Name ("{0} {1} {2}" -f $OSBuild.ImageName, $OSBuild.Arch, $OSBuild.ReleaseId) -Version $OSBuild.UBR -Description $OSBuild.ModifiedTime -Path $NewName -ErrorAction Stop
         $CMOSImage | Start-CMContentDistribution -DistributionPointGroupName (Get-CMDistributionPointGroup | Sort-Object MemberCount -Descending | Select-Object -First 1 -ExpandProperty Name) -ErrorAction Stop
 
+        ## Edit task sequence
+        Get-CMTaskSequence -Name ("{0} - {1} - {2}" -f $CMTSPrefix, $OSBuild.OperatingSystem, $OSVersion) -Fast -ErrorAction Stop | Set-CMTaskSequenceStepApplyOperatingSystem -ImagePackage $CMOSImage -ImagePackageIndex 1
+
         ## Exit CM environment
         Set-Location -Path $env:SystemDrive -ErrorAction Stop
     }
@@ -91,4 +95,3 @@ Get-ChildItem -Path $ISOPath -Filter "*6.ISO" -Recurse -File | ForEach-Object {
         $_.ErrorDetails.Message
     }
 }
- 
