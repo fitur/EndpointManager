@@ -16,6 +16,9 @@ try {
     Import-Module -Name OSDBuilder
     Import-module ($env:SMS_ADMIN_UI_PATH.Substring(0,$Env:SMS_ADMIN_UI_PATH.Length-5) + '\ConfigurationManager.psd1')
 
+    ## Update
+    OSDBuilder -Update
+
     ## Setup
     Initialize-OSDBuilder
     Get-OSDBuilder -SetHome $OSDBuilderPath -Initialize -CreatePaths -Download OneDrive
@@ -30,9 +33,9 @@ Get-Volume | Where-Object {($_.DriveType -eq "CD-ROM") -and ($_.OperationalStatu
 }
 
 ## Process each ISO
-Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -File | ForEach-Object {
+foreach ($OSImage in (Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -File)) {
     ## Variables
-    $_.FullName -match "(?<version>2\dH(1|2))" | Out-Null
+    $OSImage.FullName -match "(?<version>2\dH(1|2))" | Out-Null
     $OSVersion = $Matches.version
     $TaskName = ("Windows 10 Enterprise x64 {0}" -f $OSVersion)
     $SiteCode = Get-PSDrive -PSProvider CMSITE -ErrorAction Stop
@@ -41,19 +44,18 @@ Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -File | ForEach-Object {
     if (!(Get-OSMedia -OSReleaseId $OSVersion)) {
 
         ## Mount OS media if not already mounted
-        if ((Get-DiskImage -ImagePath $_.FullName).Attached -ne $true) {
-            Mount-DiskImage -ImagePath $_.FullName
+        if ((Get-DiskImage -ImagePath $OSImage.FullName).Attached -ne $true) {
+            Mount-DiskImage -ImagePath $OSImage.FullName
         }
 
         ## Import OS media
-        #Import-OSMedia -Update -BuildNetFX -EditionID Enterprise -SkipGrid
-        Import-OSMedia -BuildNetFX -EditionID Enterprise -SkipGrid
+        Import-OSMedia -EditionID Enterprise -SkipGrid -Update -BuildNetFX
 
         ## Dismount OS media
-        Dismount-DiskImage -ImagePath $_.FullName
+        Dismount-DiskImage -ImagePath $OSImage.FullName
 
         ## Download OS media optional updates
-        Save-OSDBuilderDownload -UpdateOS 'Windows 10' -UpdateBuild $OSVersion -UpdateArch x64 -UpdateGroup Optional -Download
+        Save-OSDBuilderDownload -UpdateOS 'Windows 10' -UpdateBuild $OSVersion -UpdateArch x64 -UpdateGroup Optional -Download -WebClient
 
         ## Create OS build task
         Get-OSMedia -OSReleaseId $OSVersion -Newest | New-OSBuildTask -TaskName $TaskName -EnableNetFx3
@@ -66,7 +68,7 @@ Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -File | ForEach-Object {
     Get-DownOSDBuilder -Superseded Remove
 
     ## Build OS image
-    New-OSBuild -ByTaskName $TaskName -Execute -SkipComponentCleanup -Download
+    New-OSBuild -ByTaskName $TaskName -Download -Execute #-SkipComponentCleanup
 
     ## Export and import to CM
     try {
