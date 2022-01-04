@@ -26,7 +26,7 @@ catch [System.Exception] {
 
 ## Unmount all currently mounted ISOs
 Get-Volume | Where-Object {($_.DriveType -eq "CD-ROM") -and ($_.OperationalStatus -eq "OK")} | ForEach-Object {
-    Get-DiskImage -DevicePath ($_.Path).Substring(0, ($_.Path.Length - 1)) | Where-Object {$_.ImagePath -like "$ISOPath*"} | Dismount-DiskImage
+    Get-DiskImage -DevicePath ($_.Path).Substring(0, ($_.Path.Length - 1)) | Where-Object {$_.ImagePath -like "$ISOPath*"} | Dismount-DiskImage -Verbose
 }
 
 ## Process each ISO
@@ -46,22 +46,21 @@ Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -File | ForEach-Object {
         }
 
         ## Import OS media
-        Import-OSMedia -Update -BuildNetFX -EditionID Enterprise -SkipGrid
+        #Import-OSMedia -Update -BuildNetFX -EditionID Enterprise -SkipGrid
+        Import-OSMedia -BuildNetFX -EditionID Enterprise -SkipGrid
 
         ## Dismount OS media
         Dismount-DiskImage -ImagePath $_.FullName
 
-        ## Update OS media
-        #$OSMedia | Update-OSMedia -Download -Execute -SkipComponentCleanup # Performed in import
+        ## Download OS media optional updates
         Save-OSDBuilderDownload -UpdateOS 'Windows 10' -UpdateBuild $OSVersion -UpdateArch x64 -UpdateGroup Optional -Download
 
         ## Create OS build task
         Get-OSMedia -OSReleaseId $OSVersion -Newest | New-OSBuildTask -TaskName $TaskName -EnableNetFx3
-    } else {
-
-        ## Update OS media if already exist
-        Get-OSMedia -OSReleaseId $OSVersion -Newest | Update-OSMedia -Download -Execute -SkipComponentCleanup
     }
+
+    ## Download OS image updates
+    Get-OSMedia -OSReleaseId $OSVersion -Newest | Update-OSMedia -Download -Execute #-SkipComponentCleanup
 
     ## Build OS image
     New-OSBuild -ByTaskName $TaskName -Execute -SkipComponentCleanup -Download
@@ -75,15 +74,15 @@ Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -File | ForEach-Object {
         $WIMFile = Get-Item -Path ("{0}\OS\sources\install.wim" -f $OSBuild.FullName)
 
         ## Copy WIM file to CMOSPath and rename file to TaskName
-        Copy-Item -Path $WIMFile -Destination $CMOSPath -Force
+        Copy-Item -Path $WIMFile -Destination $CMOSPath -Force -Verbose
         $NewName = Rename-Item -Path (Get-Item -Path ("{0}\{1}" -f $CMOSPath, $WIMFile.Name)) -NewName "$(("{0} {1} {2} {3} {4}" -f $OSBuild.ImageName, $OSBuild.Arch, $OSBuild.ReleaseId, $OSBuild.UBR, (Get-Random -Minimum 1000 -Maximum 9999)) -replace " ","_").wim" -Force -PassThru
 
         ## Call CM environment
         Set-location -Path $SiteCode":" -ErrorAction Stop
 
         ## Import OS image into CM
-        $CMOSImage = New-CMOperatingSystemImage -Name ("{0} {1} {2}" -f $OSBuild.ImageName, $OSBuild.Arch, $OSBuild.ReleaseId) -Version $OSBuild.UBR -Description $OSBuild.ModifiedTime -Path $NewName -ErrorAction Stop
-        $CMOSImage | Start-CMContentDistribution -DistributionPointGroupName (Get-CMDistributionPointGroup | Sort-Object MemberCount -Descending | Select-Object -First 1 -ExpandProperty Name) -ErrorAction Stop
+        $CMOSImage = New-CMOperatingSystemImage -Name ("{0} {1} {2}" -f $OSBuild.ImageName, $OSBuild.Arch, $OSBuild.ReleaseId) -Version $OSBuild.UBR -Description $OSBuild.ModifiedTime -Path $NewName -ErrorAction Stop -Verbose
+        $CMOSImage | Start-CMContentDistribution -DistributionPointGroupName (Get-CMDistributionPointGroup | Sort-Object MemberCount -Descending | Select-Object -First 1 -ExpandProperty Name) -ErrorAction Stop -Verbose
 
         ## Edit task sequence
         #Get-CMTaskSequence -Name ("{0} - {1} - {2}" -f $CMTSPrefix, $OSBuild.OperatingSystem, $OSVersion) -Fast -ErrorAction Stop | Set-CMTaskSequenceStepApplyOperatingSystem -ImagePackage $CMOSImage -ImagePackageIndex 1
