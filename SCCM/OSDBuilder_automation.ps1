@@ -14,10 +14,10 @@ try {
 
     ## Import module
     Import-Module -Name OSDBuilder
-    Import-module ($env:SMS_ADMIN_UI_PATH.Substring(0,$Env:SMS_ADMIN_UI_PATH.Length-5) + '\ConfigurationManager.psd1')
+    Import-Module ($env:SMS_ADMIN_UI_PATH.Substring(0,$Env:SMS_ADMIN_UI_PATH.Length-5) + '\ConfigurationManager.psd1')
 
     ## Update
-    OSDBuilder -Update
+    #OSDBuilder -Update
 
     ## Setup
     Initialize-OSDBuilder
@@ -41,7 +41,7 @@ foreach ($OSImage in (Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -Fil
     $SiteCode = Get-PSDrive -PSProvider CMSITE -ErrorAction Stop
 
     ## Find imported OS media
-    if (!(Get-OSMedia -OSReleaseId $OSVersion)) {
+    if (!(Get-OSMedia -OSReleaseId $OSVersion -Newest x64)) {
 
         ## Mount OS media if not already mounted
         if ((Get-DiskImage -ImagePath $OSImage.FullName).Attached -ne $true) {
@@ -56,9 +56,10 @@ foreach ($OSImage in (Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -Fil
 
         ## Download OS media optional updates
         Save-OSDBuilderDownload -UpdateOS 'Windows 10' -UpdateBuild $OSVersion -UpdateArch x64 -UpdateGroup Optional -Download -WebClient
+        Save-OSDBuilderDownload -ContentDownload 'OneDriveSetup Production'
 
         ## Create OS build task
-        Get-OSMedia -OSReleaseId $OSVersion -Newest | New-OSBuildTask -TaskName $TaskName -EnableNetFx3
+        Get-OSMedia -OSReleaseId $OSVersion -Newest x64 | New-OSBuildTask -TaskName $TaskName -EnableNetFx3
     }
 
     ## Download OS image updates
@@ -90,7 +91,7 @@ foreach ($OSImage in (Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -Fil
         $CMOSImage | Start-CMContentDistribution -DistributionPointGroupName (Get-CMDistributionPointGroup | Sort-Object MemberCount -Descending | Select-Object -First 1 -ExpandProperty Name) -ErrorAction Stop -Verbose
 
         ## Edit task sequence
-        #Get-CMTaskSequence -Name ("{0} - {1} - {2}" -f $CMTSPrefix, $OSBuild.OperatingSystem, $OSVersion) -Fast -ErrorAction Stop | Set-CMTaskSequenceStepApplyOperatingSystem -ImagePackage $CMOSImage -ImagePackageIndex 1
+        Get-CMTaskSequence -Name ("{0} - {1} - {2}" -f $CMTSPrefix, $OSBuild.OperatingSystem, $OSVersion) -Fast -ErrorAction Stop | Set-CMTaskSequenceStepApplyOperatingSystem -ImagePackage $CMOSImage -ImagePackageIndex 1
 
         ## Exit CM environment
         Set-Location -Path $env:SystemDrive -ErrorAction Stop
