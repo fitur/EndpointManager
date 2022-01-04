@@ -62,6 +62,9 @@ Get-ChildItem -Path $ISOPath -Filter "*.ISO" -Recurse -File | ForEach-Object {
     ## Download OS image updates
     Get-OSMedia -OSReleaseId $OSVersion -Newest | Update-OSMedia -Download -Execute #-SkipComponentCleanup
 
+    ## Cleanup superseeded updates
+    Get-DownOSDBuilder -Superseded Remove
+
     ## Build OS image
     New-OSBuild -ByTaskName $TaskName -Execute -SkipComponentCleanup -Download
 
