@@ -3,7 +3,6 @@ $OSDBuilderPath = "D:\OSDBuilder"
 $ISOPath = "D:\OSDBuilder\ISO"
 $CMOSPath = "\\ne\system\SCCM\OS\OS Images\MS Client"
 $CMTSPrefix = "NLTG - Pilot"
-$SiteCode = Get-PSDrive -PSProvider CMSITE -ErrorAction Stop
 
 ## Install, import and initalize module
 try {
@@ -14,8 +13,9 @@ try {
     }
 
     ## Import module
-    Import-Module -Name OSDBuilder
-    Import-Module ($env:SMS_ADMIN_UI_PATH.Substring(0,$Env:SMS_ADMIN_UI_PATH.Length-5) + '\ConfigurationManager.psd1')
+    Import-Module -Name OSDBuilder -ErrorAction Stop
+    Import-Module ($env:SMS_ADMIN_UI_PATH.Substring(0,$Env:SMS_ADMIN_UI_PATH.Length-5) + '\ConfigurationManager.psd1') -ErrorAction Stop
+    $SiteCode = Get-PSDrive -PSProvider CMSITE -ErrorAction Stop
 
     ## Update
     #OSDBuilder -Update
@@ -98,6 +98,16 @@ foreach ($OSMedia in (Get-OSMedia -Revision OK)) {
         $CMOSImage = New-CMOperatingSystemImage -Name ("{0} {1} {2}" -f $OSBuild.ImageName, $OSBuild.Arch, $OSBuild.ReleaseId) -Version $OSBuild.UBR -Description $OSBuild.ModifiedTime -Path $NewName -ErrorAction Stop -Verbose
         $CMOSImage | Start-CMContentDistribution -DistributionPointGroupName (Get-CMDistributionPointGroup | Sort-Object MemberCount -Descending | Select-Object -First 1 -ExpandProperty Name) -ErrorAction Stop -Verbose
         $CMOSImage | Move-CMObject -FolderPath '.\OperatingSystemImage\MS Client' -Verbose
+
+        ## Remove old OS images from CM
+        $OldCMOsImages = Get-CMOperatingSystemImage -Name ("{0} {1} {2}" -f $OSBuild.ImageName, $OSBuild.Arch, $OSBuild.ReleaseId)
+        if ($OldCMOsImages.Count -gt 3) {
+            $OldCMOsImages | Where-Object {$_.SourceDate -le (Get-Date).AddMonths(-3)} | ForEach-Object {
+                $_ | Remove-CMOperatingSystemImage -Force
+                Set-Location -Path $env:SystemDrive -ErrorAction Stop
+                $_.PkgSourcePath | Remove-Item -Force
+            }
+        }
 
         ## Edit task sequence
         #Get-CMTaskSequence -Name ("{0} - {1} - {2}" -f $CMTSPrefix, $OSBuild.OperatingSystem, $OSVersion) -Fast -ErrorAction Stop | Set-CMTaskSequenceStepApplyOperatingSystem -ImagePackage $CMOSImage -ImagePackageIndex 1
