@@ -30,23 +30,17 @@ $Remediate = 0
 $TunnelName = "NLTG VPN CA"
 $OldTunnelName = "NLTG-ST-VPN"
 Get-ChildItem $env:SystemDrive\Users | Where-Object {($_.Name -notmatch "public") -and ($_.Name -notmatch "defaultuser") -and ($_.LastAccessTime -gt (Get-Date).AddDays(-1))} | ForEach-Object {
-    if (!(Get-LocalUser -Name $_.Name -ErrorAction SilentlyContinue)) {
-        if ($PBK = Get-Item -Path ("{0}\AppData\Roaming\Microsoft\Network\Connections\Pbk\rasphone.pbk" -f $_.FullName) -ErrorAction SilentlyContinue) {
-            if (Get-Content -Path $PBK.FullName -ErrorAction SilentlyContinue | Select-String -SimpleMatch "[$TunnelName]") {
-                Write-Verbose "User tunnel present for user $($_.Name). Adding to remediate list." -Verbose
-                $Remediate += 1
-            }
-            else {
-                Write-Verbose "User tunnel not present for user $($_.Name). Skipping." -Verbose
-            }
+    if ($PBK = Get-Item -Path ("{0}\AppData\Roaming\Microsoft\Network\Connections\Pbk\rasphone.pbk" -f $_.FullName) -ErrorAction SilentlyContinue) {
+        if (Get-Content -Path $PBK.FullName -ErrorAction SilentlyContinue | Select-String -SimpleMatch "[$TunnelName]") {
+            Write-Verbose "User tunnel present for user $($_.Name). Adding to remediate list." -Verbose
+            $Remediate += 1
         }
         else {
-            Write-Verbose "No PBK file present for user $($_.Name). Skipping." -Verbose
+            Write-Verbose "User tunnel not present for user $($_.Name). Skipping." -Verbose
         }
     }
     else {
-        # Skip if user is local
-        Write-Verbose "User $($_.Name) is local. Skipping." -Verbose
+        Write-Verbose "No PBK file present for user $($_.Name). Skipping." -Verbose
     }
 }
 if ($Remediate -gt 0) {
