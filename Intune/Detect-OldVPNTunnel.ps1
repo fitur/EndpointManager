@@ -29,8 +29,6 @@ param (
 $Remediate = 0
 $TunnelName = "NLTG VPN CA"
 $OldTunnelName = "NLTG-ST-VPN"
-
-# Get all user profiles which have been access the last day
 Get-ChildItem $env:SystemDrive\Users | Where-Object {($_.Name -notmatch "public") -and ($_.Name -notmatch "defaultuser") -and ($_.LastAccessTime -gt (Get-Date).AddDays(-1))} | ForEach-Object {
     if (!(Get-LocalUser -Name $_.Name -ErrorAction SilentlyContinue)) {
         if ($PBK = Get-Item -Path ("{0}\AppData\Roaming\Microsoft\Network\Connections\Pbk\rasphone.pbk" -f $_.FullName) -ErrorAction SilentlyContinue) {
@@ -51,8 +49,6 @@ Get-ChildItem $env:SystemDrive\Users | Where-Object {($_.Name -notmatch "public"
         Write-Verbose "User $($_.Name) is local. Skipping." -Verbose
     }
 }
-
-# Run second remediation check if required
 if ($Remediate -gt 0) {
     if (Get-VpnConnection -Name $OldTunnelName -AllUserConnection -ErrorAction SilentlyContinue) {
         Write-Verbose "Old VPN tunnel $OldTunnelName present. Remediation required." -Verbose
