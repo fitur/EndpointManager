@@ -1,10 +1,10 @@
 <#
 
 .SYNOPSIS
-    PowerShell script to detect any new user based AOVPN tunnel and simultaneously remove an old AllUserConnection-tunnel.
+    PowerShell script to remove an old AllUserConnection-tunnel based on the presence of a new user-based tunnel.
 
 .EXAMPLE
-    .\Detect-OldVPNTunnel.ps1
+    .\Remediate-OldVPNTunnel.ps1
 
 .DESCRIPTION
     This PowerShell script is deployed as a detection script using Proactive Remediations in Microsoft Endpoint Manager/Intune.
