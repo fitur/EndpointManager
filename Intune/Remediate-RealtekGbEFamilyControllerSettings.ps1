@@ -30,7 +30,6 @@ param (
 $AdapterName = "Realtek USB GbE Family Controller*"
 $AdapterSettings = ("*EEE", "*PriorityVLANTag", "EnableExtraPowerSaving", "EnableGreenEthernet")
 $AdapterValues = (0, 3, 0, 0)
-$Remediation = 0
 try {
     if (!($NetAdapter = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like $AdapterName})) {
         Write-Warning "Network adapter $AdapterName not found."
@@ -45,10 +44,6 @@ try {
         else {
             Write-Verbose "$DesiredSetting is correct or N/A. Skipping." -Verbose
         }
-    }
-    if ($Remediation -gt 0) {
-        Write-Verbose "Remediation required." -Verbose
-        exit 1
     }
 }
 catch {
