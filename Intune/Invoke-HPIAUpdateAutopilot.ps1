@@ -1,4 +1,4 @@
-﻿# HPIA variables
+# HPIA variables
 $URI = "http://ftp.hp.com/pub/caps-softpaq/cmit/HPIA.html"
 $SPList = "https://rgintunew10.blob.core.windows.net/drivers/splist.txt"
 $HPIAPath = Join-Path -Path $env:SystemDrive -ChildPath "HPIA"
@@ -32,7 +32,9 @@ $SPListFile = Get-ChildItem -Path $HPIAPath -Filter ($SPlist | Split-Path -Leaf)
 # Driver update process
 if ($HPIABinary) {
     if ($HPIAFile) {
-        Start-Process -FilePath $HPIABinary.FullName -ArgumentList "/Silent /Noninteractive /Debug /Operation:Analyze /SoftpaqDownloadFolder:$(Join-Path -path $HPIAPath -ChildPath 'Downloads') /SPList:'$($SPListFile.FullName)' /ReportFolder:$(Join-Path -path $HPIAPath -ChildPath 'Reports')" -Wait -ErrorAction SilentlyContinue
+        Start-Process -FilePath $HPIABinary.FullName -ArgumentList "/Silent /Noninteractive /Debug /Operation:DownloadSoftPaqs /Action:Extract /SoftpaqDownloadFolder:$(Join-Path -path $HPIAPath -ChildPath 'Downloads') /SPList:$($SPListFile.FullName) /ReportFolder:$(Join-Path -path $HPIAPath -ChildPath 'Reports')" -Wait -ErrorAction SilentlyContinue
+        #Start-Process -FilePath $HPIABinary.FullName -ArgumentList "/Silent /Operation:DownloadSoftPaqs /Action:Extract /SoftpaqDownloadFolder:'$(Join-Path -path $HPIAPath -ChildPath 'Downloads')' /SPList:'$($SPListFile.FullName)' /ReportFolder:'$(Join-Path -path $HPIAPath -ChildPath 'Reports')'" -Wait -ErrorAction SilentlyContinue
+        #Start-Process -FilePath $HPIABinary.FullName -ArgumentList "/Silent /Operation:Analyze /Action:Install /SoftpaqDownloadFolder:$(Join-Path -path $HPIAPath -ChildPath 'Downloads') /SPList:'$($SPListFile.FullName)' /ReportFolder:$(Join-Path -path $HPIAPath -ChildPath 'Reports')" -Wait -ErrorAction SilentlyContinue
     } else {
         Start-Process -FilePath $HPIABinary.FullName -ArgumentList "/Silent /Noninteractive /Debug /Operation:Analyze /Action:Install /Selection:All /Category:Drivers /SoftpaqDownloadFolder:$(Join-Path -path $HPIAPath -ChildPath 'Downloads') /ReportFolder:$(Join-Path -path $HPIAPath -ChildPath 'Reports')" -Wait -ErrorAction Stop
     }
