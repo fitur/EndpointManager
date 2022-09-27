@@ -38,5 +38,10 @@ $CertPW = "password-in-plain-text" | ConvertTo-SecureString -AsPlainText -Force
 
 # Run import on all distributionpoints which currently use a certificate
 Get-CMDistributionPoint | Where-Object {($_.EmbeddedProperties.CertificateFile.Value1) -and ($_.EmbeddedProperties.CertificateFile.Value1 -ne $CertPath)} | ForEach-Object {
-    $_ | Set-CMDistributionPoint -CertificatePath $CertPath -CertificatePassword $CertPW -UserDeviceAffinity AllowWithAutomaticApproval -Force -WarningAction SilentlyContinue
+    try {
+        $_ | Set-CMDistributionPoint -CertificatePath $CertPath -CertificatePassword $CertPW -UserDeviceAffinity AllowWithAutomaticApproval -Force -WarningAction Stop
+    }
+    catch [System.Exception] {
+        Write-Warning -Message $_.Exception.Message
+    }    
 } 
