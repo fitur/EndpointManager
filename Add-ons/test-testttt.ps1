@@ -1,4 +1,4 @@
- function Import-CMEnvironment {
+function Import-CMEnvironment {
     try {
         Import-Module ($Env:SMS_ADMIN_UI_PATH.Substring(0, $Env:SMS_ADMIN_UI_PATH.Length - 5) + '\ConfigurationManager.psd1') -ErrorAction Stop
         $script:SiteCode = Get-PSDrive -PSProvider CMSITE -ErrorAction Stop
