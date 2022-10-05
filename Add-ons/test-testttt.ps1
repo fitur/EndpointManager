@@ -13,27 +13,31 @@ $HPIADir = "\\han-res-103\sources$\OSD\Drivers\HPIA"
 $RepoDir = Join-Path -Path $HPIADir -ChildPath "Repository"
 $BinaryDir = Join-Path -Path $HPIADir -ChildPath "Binary"
 $ModuleDir = Join-Path -Path $HPIADir -ChildPath "Modules"
-$LogsDir = Join-Path -Path $HPIADir -ChildPath "Logs"
-$CVAPath = Join-Path -Path $HPIADir -ChildPath "CVA.txt"
+#$LogsDir = Join-Path -Path $HPIADir -ChildPath "Logs"
+#$CVAPath = Join-Path -Path $HPIADir -ChildPath "CVA.txt"
 
 # Create and step into directory
 New-Item -Path $RepoDir -ItemType Directory -Force
 Set-Location -Path $RepoDir -ErrorAction Stop
 
 # Initialize repo
-Initialize-Repository -Verbose -ErrorAction Stop
-Set-RepositoryConfiguration -Setting OnRemoteFileNotFound -Value LogAndContinue -Verbose
-Set-RepositoryConfiguration -Setting OfflineCacheMode -CacheValue Enable -Verbose
+if ([System.DateTime]((Get-RepositoryInfo -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DateLastModified) -split "T")[0] -lt (Get-Date).AddDays(-7)) {
+    Initialize-Repository -Verbose -ErrorAction Stop
+    Set-RepositoryConfiguration -Setting OnRemoteFileNotFound -Value LogAndContinue -Verbose
+    Set-RepositoryConfiguration -Setting OfflineCacheMode -CacheValue Enable -Verbose
+}
 
 Get-RepositoryInfo | Select-Object -ExpandProperty Filters | Select-Object -ExpandProperty Platform | ForEach-Object {Remove-RepositoryFilter -Platform $_ -Yes}
 
 Get-WmiObject -ComputerName $SiteCode.SiteServer -Namespace "root\SMS\site_$($SiteCode)" -Query 'select distinct Manufacturer, Model from SMS_G_System_COMPUTER_SYSTEM' | Where-Object {$_.Model -like "HP*"} | ForEach-Object {
-    $SystemID = Get-HPDeviceDetails -Name $_.Model -Like | Select-Object -ExpandProperty SystemID
-    #Add-RepositoryFilter -Platform $SystemID -Os win10 -OsVer 21H2 -Category Bios,Software,Driver,Software -ReleaseType Recommended -Characteristic *
+    Get-HPDeviceDetails -Name $_.Model -Like -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.SystemID) {
+            Add-RepositoryFilter -Platform $_.SystemID -Os win10 -OsVer 21H2 -Category Bios,Software,Driver,Software -ReleaseType Recommended -Characteristic * -ErrorAction SilentlyContinue
+            Add-RepositoryFilter -Platform $_.SystemID -Os win10 -OsVer 21H1 -Category Bios,Software,Driver,Software -ReleaseType Recommended -Characteristic * -ErrorAction SilentlyContinue
+        }
+    }
 }
     
-
-
 #Add-RepositoryFilter -Platform 894F -Os win10 -OsVer 21H2 -Category Bios,Firmware,Driver,Software -ReleaseType Recommended -Characteristic *
 #Add-RepositoryFilter -Platform 8952 -Os win10 -OsVer 21H2 -Category Bios,Firmware,Driver,Software -ReleaseType Recommended -Characteristic *
 
