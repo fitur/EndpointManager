@@ -13,8 +13,8 @@ $HPIADir = "\\han-res-103\sources$\OSD\Drivers\HPIA"
 $RepoDir = Join-Path -Path $HPIADir -ChildPath "Repository"
 $BinaryDir = Join-Path -Path $HPIADir -ChildPath "Binary"
 $ModuleDir = Join-Path -Path $HPIADir -ChildPath "Modules"
-#$LogsDir = Join-Path -Path $HPIADir -ChildPath "Logs"
-#$CVAPath = Join-Path -Path $HPIADir -ChildPath "CVA.txt"
+$LogsDir = Join-Path -Path $HPIADir -ChildPath "Logs"
+$CVAPath = Join-Path -Path $HPIADir -ChildPath "CVA.txt"
 
 # Create and step into directory
 New-Item -Path $RepoDir -ItemType Directory -Force
@@ -27,8 +27,10 @@ if ([System.DateTime]((Get-RepositoryInfo -ErrorAction SilentlyContinue | Select
     Set-RepositoryConfiguration -Setting OfflineCacheMode -CacheValue Enable -Verbose
 }
 
+# Remove all filters from repo (cleanup)
 Get-RepositoryInfo | Select-Object -ExpandProperty Filters | Select-Object -ExpandProperty Platform | ForEach-Object {Remove-RepositoryFilter -Platform $_ -Yes}
 
+# Add all found models into repo filters
 Get-WmiObject -ComputerName $SiteCode.SiteServer -Namespace "root\SMS\site_$($SiteCode)" -Query 'select distinct Manufacturer, Model from SMS_G_System_COMPUTER_SYSTEM' | Where-Object {$_.Model -like "HP*"} | ForEach-Object {
     Get-HPDeviceDetails -Name $_.Model -Like -ErrorAction SilentlyContinue | ForEach-Object {
         if ($_.SystemID) {
@@ -37,10 +39,17 @@ Get-WmiObject -ComputerName $SiteCode.SiteServer -Namespace "root\SMS\site_$($Si
         }
     }
 }
-    
-#Add-RepositoryFilter -Platform 894F -Os win10 -OsVer 21H2 -Category Bios,Firmware,Driver,Software -ReleaseType Recommended -Characteristic *
-#Add-RepositoryFilter -Platform 8952 -Os win10 -OsVer 21H2 -Category Bios,Firmware,Driver,Software -ReleaseType Recommended -Characteristic *
 
+# Add models from separate CVA-file into repo filters
+Get-Content -Path $CVAPath | ForEach-Object {
+    Get-HPDeviceDetails -Name $_ -Like -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.SystemID) {
+            Add-RepositoryFilter -Platform $_.SystemID -Os win10 -OsVer 21H2 -Category Bios,Software,Driver,Software -ReleaseType Recommended -Characteristic * -ErrorAction SilentlyContinue
+            Add-RepositoryFilter -Platform $_.SystemID -Os win10 -OsVer 21H1 -Category Bios,Software,Driver,Software -ReleaseType Recommended -Characteristic * -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# Initiate sync and cleanup
 Invoke-RepositorySync
 Invoke-RepositoryCleanup
- 
