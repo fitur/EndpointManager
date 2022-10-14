@@ -26,7 +26,7 @@ $HPIADescription = (($WebReq.AllElements | Where-Object {($_.tagname -eq 'tr') -
 $HPIAInstallParams = '-f"{0}" -s -e' -f $HPIABinaryPath
 
 # Run installer if version is greater than current
-if ([System.Version]$HPIAVersion -gt [System.Version]$HPIAPackage.Version) {
+if (([string]::IsNullOrEmpty($HPIAPackage.Version)) -or ([System.Version]$HPIAVersion -gt [System.Version]$HPIAPackage.Version)) {
     Start-BitsTransfer -Source $SoftPaqURL -Destination $SoftPaqDownloadPath
     $HPIAInstallExecutable = Get-Item $SoftPaqDownloadPath -ErrorAction Stop
     Start-Process -FilePath $HPIAInstallExecutable.FullName -ArgumentList $HPIAInstallParams -Wait -ErrorAction Stop
