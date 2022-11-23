@@ -32,7 +32,7 @@ $AdminUserObject = Get-CimInstance -ClassName Win32_UserAccount -Filter "LocalAc
 
 ## Function
 $AdminGroupObject.psbase.Invoke("Members") | ForEach-Object {
-    $TempAdminUser = $_.GetType().InvokeMember('ADSPath','GetProperty',$null,$_,$null) -split "//" | Select-Object -Last 1
+    $TempAdminUser = ($_.GetType().InvokeMember('ADSPath','GetProperty',$null,$_,$null) -split "//" | Select-Object -Last 1) -replace "/","\"
     if (($TempAdminUser -notmatch $AdminUserObject.Name) -and ($TempAdminUser -notmatch "S-1-12-1-")) {
         Write-Host "Found unallowed local administrator: $TempAdminUser"
         $Remediate += 1
