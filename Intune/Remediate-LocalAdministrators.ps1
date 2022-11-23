@@ -26,18 +26,15 @@
 param (
 )
 ## Variables
-$TunnelName = "NLTG VPN CA"
-$OldTunnelName = "NLTG-ST-VPN"
-try {
-    Get-VpnConnection -Name $OldTunnelName -AllUserConnection -ErrorAction SilentlyContinue | ForEach-Object {
-        rasdial $_.Name /DISCONNECT
-        Wait-Event -Timeout 5
-        rasdial $_.Name /DISCONNECT
-        Remove-VpnConnection -Name $_.Name -AllUserConnection -Force
+$AdminGroupObject = ([adsi]"WinNT://$env:COMPUTERNAME").psbase.children.find((([Security.Principal.SecurityIdentifier]'S-1-5-32-544').Translate([System.Security.Principal.NTAccount]).Value | Split-Path -Leaf))
+$AdminUserObject = Get-CimInstance -ClassName Win32_UserAccount -Filter "LocalAccount = TRUE and SID like 'S-1-5-%-500'"
+
+## Function
+$AdminGroupObject.psbase.Invoke("Members") | ForEach-Object {
+    $TempAdminUser = $_.GetType().InvokeMember('ADSPath','GetProperty',$null,$_,$null) -split "//" | Select-Object -Last 1
+    if (($TempAdminUser -notmatch $AdminUserObject.Name) -and ($TempAdminUser -notmatch "S-1-12-1-")) {
+        Write-Host "Removing unallowed local administrator: $TempAdminUser"
+        net localgroup $AdminGroupObject.Name $TempAdminUser /delete
+        #$AdminGroup.remove("WinNT://$TempAdminUser")
     }
-}
-catch {
-    $ErrorMessage = $_.Exception.Message 
-    Write-Warning $ErrorMessage
-    exit 1
 }
