@@ -40,7 +40,7 @@ $AdminGroupObject.psbase.Invoke("Members") | ForEach-Object {
 }
 
 ## Evaluation
-if ($Array.Count -gt 0) {
+if ($Remediate -gt 0) {
     Write-Host "More administrative users than allowed. Remediating."
     exit 1
 } else {
