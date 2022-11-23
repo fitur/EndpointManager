@@ -1,7 +1,7 @@
 <#
 
 .SYNOPSIS
-    PowerShell script to detect unallowed users with administrative privileges. Used in combination with remediation script in order to remove discovered users.
+    PowerShell script to detect unallowed users with administrative privileges.
 
 .EXAMPLE
     .\Detect-LocalAdministrators.ps1
