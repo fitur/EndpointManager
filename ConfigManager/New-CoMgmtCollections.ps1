@@ -29,7 +29,7 @@ $Workloads | ForEach-Object {
             $Collection = New-CMCollection -CollectionType Device -Name ("{0} - {1}" -f $CMWorkloadCollectionPrefix, $_) -LimitingCollection (Get-CMCollection -Id "SMS00001") -RefreshType Periodic -RefreshSchedule (New-CMSchedule -RecurInterval Days -RecurCount 1) -ErrorAction Stop
             $Collection | Move-CMObject -FolderPath $CMCollectionDirectory -ErrorAction SilentlyContinue
         }
-        $Collection | Add-CMDeviceCollectionIncludeMembershipRule -IncludeCollectionName "Co-management Pilot"
+        $Collection | Add-CMDeviceCollectionIncludeMembershipRule -IncludeCollectionName "Co-Management Pilot"
     }
     catch [System.Exception]
     {
