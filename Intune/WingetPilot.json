@@ -1,0 +1,36 @@
+{
+	"$schema" : "https://aka.ms/winget-packages.schema.2.0.json",
+	"CreationDate" : "2023-03-31T13:32:28.252-00:00",
+	"Sources" : 
+	[
+		{
+			"Packages" : 
+			[
+				{
+					"PackageIdentifier" : "7zip.7zip",
+					"Version" : "22.01"
+				},
+				{
+					"PackageIdentifier" : "Citrix.Workspace",
+					"Version" : "23.3.0.55"
+				},
+				{
+					"PackageIdentifier" : "Mozilla.Firefox",
+					"Version" : "111.0.1"
+				},
+				{
+					"PackageIdentifier" : "Google.Chrome",
+					"Version" : "111.0.5563.147"
+				}
+			],
+			"SourceDetails" : 
+			{
+				"Argument" : "https://cdn.winget.microsoft.com/cache",
+				"Identifier" : "Microsoft.Winget.Source_8wekyb3d8bbwe",
+				"Name" : "winget",
+				"Type" : "Microsoft.PreIndexed.Package"
+			}
+		}
+	],
+	"WinGetVersion" : "1.4.10173"
+}
