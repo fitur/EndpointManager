@@ -8,19 +8,27 @@
 			[
 				{
 					"PackageIdentifier" : "7zip.7zip",
-					"Version" : "22.01"
+					"Version" : "22.01",
+					"InstallMode" : "Silent",
+					"MSIArguments" : ""
 				},
 				{
 					"PackageIdentifier" : "Citrix.Workspace",
-					"Version" : "23.3.0.55"
+					"Version" : "23.3.0.55",
+					"InstallMode" : "Silent",
+					"MSIArguments" : ""
 				},
 				{
 					"PackageIdentifier" : "Mozilla.Firefox",
-					"Version" : "113.0.1"
+					"Version" : "113.0.2",
+					"InstallMode" : "Silent",
+					"MSIArguments" : ""
 				},
 				{
 					"PackageIdentifier" : "Google.Chrome",
-					"Version" : "113.0.5672.127"
+					"Version" : "113.0.5672.127",
+					"InstallMode" : "Silent",
+					"MSIArguments" : ""
 				}
 			],
 			"SourceDetails" : 
