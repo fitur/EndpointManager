@@ -32,19 +32,20 @@ Param (
 
 )
 
-$RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\"
-[string[]]$Functions = Get-ItemPropertyValue $RegPath -Name "DisabledComponents" -ErrorAction SilentlyContinue
+$RegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\"
+[string[]]$RegValue = Get-ItemPropertyValue $RegPath -Name "DisabledComponents" -ErrorAction SilentlyContinue
 
 try {
+    
+    if (-not $null -eq $RegValue) {
 
-    if ($Functions) {
-
-        Write-Host 'Creating QuickAccessToolbarStyleExplorer property...'
+        Write-Host 'Setting QuickAccessToolbarStyleExplorer property value to 0xFF.'
         Set-ItemProperty -Path $RegPath -Name "DisabledComponents" -Value "0xFF" -Force
 
-    } else {
+    }
+    else {
 
-        Write-Host "Unable to read $RegPath."
+        Write-Host "Unable to read QuickAccessToolbarStyleExplorer. Creating key and setting property value 0xFF."
         New-ItemProperty -Path $RegPath -Name "DisabledComponents" -PropertyType DWord -Value "0xFF" -Force 
 
     }

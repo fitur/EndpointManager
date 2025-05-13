@@ -17,9 +17,9 @@
     https://www.github.com/fitur
 
 .NOTES
-    Version:        1.0.0
+    Version:        1.0.1
     Creation Date:  2025-05-09
-    Last Updated:   2025-05-09
+    Last Updated:   2025-05-13
     Author:         Peter Olausson
     Contact:        admin@fitur.se
 
@@ -31,28 +31,21 @@ Param (
 
 )
 
-$RegPath = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\"
-[string[]]$Functions = Get-ItemPropertyValue $RegPath -Name "DisabledComponents" -ErrorAction SilentlyContinue
-
-if (-not ($Functions)) {
-
-    Write-Host 'Unable to read $RegPath.'
-    Exit 1
-
-}
+$RegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\"
 
 try {
+    
+    [string[]]$RegValue = Get-ItemPropertyValue $RegPath -Name "DisabledComponents" -ErrorAction Stop
 
-    If ($Functions -Match '0xFF') {
+    if ("255" -eq $RegValue) {
 
-        Write-Host 'Correct DisabledComponents value detected. No remediation required.'
+        Write-Host 'DisabledComponents key found with correct value. No remediation required.'
         Exit 0
 
     }
+    else {
 
-    Else {
-
-        Write-Host 'Incorrect DisabledComponents value not detected. Remediation required.'
+        Write-Host 'DisabledComponents key found with incorrect value. Remediation required.'
         Exit 1
 
     }
