@@ -4,13 +4,11 @@
     PowerShell script detect if IPv6 is disabled in the registry.
 
 .EXAMPLE
-    .\Remediate-DisabledComponents.ps1
+    .\Remediate-RegValue.ps1
 
 .DESCRIPTION
-    This PowerShell script remediates the DisabledComponents registry key to enable IPv6.
-    It sets the value of the DisabledComponents key to 0xFF, which indicates that IPv6 is disabled.
-    The script checks if the registry key exists and if it does, it updates the value.
-    If the key does not exist, it creates the key with the specified value.
+    This PowerShell script remediates a registry key with a specific value.
+    If the value does not match, it indicates that remediation is required. The script will output a message indicating whether remediation is required.
 
 .LINK
     https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
