@@ -31,9 +31,9 @@ Param (
 )
 
 # Set the registry parameters
-$RegPath = "HKCU:\Software\CSI Helsinki Oy\CSI Lawyer\Databases\CSILawyer_Setterwalls_PRODUCTION"
+$RegPath = "HKCU:\Software\Test"
 $RegName = "ConnectionString"
-$RegData = "Rb/cVDfW5FSwX9ipWDnxPT1xbAGkfjLex0COr1BJ5D/00CWGoKjCNt8WdlY8D3RDTHZv2k02AaEbrRlEsfqyIZcCSiB6qRPqnl58HWQo4DSSH9wkU7UI3rn63di7NsqzdGFq6XRQEv+X4Febs+XDbjIXm3jBwV+cjhFGGlz9ORlUQBLs0vX4EBg5i5GeTQeM5uwCHut83wXQvQCavWiHkSzo16hAID855WTN2ZtPPJlc4N7EdIJmdUc29eseQAR1jNW9J+i/6MciV12G83uB9P/sNju/0vVcxCxRqJOv/tKyJ6XLbAQs518zQwvn0vtidw2qR10rfz/PQy9U3APaYzkso38lpRKCJTbcoVq56a2Nr5lu5Qqc+NJ72YjQjlx2"
+$RegData = "Rb/cVDfW5FSwX9ipWDnxPT1xbAGkfj2Nr5lu5Qqc+NJ72YjQjlx2"
 $RegType = "String"
 
 # Check if the registry key exists
