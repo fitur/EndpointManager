@@ -1,0 +1,34 @@
+# Secrets & credentials — never commit these
+*.env
+.env*
+*.pfx
+*.pem
+*.key
+*.cer
+*.crt
+secrets.*
+*secret*.json
+*credential*.json
+appsettings.*.json
+
+# PowerShell / build artifacts
+*.log
+*.tmp
+*.bak
+*.ps1xml
+*.psd1.bak
+
+# IntuneWin packaging output
+*.intunewin
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Local test / scratch data
+/local/
+/scratch/
+*.local.*
