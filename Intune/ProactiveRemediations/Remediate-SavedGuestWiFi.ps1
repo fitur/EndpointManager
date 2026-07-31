@@ -7,8 +7,7 @@
     .\Remediate-SavedGuestWiFi.ps1
 
 .DESCRIPTION
-    This PowerShell script is used to remove saved guest Wi-Fi networks from the local system.
-    It checks for any saved guest Wi-Fi networks and deletes them if found.
+    This PowerShell script is deployed as a remediation script using Proactive Remediations in Microsoft Endpoint Manager/Intune.
 
 .LINK
     https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
@@ -17,9 +16,9 @@
     https://www.github.com/fitur
 
 .NOTES
-    Version:        1.0.1
-    Creation Date:  2024-03-22
-    Last Updated:   2025-05-08
+    Version:        1.0.0
+    Creation Date:  Mars 22, 2024
+    Last Updated:   Mars 22, 2024
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -31,26 +30,17 @@ Param (
 
 )
 
-# Specify the SSID of the guest Wi-Fi network to check for
-$SSID = "Guest"
+$GuestWiFi = (netsh.exe wlan show profiles) -match 'Guest'
 
-try {
-    
-    $GuestWiFi = (netsh.exe wlan show profiles) -match $SSID
+Try {
+
     $GuestWiFi | ForEach-Object {
-        #netsh.exe wlan delete profile ($_ -split ": " | Select-Object -Last 1)
-        $Interface = Get-NetIPInterface | Where-Object { $_.InterfaceAlias -like "*$SSID*" }
-        if ($Interface) {
-            Set-NetIPInterface -InterfaceIndex $Interface.InterfaceIndex -AddressFamily IPv4 -InterfaceMetric 999
-            Write-Host "Priority of SSID '$SSID' has been lowered."
-        } else {
-            Write-Host "No matching interface found for SSID '$SSID'."
-        }
+        netsh.exe wlan delete profile ($_ -split ": " | Select-Object -Last 1)
     }
 
 }
 
-catch {
+Catch {
 
     $ErrorMessage = $_.Exception.Message 
     Write-Host $ErrorMessage

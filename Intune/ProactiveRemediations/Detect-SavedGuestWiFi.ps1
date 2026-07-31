@@ -7,9 +7,7 @@
     .\Detect-SavedGuestWiFi.ps1
 
 .DESCRIPTION
-    This PowerShell script is used to check if any guest Wi-Fi networks are saved on the local system.
-    If any guest Wi-Fi networks are found, it outputs "Guest Wi-Fi found. Remediation required." and exits with a status code of 1.
-    If no guest Wi-Fi networks are found, it outputs "No guest Wi-Fi found." and exits with a status code of 0.
+    This PowerShell script is deployed as a detection script using Proactive Remediations in Microsoft Endpoint Manager/Intune.
 
 .LINK
     https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
@@ -18,9 +16,9 @@
     https://www.github.com/fitur
 
 .NOTES
-    Version:        1.0.1
-    Creation Date:  2024-03-22
-    Last Updated:   2025-05-08
+    Version:        1.0.0
+    Creation Date:  Mars 22, 2024
+    Last Updated:   Mars 22, 2024
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -32,18 +30,20 @@ Param (
 
 )
 
-# Specify the SSID of the guest Wi-Fi network to check for
-$SSID = "Guest"
+$GuestWiFi = (netsh.exe wlan show profiles) -match 'Guest'
 
 Try {
-    
-    $GuestWiFi = (netsh.exe wlan show profiles) -match $SSID
-    if ($null -eq $GuestWiFi) {
+
+    If ($null -eq $GuestWiFi) {
 
         Write-Host 'No guest Wi-Fi found.'
         Exit 0
 
-    } else {
+    }
+
+    $RasphoneData = (Get-Content $RasphonePath | Select-String UseRasCredentials) | ConvertFrom-StringData
+
+    If ($RasphoneData.UseRasCredentials -eq '1') {
 
         Write-Host 'Guets Wi-Fi found. Remediation required.'
         Exit 1
