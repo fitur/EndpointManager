@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.4
 <#
 .SYNOPSIS
     Packages and uploads an Intune Win32 app from a zip-packaged PSADT application.
@@ -10,18 +10,23 @@
     is written to the extracted application directory, and the app is uploaded to
     Intune via the IntuneWin32App module using non-interactive client credentials.
 
-    Supported detection rule formats in ApplicationInformation.txt:
-      Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0.0  (short hives HKLM, HKCU, HKCR, HKU, HKCC also accepted)
+    Supported detection rule formats in ApplicationInformation.txt
+    (declared as DetectionMethod.(REG), DetectionMethod.(MSI) or DetectionMethod.(FILE)):
+      Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0.0
+                 Short hives HKLM, HKCU, HKCR, HKU and HKCC are also accepted.
       File     : %ProgramFiles%\App\file.exe >= 1.0.0
       MSI      : {ProductCode-GUID}
 
     If the PNG icon is missing or unreadable a blank 1x1 pixel PNG is used instead.
 
-    Authentication credentials can be supplied as parameters or via environment
-    variables (INTUNE_TENANT_ID, INTUNE_CLIENT_ID, INTUNE_CLIENT_SECRET).
+    Credentials can be supplied as parameters or via environment variables
+    (INTUNE_TENANT_ID, INTUNE_CLIENT_ID, INTUNE_CLIENT_SECRET).
+
+    NOTE: requires PowerShell 7.4+. Uses ternary operators, null-coalescing and
+    ConvertFrom-Json -AsHashtable, none of which work on Windows PowerShell 5.1.
 
 .PARAMETER AppPath
-    Full path to the zip file to process.
+    Full or relative path to the zip file to process.
 
 .PARAMETER TenantID
     Entra ID tenant ID. Falls back to $env:INTUNE_TENANT_ID.
@@ -32,13 +37,47 @@
 .PARAMETER ClientSecret
     App registration client secret. Falls back to $env:INTUNE_CLIENT_SECRET.
 
+.PARAMETER DescriptionsPath
+    Location of IntuneAppDescriptions.json. Accepts an http(s) URL or a local file
+    path. Falls back to $env:INTUNE_DESCRIPTIONS_PATH, then to the repository copy
+    on GitHub.
+
+    Each entry may be either a plain description string, or an object that also
+    overrides the app name shown in Intune:
+
+        "Chrome": "## Google Chrome ...",
+        "7Zip":   { "displayName": "7-Zip", "description": "## 7-Zip ..." }
+
+    With an override the app is named "<displayName> <Version>" (7-Zip 26.02);
+    without one it is "<Vendor> <Name> <Version>" (IgorPavlov 7Zip 26.02).
+
+.PARAMETER Architecture
+    Architecture requirement sent to Intune. Defaults to x64.
+
+.PARAMETER MinimumWindowsRelease
+    Minimum supported Windows release sent to Intune. Defaults to W11_21H2, the
+    earliest Windows 11 release. Note that omitting the requirement rule entirely
+    makes the IntuneWin32App module fall back to Windows 10 20H2.
+
+.OUTPUTS
+    PSCustomObject with DisplayName, AppId, JsonPath, DetectionType and DescriptionFound.
+
 .EXAMPLE
     .\New-IntuneWin32AppJson.ps1 -AppPath "C:\AppTest\MyApp_1.0.zip"
 
 .EXAMPLE
-    .\New-IntuneWin32AppJson.ps1 -AppPath "C:\AppTest\MyApp_1.0.zip" -TenantID "..." -ClientID "..." -ClientSecret "..."
+    # Validate parsing and JSON generation without touching Intune
+    .\New-IntuneWin32AppJson.ps1 -AppPath ".\MyApp_1.0.zip" -WhatIf
+
+.EXAMPLE
+    .\New-IntuneWin32AppJson.ps1 -AppPath ".\MyApp_1.0.zip" -DescriptionsPath "C:\Scripts\IntuneAppDescriptions.json"
+
+.EXAMPLE
+    # Allow Windows 10 22H2 and 32-bit hardware for a legacy package
+    .\New-IntuneWin32AppJson.ps1 -AppPath ".\LegacyApp_2.0.zip" -Architecture x64x86 -MinimumWindowsRelease W10_22H2
 #>
 
+[CmdletBinding(SupportsShouldProcess)]
 param (
     [Parameter(Mandatory = $true)]
     [ValidateScript({
@@ -48,105 +87,203 @@ param (
         if ([System.IO.Path]::GetExtension($_) -ne ".zip") {
             throw "AppPath '$_' is not a .zip file."
         }
-        return $true
+        $true
     })]
     [string]$AppPath,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter()]
     [string]$TenantID = $env:INTUNE_TENANT_ID,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter()]
     [string]$ClientID = $env:INTUNE_CLIENT_ID,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter()]
     [string]$ClientSecret = $env:INTUNE_CLIENT_SECRET,
 
-    [Parameter(Mandatory = $false)]
-    [string]$DescriptionsPath = $env:INTUNE_DESCRIPTIONS_PATH
+    [Parameter()]
+    [string]$DescriptionsPath = ($env:INTUNE_DESCRIPTIONS_PATH ??
+        "https://raw.githubusercontent.com/fitur/EndpointManager/refs/heads/master/Intune/data/IntuneAppDescriptions.json"),
+
+    # ValidateSet values mirror New-IntuneWin32AppRequirementRule in the IntuneWin32App module
+    [Parameter()]
+    [ValidateSet("x64", "x86", "arm64", "x64x86", "AllWithARM64")]
+    [string]$Architecture = "x64",
+
+    [Parameter()]
+    [ValidateSet("W10_1607", "W10_1703", "W10_1709", "W10_1803", "W10_1809", "W10_1903", "W10_1909",
+                 "W10_2004", "W10_20H2", "W10_21H1", "W10_21H2", "W10_22H2", "W11_21H2", "W11_22H2")]
+    [string]$MinimumWindowsRelease = "W11_21H2"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Resolve AppPath to absolute path in case a relative path was supplied
+# Resolve to absolute path so relative input works from any working directory
 $AppPath = (Resolve-Path -Path $AppPath).Path
 
+# These mirror the lookup tables inside New-IntuneWin32AppRequirementRule so the generated
+# JSON artifact records the same values that are actually sent to Intune.
+$architectureMap = @{
+    "x64" = "x64"; "x86" = "x86"; "arm64" = "arm64"
+    "x64x86" = "x64,x86"; "AllWithARM64" = "x64,x86,arm64"
+}
+$windowsReleaseMap = @{
+    "W10_1607" = "1607"; "W10_1703" = "1703"; "W10_1709" = "1709"; "W10_1803" = "1803"
+    "W10_1809" = "1809"; "W10_1903" = "1903"; "W10_1909" = "1909"; "W10_2004" = "2004"
+    "W10_20H2" = "2H20"; "W10_21H1" = "21H1"; "W10_21H2" = "Windows10_21H2"
+    "W10_22H2" = "Windows10_22H2"; "W11_21H2" = "Windows11_21H2"; "W11_22H2" = "Windows11_22H2"
+}
+
 #region Functions
+
+function Get-NormalizedKey {
+    <#
+    .SYNOPSIS
+        Normalises an app name for fuzzy comparison by stripping every character
+        that is not a letter or digit and lowercasing the result.
+        This makes "7Zip", "7-Zip" and "7 Zip" all compare equal.
+    #>
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value
+    )
+    ($Value -replace '[^\p{L}\p{Nd}]', '').ToLowerInvariant()
+}
+
+function Resolve-DescriptionEntry {
+    <#
+    .SYNOPSIS
+        Normalises one entry from IntuneAppDescriptions.json into Description and DisplayName.
+
+    .DESCRIPTION
+        Two entry shapes are supported so existing files keep working:
+          "Chrome": "## Google Chrome ..."                        -> description only
+          "7Zip"  : { "displayName": "7-Zip",
+                      "description": "## 7-Zip ..." }             -> description plus name override
+    #>
+    [OutputType([pscustomobject])]
+    param (
+        [Parameter(Mandatory)][AllowNull()]$Entry
+    )
+
+    if ($Entry -is [System.Collections.IDictionary]) {
+        return [pscustomobject]@{
+            Description = $Entry.Contains("description") ? [string]$Entry["description"] : ""
+            DisplayName = $Entry.Contains("displayName") ? [string]$Entry["displayName"] : $null
+        }
+    }
+
+    [pscustomobject]@{ Description = [string]$Entry; DisplayName = $null }
+}
 
 function Get-AppDescription {
     <#
     .SYNOPSIS
-        Looks up a Markdown description for the given app name in IntuneAppDescriptions.json,
-        read from either a local file path or an Azure Blob Storage URL (with SAS token).
-        Matched on Application - Name (exact, then partial).
+        Looks up a Markdown description for an app in IntuneAppDescriptions.json,
+        read from either an http(s) URL or a local file path.
+
+    .DESCRIPTION
+        Matching is attempted in three passes: exact name, normalised name
+        (case/punctuation insensitive), then normalised substring with the longest
+        key preferred so more specific entries win.
 
     .OUTPUTS
-        A hashtable:
-          - Found       : $true if the app was found in the descriptions file, otherwise $false
-          - Description  : the Markdown description if found, otherwise the fallback name
-
-    .NOTES
-        $DescriptionsPath accepts:
-          - Local file path : C:\Scripts\IntuneAppDescriptions.json
-          - Blob Storage URL: https://storage.blob.core.windows.net/container/file.json?<SAS-token>
+        PSCustomObject with Found (bool), Description (string) and DisplayName (string or $null).
+        DisplayName is only populated when the matched entry supplies a name override.
     #>
+    [OutputType([pscustomobject])]
     param (
-        [string]$AppName,
-        [string]$FallbackName
+        [Parameter(Mandatory)][string]$AppName,
+        [Parameter(Mandatory)][string]$FallbackName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Source
     )
 
-    if (-not $DescriptionsPath) {
-        Write-Warning "DescriptionsPath not set - app treated as not found. Set -DescriptionsPath or env:INTUNE_DESCRIPTIONS_PATH."
-        return @{ Found = $false; Description = $FallbackName }
+    $notFound = [pscustomobject]@{ Found = $false; Description = $FallbackName; DisplayName = $null }
+
+    if ([string]::IsNullOrWhiteSpace($Source)) {
+        Write-Warning "DescriptionsPath not set - app treated as not found."
+        return $notFound
     }
 
     try {
-        # Determine source: URL or local file
-        if ($DescriptionsPath -match "^https://") {
-            $json = Invoke-RestMethod -Uri $DescriptionsPath
+        if ($Source -match '^https?://') {
+            # Raw hosts (GitHub, blob storage) usually serve text/plain, in which case
+            # Invoke-RestMethod returns a plain string instead of parsing the JSON.
+            $response = Invoke-RestMethod -Uri $Source -ErrorAction Stop
+            $rawText  = $response -is [string] ? $response : ($response | ConvertTo-Json -Depth 20)
         }
         else {
-            $resolvedPath = (Resolve-Path -Path $DescriptionsPath).Path
-            $json = Get-Content -Path $resolvedPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $rawText = Get-Content -Path (Resolve-Path -Path $Source).Path -Raw -Encoding UTF8 -ErrorAction Stop
         }
 
-        # Convert PSCustomObject to hashtable
-        $descriptions = @{}
-        $json.PSObject.Properties | ForEach-Object { $descriptions[$_.Name] = $_.Value }
+        $descriptions = $rawText | ConvertFrom-Json -AsHashtable -ErrorAction Stop
     }
     catch {
-        Write-Warning "Could not load app descriptions from '$DescriptionsPath': $_ - app treated as not found."
-        return @{ Found = $false; Description = $FallbackName }
+        Write-Warning "Could not load app descriptions from '$Source': $($PSItem.Exception.Message) - app treated as not found."
+        return $notFound
     }
 
-    # Exact match
+    if ($descriptions.Count -eq 0) {
+        Write-Warning "Descriptions file '$Source' contained no entries."
+        return $notFound
+    }
+
+    $matchedKey = $null
+
+    # Pass 1: exact match
     if ($descriptions.ContainsKey($AppName)) {
-        return @{ Found = $true; Description = $descriptions[$AppName] }
+        $matchedKey = $AppName
     }
 
-    # Partial match
-    foreach ($key in $descriptions.Keys) {
-        if ($AppName -like "*$key*" -or $key -like "*$AppName*") {
-            return @{ Found = $true; Description = $descriptions[$key] }
+    # Pass 2: normalised exact match ("7Zip" -> "7-Zip")
+    if (-not $matchedKey) {
+        $target = Get-NormalizedKey -Value $AppName
+        foreach ($key in $descriptions.Keys) {
+            if ((Get-NormalizedKey -Value $key) -eq $target) { $matchedKey = $key; break }
+        }
+    }
+
+    # Pass 3: normalised substring, longest key first so specific entries win
+    if (-not $matchedKey) {
+        foreach ($key in ($descriptions.Keys | Sort-Object -Property Length -Descending)) {
+            $normKey = Get-NormalizedKey -Value $key
+            if ($normKey -and ($target.Contains($normKey) -or $normKey.Contains($target))) {
+                $matchedKey = $key; break
+            }
+        }
+    }
+
+    if ($matchedKey) {
+        $entry = Resolve-DescriptionEntry -Entry $descriptions[$matchedKey]
+        return [pscustomobject]@{
+            Found       = $true
+            Description = [string]::IsNullOrWhiteSpace($entry.Description) ? $FallbackName : $entry.Description
+            DisplayName = $entry.DisplayName
         }
     }
 
     Write-Warning "No description found for '$AppName' in descriptions file - app treated as not found."
-    return @{ Found = $false; Description = $FallbackName }
+    return $notFound
 }
-
-
 
 function Read-TextFileSmart {
     <#
     .SYNOPSIS
         Reads a text file and decodes it correctly regardless of source encoding.
-        Handles UTF-8/UTF-16 BOM, plain UTF-8, Mac Roman (macOS packaging) and
-        Windows-1252 (Windows packaging). When the file is not valid UTF-8, the
-        decoding that produces the most valid Swedish characters (aaoAAO) is chosen.
+
+    .DESCRIPTION
+        Handles UTF-8/UTF-16 BOM and plain UTF-8. When the bytes are not valid UTF-8
+        the file was produced by a legacy encoding: Mac Roman (macOS packaging) and
+        Windows-1252 (Windows packaging) are both tried, and the decoding producing
+        the most valid Swedish characters wins.
+
+    .NOTES
+        .NET Core does not ship code pages 1252 and 10000 by default, so the
+        CodePagesEncodingProvider must be registered first.
     #>
+    [OutputType([string])]
     param (
-        [string]$Path
+        [Parameter(Mandatory)][string]$Path
     )
 
     $bytes = [System.IO.File]::ReadAllBytes($Path)
@@ -156,37 +293,35 @@ function Read-TextFileSmart {
         return [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3)
     }
     if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
-        return [System.Text.Encoding]::Unicode.GetString($bytes)          # UTF-16 LE
+        return [System.Text.Encoding]::Unicode.GetString($bytes)           # UTF-16 LE
     }
     if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
-        return [System.Text.Encoding]::BigEndianUnicode.GetString($bytes) # UTF-16 BE
+        return [System.Text.Encoding]::BigEndianUnicode.GetString($bytes)  # UTF-16 BE
     }
 
-    # Try strict UTF-8 (throws on invalid byte sequences)
+    # Strict UTF-8 throws on invalid byte sequences, which is how we detect legacy encodings
     try {
-        $utf8Strict = [System.Text.UTF8Encoding]::new($false, $true)
-        return $utf8Strict.GetString($bytes)
+        return [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
     }
-    catch {
-        # Not valid UTF-8 - fall back to legacy single-byte encodings.
-        # .NET Core needs the code pages provider registered for 1252 and Mac Roman (10000).
+    catch [System.Text.DecoderFallbackException] {
         try { [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance) } catch { }
 
-        $candidates = @()
-        foreach ($cp in @(10000, 1252)) {
-            try { $candidates += [System.Text.Encoding]::GetEncoding($cp) } catch { }
+        $candidates = foreach ($codePage in 10000, 1252) {
+            try { [System.Text.Encoding]::GetEncoding($codePage) } catch { }
         }
+        $candidates = @($candidates)
+
         if ($candidates.Count -eq 0) {
-            # Last resort: Latin-1 maps every byte 1:1
+            # Latin-1 maps every byte 1:1 and never throws
             return [System.Text.Encoding]::GetEncoding("ISO-8859-1").GetString($bytes)
         }
 
-        # Score each decoding by number of valid Swedish characters
-        $swedish = [char[]]"åäöÅÄÖ"
-        $best       = $null
-        $bestScore  = -1
-        foreach ($enc in $candidates) {
-            $text  = $enc.GetString($bytes)
+        $swedish   = [char[]]"åäöÅÄÖ"
+        $best      = $null
+        $bestScore = -1
+        foreach ($encoding in $candidates) {
+            $text  = $encoding.GetString($bytes)
+            # @() guards against Where-Object returning $null under StrictMode
             $score = @($text.ToCharArray() | Where-Object { $swedish -contains $_ }).Count
             if ($score -gt $bestScore) {
                 $bestScore = $score
@@ -201,11 +336,12 @@ function Get-AppInfoValue {
     <#
     .SYNOPSIS
         Reads a value from ApplicationInformation.txt based on a label.
-        Returns $null if the label is not found.
+        Returns $null if the label is not present.
     #>
+    [OutputType([string])]
     param (
-        [string]$Content,
-        [string]$Label
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
+        [Parameter(Mandatory)][string]$Label
     )
     if ($Content -match "(?m)^$Label[\s.]*:\s*(.+)$") {
         return $Matches[1].Trim()
@@ -216,19 +352,21 @@ function Get-AppInfoValue {
 function ConvertTo-MB {
     <#
     .SYNOPSIS
-        Converts a disk space string (e.g. "500 MB", "2 GB") to an integer in MB.
-        Returns $null if the string cannot be parsed.
+        Converts a disk space string ("500 MB", "2 GB") to an integer in MB.
+        Returns $null when the string cannot be parsed.
     #>
+    [OutputType([int])]
     param (
-        [string]$DiskSpaceString
+        [Parameter()][AllowEmptyString()][AllowNull()][string]$DiskSpaceString
     )
     if ($DiskSpaceString -match "(\d+(?:[.,]\d+)?)\s*(MB|GB|TB)") {
         $value = [double]($Matches[1] -replace ",", ".")
-        switch ($Matches[2]) {
-            "MB" { return [int]$value }
-            "GB" { return [int]($value * 1024) }
-            "TB" { return [int]($value * 1024 * 1024) }
+        $result = switch ($Matches[2]) {
+            "MB" { [int]$value }
+            "GB" { [int]($value * 1024) }
+            "TB" { [int]($value * 1024 * 1024) }
         }
+        return $result
     }
     return $null
 }
@@ -236,35 +374,36 @@ function ConvertTo-MB {
 function Expand-AppPackage {
     <#
     .SYNOPSIS
-        Extracts a zip file to a temporary directory (AppUnzip) next to the zip file.
-        If the directory already exists it is cleared before extraction.
-        Returns the path to the temp directory.
+        Extracts a zip file to an AppUnzip directory next to the zip file.
+        An existing directory is cleared first. Returns the temp directory path.
     #>
+    [OutputType([string])]
     param (
-        [string]$ZipPath
+        [Parameter(Mandatory)][string]$ZipPath
     )
     $parentDir = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ZipPath))
     $tempDir   = Join-Path -Path $parentDir -ChildPath "AppUnzip"
 
+    # -WhatIf:$false so local preparation always runs; -WhatIf only gates the Intune upload
     if (Test-Path -Path $tempDir) {
-        Remove-Item -Path $tempDir -Recurse -Force
+        Remove-Item -Path $tempDir -Recurse -Force -WhatIf:$false
     }
-    New-Item -Path $tempDir -ItemType Directory | Out-Null
-    Expand-Archive -Path $ZipPath -DestinationPath $tempDir
+    New-Item -Path $tempDir -ItemType Directory -WhatIf:$false | Out-Null
+    Expand-Archive -Path $ZipPath -DestinationPath $tempDir -Force -WhatIf:$false
     return $tempDir
 }
 
 function Get-PngBase64 {
     <#
     .SYNOPSIS
-        Reads a PNG file and returns it as a base64 string.
-        If the file is missing or unreadable, returns a base64-encoded blank 1x1 PNG instead.
+        Returns a PNG file as a base64 string, or a blank 1x1 transparent PNG
+        when the file is missing or unreadable.
     #>
+    [OutputType([string])]
     param (
-        [System.IO.FileInfo]$PngFile
+        [Parameter()][AllowNull()][System.IO.FileInfo]$PngFile
     )
 
-    # Minimal valid 1x1 transparent PNG (68 bytes)
     $blankPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 
     if ($null -eq $PngFile) {
@@ -276,33 +415,34 @@ function Get-PngBase64 {
         return [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($PngFile.FullName))
     }
     catch {
-        Write-Warning "Could not read PNG file '$($PngFile.FullName)': $_  - using blank icon."
+        Write-Warning "Could not read PNG '$($PngFile.FullName)': $($PSItem.Exception.Message) - using blank icon."
         return $blankPng
     }
 }
 
-function Parse-DetectionRule {
+function ConvertFrom-DetectionRule {
     <#
     .SYNOPSIS
-        Parses a detection rule string from ApplicationInformation.txt.
-        Supports registry, file and MSI product code detection.
+        Parses a detection rule string from ApplicationInformation.txt into
+        Intune-compatible objects. Supports registry, file and MSI product code.
 
-        Returns a hashtable with two keys:
-          - DetectionRule : used in the "detectionRules" block (portal/UI)
-          - Rule          : used in the "rules" block (Graph API import)
-
-        Throws a descriptive error if the string cannot be parsed.
+    .OUTPUTS
+        Hashtable with two keys:
+          DetectionRule : used in the "detectionRules" block (portal/UI)
+          Rule          : used in the "rules" block (Graph API import)
 
     .NOTES
         Operator mapping:
-          >=  -> greaterThanOrEqual  (version comparison)
-          >   -> greaterThan         (version comparison)
-          <=  -> lessThanOrEqual     (version comparison)
-          <   -> lessThan            (version comparison)
-          =   -> equal               (version if value looks like x.y.z, otherwise string)
+          >=  greaterThanOrEqual   <=  lessThanOrEqual
+          >   greaterThan          <   lessThan
+          =   equal - treated as a version comparison when the value looks like x.y.z,
+              otherwise as a string comparison (e.g. PSADT tags with value "Installed").
+
+        Throws a descriptive error, including the raw value, when nothing matches.
     #>
+    [OutputType([hashtable])]
     param (
-        [string]$DetectionString
+        [Parameter(Mandatory)][string]$DetectionString
     )
 
     $operatorMap = @{
@@ -313,7 +453,7 @@ function Parse-DetectionRule {
         "<"  = "lessThan"
     }
 
-    # Normalise short hive abbreviations (HKLM\...) to their full names (HKEY_LOCAL_MACHINE\...)
+    # Normalise short hive abbreviations (HKLM\...) to full names (HKEY_LOCAL_MACHINE\...)
     $hiveMap = [ordered]@{
         "HKLM" = "HKEY_LOCAL_MACHINE"
         "HKCU" = "HKEY_CURRENT_USER"
@@ -321,25 +461,26 @@ function Parse-DetectionRule {
         "HKU"  = "HKEY_USERS"
         "HKCC" = "HKEY_CURRENT_CONFIG"
     }
-    foreach ($abbr in $hiveMap.Keys) {
-        if ($DetectionString -match "^$abbr\\") {
-            $DetectionString = $DetectionString -replace "^$abbr\\", "$($hiveMap[$abbr])\"
+    foreach ($abbreviation in $hiveMap.Keys) {
+        if ($DetectionString -match "^$abbreviation\\") {
+            $DetectionString = $DetectionString -replace "^$abbreviation\\", "$($hiveMap[$abbreviation])\"
             break
         }
     }
 
     # --- Registry: HKEY_...\KeyPath\ValueName <op> value ---
+    # Greedy first group splits on the LAST backslash, so spaces in both the key path
+    # and the value name are handled ("...\Uninstall\FileZilla Client\DisplayVersion").
     if ($DetectionString -match "^(HKEY_.+)\\([^\\]+?)\s*(>=|=|<=|>|<)\s*(.+)$") {
         $keyPath   = $Matches[1]
         $valueName = $Matches[2].Trim()
         $operator  = $Matches[3]
         $detValue  = $Matches[4].Trim()
 
-        # Use "version" for all range operators, and also for "=" when value looks like a version number
-        $isVersionValue    = $detValue -match "^\d+(\.\d+){1,3}$"
-        $isVersionOperator = $operator -in @(">=", "<=", ">", "<")
-        $typeValue         = if ($isVersionOperator -or ($operator -eq "=" -and $isVersionValue)) { "version" } else { "string" }
-        $operatorMapped    = $operatorMap[$operator]
+        $isVersion = ($operator -in ">=", "<=", ">", "<") -or
+                     ($operator -eq "=" -and $detValue -match "^\d+(\.\d+){1,3}$")
+        $typeValue = $isVersion ? "version" : "string"
+        $mapped    = $operatorMap[$operator]
 
         return @{
             DetectionRule = [ordered]@{
@@ -348,7 +489,7 @@ function Parse-DetectionRule {
                 "keyPath"              = $keyPath
                 "valueName"            = $valueName
                 "detectionType"        = $typeValue
-                "operator"             = $operatorMapped
+                "operator"             = $mapped
                 "detectionValue"       = $detValue
             }
             Rule = [ordered]@{
@@ -358,7 +499,7 @@ function Parse-DetectionRule {
                 "keyPath"              = $keyPath
                 "valueName"            = $valueName
                 "operationType"        = $typeValue
-                "operator"             = $operatorMapped
+                "operator"             = $mapped
                 "comparisonValue"      = $detValue
             }
         }
@@ -366,17 +507,17 @@ function Parse-DetectionRule {
 
     # --- File: path\to\file.exe <op> value ---
     if ($DetectionString -match "^(%[^%]+%\\[^<>=]+|[A-Za-z]:\\[^<>=]+)\s*(>=|=|<=|>|<)\s*(.+)$") {
-        $filePath  = $Matches[1].Trim()
-        $operator  = $Matches[2]
-        $detValue  = $Matches[3].Trim()
+        $filePath = $Matches[1].Trim()
+        $operator = $Matches[2]
+        $detValue = $Matches[3].Trim()
 
-        $folder    = [System.IO.Path]::GetDirectoryName($filePath)
-        $fileName  = [System.IO.Path]::GetFileName($filePath)
+        $isVersion = ($operator -in ">=", "<=", ">", "<") -or
+                     ($operator -eq "=" -and $detValue -match "^\d+(\.\d+){1,3}$")
+        $typeValue = $isVersion ? "version" : "string"
+        $mapped    = $operatorMap[$operator]
 
-        $isVersionValue    = $detValue -match "^\d+(\.\d+){1,3}$"
-        $isVersionOperator = $operator -in @(">=", "<=", ">", "<")
-        $typeValue         = if ($isVersionOperator -or ($operator -eq "=" -and $isVersionValue)) { "version" } else { "string" }
-        $operatorMapped    = $operatorMap[$operator]
+        $folder   = [System.IO.Path]::GetDirectoryName($filePath)
+        $fileName = [System.IO.Path]::GetFileName($filePath)
 
         return @{
             DetectionRule = [ordered]@{
@@ -385,7 +526,7 @@ function Parse-DetectionRule {
                 "path"                 = $folder
                 "fileOrFolderName"     = $fileName
                 "detectionType"        = $typeValue
-                "operator"             = $operatorMapped
+                "operator"             = $mapped
                 "detectionValue"       = $detValue
             }
             Rule = [ordered]@{
@@ -395,7 +536,7 @@ function Parse-DetectionRule {
                 "path"                 = $folder
                 "fileOrFolderName"     = $fileName
                 "operationType"        = $typeValue
-                "operator"             = $operatorMapped
+                "operator"             = $mapped
                 "comparisonValue"      = $detValue
             }
         }
@@ -422,18 +563,28 @@ function Parse-DetectionRule {
         }
     }
 
-    # Nothing matched - throw with the raw string so the operator can see exactly what was in the file
-    throw "Detection rule could not be parsed. Unsupported format or missing operator.`n  Raw value: '$DetectionString'`n  Supported formats:`n    Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0`n    File     : %ProgramFiles%\App\file.exe >= 1.0`n    MSI      : {ProductCode-GUID}"
+    throw @"
+Detection rule could not be parsed. Unsupported format or missing operator.
+  Raw value: '$DetectionString'
+  Supported formats:
+    Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0   (HKLM/HKCU/HKCR/HKU/HKCC also accepted)
+    File     : %ProgramFiles%\App\file.exe >= 1.0
+    MSI      : {ProductCode-GUID}
+"@
 }
 
 function New-IntuneDetectionRuleObject {
     <#
     .SYNOPSIS
-        Builds an IntuneWin32App module detection rule object from a parsed detection rule.
-        Selects the correct parameter set automatically based on detection type.
+        Builds an IntuneWin32App module detection rule object from a parsed rule.
+
+    .DESCRIPTION
+        The module exposes separate parameter sets per comparison type, each with its
+        own operator and value parameter names, so the correct set is selected here
+        based on the @odata.type and detectionType produced by ConvertFrom-DetectionRule.
     #>
     param (
-        [hashtable]$ParsedRule
+        [Parameter(Mandatory)][hashtable]$ParsedRule
     )
 
     $dr = $ParsedRule.DetectionRule
@@ -443,8 +594,7 @@ function New-IntuneDetectionRuleObject {
         "#microsoft.graph.win32LobAppRegistryDetection" {
             switch ($dr.detectionType) {
                 "version" {
-                    return New-IntuneWin32AppDetectionRuleRegistry `
-                        -VersionComparison `
+                    return New-IntuneWin32AppDetectionRuleRegistry -VersionComparison `
                         -KeyPath                   $dr.keyPath `
                         -ValueName                 $dr.valueName `
                         -Check32BitOn64System      $false `
@@ -452,8 +602,7 @@ function New-IntuneDetectionRuleObject {
                         -VersionComparisonValue    $dr.detectionValue
                 }
                 "string" {
-                    return New-IntuneWin32AppDetectionRuleRegistry `
-                        -StringComparison `
+                    return New-IntuneWin32AppDetectionRuleRegistry -StringComparison `
                         -KeyPath                  $dr.keyPath `
                         -ValueName                $dr.valueName `
                         -Check32BitOn64System     $false `
@@ -467,8 +616,7 @@ function New-IntuneDetectionRuleObject {
         "#microsoft.graph.win32LobAppFileSystemDetection" {
             switch ($dr.detectionType) {
                 "version" {
-                    return New-IntuneWin32AppDetectionRuleFile `
-                        -VersionComparison `
+                    return New-IntuneWin32AppDetectionRuleFile -VersionComparison `
                         -Path                      $dr.path `
                         -FileOrFolder              $dr.fileOrFolderName `
                         -Check32BitOn64System      $false `
@@ -476,8 +624,7 @@ function New-IntuneDetectionRuleObject {
                         -VersionComparisonValue    $dr.detectionValue
                 }
                 "string" {
-                    return New-IntuneWin32AppDetectionRuleFile `
-                        -StringComparison `
+                    return New-IntuneWin32AppDetectionRuleFile -StringComparison `
                         -Path                     $dr.path `
                         -FileOrFolder             $dr.fileOrFolderName `
                         -Check32BitOn64System     $false `
@@ -502,14 +649,14 @@ function New-IntuneDetectionRuleObject {
 
 #region Step 1 - Validate credentials
 
+# Fail before doing any work if credentials are missing
 $missingCredentials = @()
 if (-not $TenantID)     { $missingCredentials += "TenantID (or env:INTUNE_TENANT_ID)" }
 if (-not $ClientID)     { $missingCredentials += "ClientID (or env:INTUNE_CLIENT_ID)" }
 if (-not $ClientSecret) { $missingCredentials += "ClientSecret (or env:INTUNE_CLIENT_SECRET)" }
 
 if ($missingCredentials.Count -gt 0) {
-    Write-Error "Missing required authentication credentials: $($missingCredentials -join ', ')"
-    exit 1
+    throw "Missing required authentication credentials: $($missingCredentials -join ', ')"
 }
 
 #endregion
@@ -523,8 +670,7 @@ try {
     Write-Host "Extracted to: $tempDir"
 }
 catch {
-    Write-Error "Error during extraction: $_"
-    exit 1
+    throw "Error during extraction: $($PSItem.Exception.Message)"
 }
 
 #endregion
@@ -534,20 +680,16 @@ catch {
 Write-Host "`n=== Step 3: Files ===" -ForegroundColor Cyan
 
 try {
-    # Skip macOS metadata folders (__MACOSX) and pick the directory that actually
+    # Skip macOS metadata folders (__MACOSX) and prefer the directory that actually
     # contains ApplicationInformation.txt
-    $candidateDirs = Get-ChildItem -Path $tempDir -Directory | Where-Object { $_.Name -ne "__MACOSX" }
-    $unzippedDir   = $candidateDirs | Where-Object {
-        Get-ChildItem -Path $_.FullName -Filter "ApplicationInformation.txt" -ErrorAction SilentlyContinue
-    } | Select-Object -First 1
+    $candidateDirs = @(Get-ChildItem -Path $tempDir -Directory | Where-Object { $_.Name -ne "__MACOSX" })
+    $unzippedDir   = $candidateDirs |
+        Where-Object { Test-Path -Path (Join-Path $_.FullName "ApplicationInformation.txt") } |
+        Select-Object -First 1
 
-    # Fall back to first non-metadata directory if none matched (error surfaces below)
+    $unzippedDir ??= ($candidateDirs | Select-Object -First 1)
     if (-not $unzippedDir) {
-        $unzippedDir = $candidateDirs | Select-Object -First 1
-    }
-    if (-not $unzippedDir) {
-        Write-Error "No application directory found in $tempDir"
-        exit 1
+        throw "No application directory found in $tempDir"
     }
     Write-Host "Extracted directory: $($unzippedDir.FullName)"
 
@@ -555,8 +697,8 @@ try {
     $intunewinFile = Get-ChildItem -Path $unzippedDir.FullName -Filter "*.intunewin" | Select-Object -First 1
     $pngFile       = Get-ChildItem -Path $unzippedDir.FullName -Filter "*.png" | Select-Object -First 1
 
-    if (-not $appInfoFile)   { Write-Error "ApplicationInformation.txt not found in $($unzippedDir.FullName)"; exit 1 }
-    if (-not $intunewinFile) { Write-Error "No .intunewin file found in $($unzippedDir.FullName)"; exit 1 }
+    if (-not $appInfoFile)   { throw "ApplicationInformation.txt not found in $($unzippedDir.FullName)" }
+    if (-not $intunewinFile) { throw "No .intunewin file found in $($unzippedDir.FullName)" }
 
     Write-Host "ApplicationInformation : $($appInfoFile.Name)"
     Write-Host "Intunewin file         : $($intunewinFile.Name)"
@@ -564,8 +706,7 @@ try {
     else          { Write-Warning "No PNG file found - a blank icon will be used." }
 }
 catch {
-    Write-Error "Error while reading files: $_"
-    exit 1
+    throw "Error while reading files: $($PSItem.Exception.Message)"
 }
 
 #endregion
@@ -577,18 +718,19 @@ Write-Host "`n=== Step 4: ApplicationInformation.txt ===" -ForegroundColor Cyan
 try {
     $appInfo = Read-TextFileSmart -Path $appInfoFile.FullName
 
-    $vendor          = Get-AppInfoValue -Content $appInfo -Label "Application - Vendor"
-    $appName         = Get-AppInfoValue -Content $appInfo -Label "Application - Name"
-    $appVersion      = Get-AppInfoValue -Content $appInfo -Label "Application - Version"
-    $installCmd      = Get-AppInfoValue -Content $appInfo -Label "Install command"
-    $uninstallCmd    = Get-AppInfoValue -Content $appInfo -Label "Uninstall command"
-    # Detection method may be declared as REG, MSI or FILE - read whichever is present
+    $vendor       = Get-AppInfoValue -Content $appInfo -Label "Application - Vendor"
+    $appName      = Get-AppInfoValue -Content $appInfo -Label "Application - Name"
+    $appVersion   = Get-AppInfoValue -Content $appInfo -Label "Application - Version"
+    $installCmd   = Get-AppInfoValue -Content $appInfo -Label "Install command"
+    $uninstallCmd = Get-AppInfoValue -Content $appInfo -Label "Uninstall command"
+    $diskSpace    = Get-AppInfoValue -Content $appInfo -Label "Estimated Disk Space"
+
+    # Detection method may be declared as REG, MSI or FILE - use whichever is present
     $detectionMethod = $null
-    foreach ($detType in @("REG", "MSI", "FILE")) {
-        $value = Get-AppInfoValue -Content $appInfo -Label "DetectionMethod\.\($detType\)"
-        if ($value) { $detectionMethod = $value; break }
+    foreach ($detectionLabel in "REG", "MSI", "FILE") {
+        $detectionMethod = Get-AppInfoValue -Content $appInfo -Label "DetectionMethod\.\($detectionLabel\)"
+        if ($detectionMethod) { break }
     }
-    $diskSpace       = Get-AppInfoValue -Content $appInfo -Label "Estimated Disk Space"
 
     $missingFields = @()
     if (-not $vendor)          { $missingFields += "Application - Vendor" }
@@ -599,8 +741,7 @@ try {
     if (-not $detectionMethod) { $missingFields += "DetectionMethod.(REG/MSI/FILE)" }
 
     if ($missingFields.Count -gt 0) {
-        Write-Error "Missing required fields in ApplicationInformation.txt: $($missingFields -join ', ')"
-        exit 1
+        throw "Missing required fields in ApplicationInformation.txt: $($missingFields -join ', ')"
     }
 
     Write-Host "Vendor   : $vendor"
@@ -609,11 +750,10 @@ try {
     Write-Host "Install  : $installCmd"
     Write-Host "Uninstall: $uninstallCmd"
     Write-Host "Detection: $detectionMethod"
-    Write-Host "Disk     : $(if ($diskSpace) { $diskSpace } else { '(not specified)' })"
+    Write-Host "Disk     : $($diskSpace ?? '(not specified)')"
 }
 catch {
-    Write-Error "Error while parsing ApplicationInformation.txt: $_"
-    exit 1
+    throw "Error while parsing ApplicationInformation.txt: $($PSItem.Exception.Message)"
 }
 
 #endregion
@@ -625,20 +765,35 @@ Write-Host "`n=== Step 5: Build JSON ===" -ForegroundColor Cyan
 try {
     $today       = Get-Date -Format "yyyy-MM-dd"
     $todayUtc    = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
-    $displayName   = "$vendor $appName $appVersion"
-    $descResult     = Get-AppDescription -AppName $appName -FallbackName $displayName
-    $appDescription = $descResult.Description
-    # notes: "Base Application <date>" if the app is known in IntuneAppDescriptions.json, otherwise just the date
-    $appNotes       = if ($descResult.Found) { "Base Application $today" } else { "$today" }
-    $diskSpaceMB   = ConvertTo-MB -DiskSpaceString $diskSpace
+    $diskSpaceMB = ConvertTo-MB -DiskSpaceString $diskSpace
     $pngBase64   = Get-PngBase64 -PngFile $pngFile
 
-    $parsed = Parse-DetectionRule -DetectionString $detectionMethod
-    Write-Host "Detection type : $($parsed.DetectionRule.'@odata.type' -replace '#microsoft.graph.win32LobApp','')"
-    $detDtype = if ($parsed.DetectionRule.Contains("detectionType")) { $parsed.DetectionRule.detectionType }
-                elseif ($parsed.DetectionRule.Contains("productVersionOperator")) { $parsed.DetectionRule.productVersionOperator }
-                else { "n/a" }
-    Write-Host "Detection dtype: $detDtype"
+    # Default name is "<Vendor> <Name> <Version>"; a displayName in the descriptions file
+    # replaces the vendor/name part, e.g. "IgorPavlov 7Zip 26.02" -> "7-Zip 26.02"
+    $defaultDisplayName = "$vendor $appName $appVersion"
+    $descResult         = Get-AppDescription -AppName $appName -FallbackName $defaultDisplayName -Source $DescriptionsPath
+    $appDescription     = $descResult.Description
+    $displayName        = $descResult.DisplayName ? "$($descResult.DisplayName) $appVersion" : $defaultDisplayName
+    # notes: "Base Application <date>" when the app is known in IntuneAppDescriptions.json, otherwise just the date
+    $appNotes       = $descResult.Found ? "Base Application $today" : $today
+
+    $parsed = ConvertFrom-DetectionRule -DetectionString $detectionMethod
+
+    $detectionOdataType = $parsed.DetectionRule.'@odata.type' -replace '#microsoft\.graph\.win32LobApp', ''
+    # Registry/file rules expose detectionType, MSI rules expose productVersionOperator
+    $detectionSubType = if ($parsed.DetectionRule.Contains("detectionType")) {
+        $parsed.DetectionRule.detectionType
+    }
+    elseif ($parsed.DetectionRule.Contains("productVersionOperator")) {
+        $parsed.DetectionRule.productVersionOperator
+    }
+    else { "n/a" }
+
+    Write-Host "Detection type : $detectionOdataType"
+    Write-Host "Detection dtype: $detectionSubType"
+    Write-Host "Description    : $($descResult.Found ? 'found in descriptions file' : 'not found - using display name')"
+    Write-Host "Display name   : $displayName$($descResult.DisplayName ? " (overridden from descriptions file)" : '')"
+    Write-Host "Requirements   : $Architecture / $MinimumWindowsRelease / $($diskSpaceMB ? "$diskSpaceMB MB disk" : 'no disk requirement')"
 
     $appJson = [ordered]@{
         "@odata.context"          = "https://graph.microsoft.com/beta/`$metadata#deviceAppManagement/mobileApps(categories(),assignments())/`$entity"
@@ -668,14 +823,14 @@ try {
         "installCommandLine"      = $installCmd
         "uninstallCommandLine"    = $uninstallCmd
         "applicableArchitectures" = "none"
-        "allowedArchitectures"    = "x64"
+        "allowedArchitectures"    = $architectureMap[$Architecture]
         "minimumFreeDiskSpaceInMB"       = $diskSpaceMB
         "minimumMemoryInMB"              = $null
         "minimumNumberOfProcessors"      = $null
         "minimumCpuSpeedInMHz"           = $null
         "msiInformation"                 = $null
         "setupFilePath"                  = "${appName}_${appVersion}.txt"
-        "minimumSupportedWindowsRelease" = "Windows11_21H2"
+        "minimumSupportedWindowsRelease" = $windowsReleaseMap[$MinimumWindowsRelease]
         "displayVersion"          = $appVersion
         "allowAvailableUninstall" = $true
         "activeInstallScript"     = $null
@@ -699,9 +854,9 @@ try {
             "v10_2H20" = $false
             "v10_21H1" = $false
         }
-        "detectionRules"   = @($parsed.DetectionRule)
-        "requirementRules" = @()
-        "rules"            = @($parsed.Rule)
+        "detectionRules"    = @($parsed.DetectionRule)
+        "requirementRules"  = @()
+        "rules"             = @($parsed.Rule)
         "installExperience" = [ordered]@{
             "runAsAccount"          = "system"
             "maxRunTimeInMinutes"   = 60
@@ -718,13 +873,13 @@ try {
         "assignments" = @()
     }
 
+    # UTF-16 LE matches the Intune Graph API export format
     $outputPath = Join-Path -Path $unzippedDir.FullName -ChildPath "$displayName.json"
     [System.IO.File]::WriteAllText($outputPath, ($appJson | ConvertTo-Json -Depth 10), [System.Text.Encoding]::Unicode)
     Write-Host "JSON saved to: $outputPath" -ForegroundColor Green
 }
 catch {
-    Write-Error "Error while generating JSON: $_"
-    exit 1
+    throw "Error while generating JSON: $($PSItem.Exception.Message)"
 }
 
 #endregion
@@ -733,95 +888,130 @@ catch {
 
 Write-Host "`n=== Step 6: Upload to Intune ===" -ForegroundColor Cyan
 
-try {
-    if (-not (Get-Module -ListAvailable -Name IntuneWin32App)) {
-        Write-Host "Installing IntuneWin32App module..."
-        Install-Module -Name IntuneWin32App -Scope CurrentUser -Force
-    }
-    Import-Module IntuneWin32App
+$appId = $null
 
-    Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret
-    Write-Host "Authenticated to Microsoft Graph"
+# ShouldProcess returns $false under -WhatIf, which skips authentication as well as the upload
+if (-not $PSCmdlet.ShouldProcess($displayName, "Upload Win32 app to Intune")) {
+    Write-Host "WhatIf: skipping Graph authentication and Intune upload." -ForegroundColor Yellow
 }
-catch {
-    Write-Error "Authentication failed: $_"
-    exit 1
-}
+else {
+    try {
+        if (-not (Get-Module -ListAvailable -Name IntuneWin32App)) {
+            Write-Host "Installing IntuneWin32App module..."
+            Install-Module -Name IntuneWin32App -Scope CurrentUser -Force
+        }
+        Import-Module IntuneWin32App
 
-try {
-    # Build icon - write blank PNG to temp file if no PNG was found
-    if ($pngFile) {
-        $iconParam = New-IntuneWin32AppIcon -FilePath $pngFile.FullName
+        Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
+        Write-Host "Authenticated to Microsoft Graph"
     }
-    else {
-        $blankPngPath = Join-Path -Path $tempDir -ChildPath "blank.png"
-        [System.IO.File]::WriteAllBytes($blankPngPath, [System.Convert]::FromBase64String(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
-        ))
-        $iconParam = New-IntuneWin32AppIcon -FilePath $blankPngPath
+    catch {
+        throw "Authentication failed: $($PSItem.Exception.Message)"
     }
 
-    # Do not pass -ReturnCode to avoid duplicates - the module always adds its default set
-    # (0 success, 1707 success, 3010 softReboot, 1641 hardReboot, 1618 retry).
-    # Return code 1641 is patched to softReboot via Graph API after upload.
-    $win32App = Add-IntuneWin32App `
-        -FilePath             $intunewinFile.FullName `
-        -DisplayName          $displayName `
-        -Description          $appDescription `
-        -Publisher            $vendor `
-        -AppVersion           $appVersion `
-        -Notes                $appNotes `
-        -InstallCommandLine   $installCmd `
-        -UninstallCommandLine $uninstallCmd `
-        -InstallExperience    "system" `
-        -RestartBehavior      "basedOnReturnCode" `
-        -DetectionRule        (New-IntuneDetectionRuleObject -ParsedRule $parsed) `
-        -Icon                 $iconParam `
-        -Verbose
+    try {
+        # New-IntuneWin32AppIcon needs a real file path, so a blank PNG is written to disk when needed
+        $iconPath = if ($pngFile) {
+            $pngFile.FullName
+        }
+        else {
+            $blankPngPath = Join-Path -Path $tempDir -ChildPath "blank.png"
+            [System.IO.File]::WriteAllBytes($blankPngPath, [System.Convert]::FromBase64String(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="))
+            $blankPngPath
+        }
 
-    # The module emits multiple pipeline objects; find the one with an 'id' NoteProperty
-    $appObject = @($win32App) | Where-Object { $_ -isnot [string] -and $null -ne $_.id } | Select-Object -First 1
-    $appId     = if ($appObject) { $appObject.id } else { $null }
+        # Without an explicit requirement rule the module falls back to hardcoded defaults
+        # ("x64,x86" and minimum release "2H20" = Windows 10 20H2) and silently drops
+        # minimumFreeDiskSpaceInMB, so it must always be supplied.
+        $requirementSplat = @{
+            Architecture                   = $Architecture
+            MinimumSupportedWindowsRelease = $MinimumWindowsRelease
+        }
+        # ValidateNotNullOrEmpty on the module parameter rejects 0/null, so only add when set
+        if ($diskSpaceMB) {
+            $requirementSplat["MinimumFreeDiskSpaceInMB"] = $diskSpaceMB
+        }
+        $requirementRule = New-IntuneWin32AppRequirementRule @requirementSplat
 
-    if (-not $appId) {
-        Write-Warning "App was uploaded but ID could not be retrieved - skipping return code patch. Verify in Intune portal."
+        # -ReturnCode is deliberately omitted: the module always adds its own default set
+        # (0/1707 success, 3010 softReboot, 1641 hardReboot, 1618 retry) and appends anything
+        # passed in without deduplicating, which produced duplicate entries. 1641 is corrected
+        # to softReboot with a PATCH below instead.
+        $win32App = Add-IntuneWin32App `
+            -FilePath             $intunewinFile.FullName `
+            -DisplayName          $displayName `
+            -Description          $appDescription `
+            -Publisher            $vendor `
+            -AppVersion           $appVersion `
+            -Notes                $appNotes `
+            -InstallCommandLine   $installCmd `
+            -UninstallCommandLine $uninstallCmd `
+            -InstallExperience    "system" `
+            -RestartBehavior      "basedOnReturnCode" `
+            -DetectionRule        (New-IntuneDetectionRuleObject -ParsedRule $parsed) `
+            -RequirementRule      $requirementRule `
+            -Icon                 (New-IntuneWin32AppIcon -FilePath $iconPath) `
+            -Verbose
+
+        # The module emits several pipeline objects, including status strings;
+        # pick the one carrying the app id
+        $appObject = @($win32App) | Where-Object { $_ -isnot [string] -and $null -ne $_.id } | Select-Object -First 1
+        $appId     = ${appObject}?.id
+
+        if (-not $appId) {
+            Write-Warning "App was uploaded but no ID was returned - skipping return code patch. Verify in the Intune portal."
+        }
+        else {
+            Write-Host "App uploaded successfully. Intune App ID: $appId" -ForegroundColor Green
+
+            # Replace the full return code set so 1641 becomes softReboot instead of hardReboot
+            $patchBody = @{
+                "@odata.type" = "#microsoft.graph.win32LobApp"
+                returnCodes   = @(
+                    @{ returnCode = 0;    type = "success" }
+                    @{ returnCode = 1707; type = "success" }
+                    @{ returnCode = 3010; type = "softReboot" }
+                    @{ returnCode = 1641; type = "softReboot" }
+                    @{ returnCode = 1618; type = "retry" }
+                )
+            } | ConvertTo-Json -Depth 5
+
+            # Reuse the authentication header established by Connect-MSIntuneGraph
+            Invoke-RestMethod `
+                -Uri     "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId" `
+                -Method  Patch `
+                -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" } `
+                -Body    $patchBody | Out-Null
+
+            Write-Host "Return code 1641 patched to softReboot." -ForegroundColor Green
+        }
     }
-    else {
-        Write-Host "App uploaded successfully. Intune App ID: $appId" -ForegroundColor Green
-
-        # Patch return code 1641 from hardReboot (module default) to softReboot via Graph API
-        $graphUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId"
-        $patchBody = @{
-            "@odata.type" = "#microsoft.graph.win32LobApp"
-            returnCodes   = @(
-                @{ returnCode = 0;    type = "success" }
-                @{ returnCode = 1707; type = "success" }
-                @{ returnCode = 3010; type = "softReboot" }
-                @{ returnCode = 1641; type = "softReboot" }
-                @{ returnCode = 1618; type = "retry" }
-            )
-        } | ConvertTo-Json -Depth 5
-
-        # Reuse the authentication header stored by Connect-MSIntuneGraph
-        Invoke-RestMethod -Uri $graphUri -Method Patch -Headers @{
-            Authorization  = $Global:AuthenticationHeader.Authorization
-            "Content-Type" = "application/json"
-        } -Body $patchBody | Out-Null
-        Write-Host "Return code 1641 patched to softReboot." -ForegroundColor Green
+    catch {
+        throw "Upload failed: $($PSItem.Exception.Message)"
     }
-}
-catch {
-    Write-Error "Upload failed: $_"
-    exit 1
 }
 
 #endregion
 
 #region Cleanup
 
-if (Test-Path -Path $tempDir) {
+# Only runs when every step above succeeded - on failure the directory is left for troubleshooting
+if ($WhatIfPreference) {
+    Write-Host "`nWhatIf: leaving $tempDir in place so the generated JSON can be inspected." -ForegroundColor Yellow
+}
+elseif (Test-Path -Path $tempDir) {
     Remove-Item -Path $tempDir -Recurse -Force
     Write-Host "`nCleaned up: $tempDir" -ForegroundColor DarkGray
 }
 
 #endregion
+
+# Structured result so the script can be consumed by other tooling
+[pscustomobject]@{
+    DisplayName      = $displayName
+    AppId            = $appId
+    JsonPath         = $outputPath
+    DetectionType    = $detectionOdataType
+    DescriptionFound = $descResult.Found
+}
