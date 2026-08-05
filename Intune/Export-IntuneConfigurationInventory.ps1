@@ -95,6 +95,12 @@
     .\Export-IntuneConfigurationInventory.ps1 -CompressOutput -Verbose
 
 .EXAMPLE
+    # Export and diff against the previous run in one command. The change set lands in the
+    # new run folder as _changeset_vs_<previous>.json, or _changeset_baseline.json on a
+    # first run. Requires Compare-IntuneConfigurationInventory.ps1 alongside this script.
+    .\Export-IntuneConfigurationInventory.ps1 -CompareWithPrevious -Verbose
+
+.EXAMPLE
     # Permission check only - decodes the token, reports tenant, roles and affected areas.
     .\Export-IntuneConfigurationInventory.ps1 -TestPermissionOnly -Verbose
 #>
@@ -126,6 +132,13 @@ param(
     # Also produce a single .zip of the run folder - one artefact to hand over instead of
     # 174 loose files. The folder remains the source of truth for diffing.
     [switch]$CompressOutput,
+
+    # Run Compare-IntuneConfigurationInventory.ps1 against this tenant once the export
+    # finishes, producing a change set against the previous run in the same command.
+    [switch]$CompareWithPrevious,
+
+    # Path to the comparison script. Defaults to the export script's own folder.
+    [string]$ComparePath,
 
     # Settings Catalog / Endpoint Security settings need one extra call per policy. Skip for a fast run.
     [switch]$SkipDetailedSettings,
@@ -1038,6 +1051,36 @@ if ($CompressOutput) {
     Write-Verbose ('Compressed to {0} ({1:N2} MB)' -f $zipPath, ((Get-Item -Path $zipPath).Length / 1MB))
 }
 
+# Optional downstream step. The comparison stays a separate script rather than being
+# merged in: it is pure local file processing that you will want to re-run - after a
+# taxonomy change, or against an older pair of runs - without paying for another full
+# Graph export. A failure here must never fail the export, because the exported data on
+# disk is complete and valid regardless.
+$changeSetPath = $null
+if ($CompareWithPrevious) {
+    $resolvedComparePath = $ComparePath
+    if ([string]::IsNullOrWhiteSpace($resolvedComparePath)) {
+        $scriptFolder = -not [string]::IsNullOrWhiteSpace($PSScriptRoot) ? $PSScriptRoot : (Get-Location).Path
+        $resolvedComparePath = Join-Path -Path $scriptFolder -ChildPath 'Compare-IntuneConfigurationInventory.ps1'
+    }
+
+    if (-not (Test-Path -Path $resolvedComparePath -PathType Leaf)) {
+        Write-Warning ('Comparison skipped - "{0}" was not found. The export itself completed successfully.' -f $resolvedComparePath)
+    }
+    else {
+        try {
+            $comparison = @(& $resolvedComparePath -TenantDirectory $tenantRoot)
+            if ($comparison.Count -gt 0) {
+                $changeSetPath = $comparison[-1].ChangeSetPath
+                Write-Verbose ('Change set: {0}' -f $changeSetPath)
+            }
+        }
+        catch [System.Exception] {
+            Write-Warning ('Comparison failed, export unaffected: {0}' -f $PSItem.Exception.Message)
+        }
+    }
+}
+
 # Incomplete exports must be obvious - a diffing agent would otherwise read a skipped
 # area as "everything in it was deleted".
 if ($skipped.Count -gt 0) {
@@ -1053,6 +1096,7 @@ Write-Output ([pscustomobject]@{
     CsvPath        = $csvPath
     ManifestPath   = $manifestPath
     ZipPath        = $zipPath
+    ChangeSetPath  = $changeSetPath
     PolicyCount    = $inventory.Count
     ExportComplete = $manifest.exportComplete
 })

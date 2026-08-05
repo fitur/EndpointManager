@@ -11,7 +11,7 @@
     Intune via the IntuneWin32App module using non-interactive client credentials.
 
     Supported detection rule formats in ApplicationInformation.txt:
-      Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0.0
+      Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0.0  (short hives HKLM, HKCU, HKCR, HKU, HKCC also accepted)
       File     : %ProgramFiles%\App\file.exe >= 1.0.0
       MSI      : {ProductCode-GUID}
 
@@ -59,7 +59,10 @@ param (
     [string]$ClientID = $env:INTUNE_CLIENT_ID,
 
     [Parameter(Mandatory = $false)]
-    [string]$ClientSecret = $env:INTUNE_CLIENT_SECRET
+    [string]$ClientSecret = $env:INTUNE_CLIENT_SECRET,
+
+    [Parameter(Mandatory = $false)]
+    [string]$DescriptionsPath = $env:INTUNE_DESCRIPTIONS_PATH
 )
 
 Set-StrictMode -Version Latest
@@ -73,55 +76,126 @@ $AppPath = (Resolve-Path -Path $AppPath).Path
 function Get-AppDescription {
     <#
     .SYNOPSIS
-        Fetches the IntuneAppDescriptions.json from SharePoint via Graph API and returns
-        the Markdown description for the given app name.
+        Looks up a Markdown description for the given app name in IntuneAppDescriptions.json,
+        read from either a local file path or an Azure Blob Storage URL (with SAS token).
         Matched on Application - Name (exact, then partial).
-        Falls back to the display name if no match is found.
+
+    .OUTPUTS
+        A hashtable:
+          - Found       : $true if the app was found in the descriptions file, otherwise $false
+          - Description  : the Markdown description if found, otherwise the fallback name
+
+    .NOTES
+        $DescriptionsPath accepts:
+          - Local file path : C:\Scripts\IntuneAppDescriptions.json
+          - Blob Storage URL: https://storage.blob.core.windows.net/container/file.json?<SAS-token>
     #>
     param (
         [string]$AppName,
         [string]$FallbackName
     )
 
-    $siteId  = "m365x55267076.sharepoint.com,5a8130ca-ae94-4721-a244-6b14a493e8df,261ee28a-f7f4-4c53-871b-6aa5327820e8"
-    $itemId  = "01DO5YH6B226WAZ3BBSJEYHABCE4IXIKVU"
-    $uri     = "https://graph.microsoft.com/v1.0/sites/$siteId/drive/items/$itemId/content"
+    if (-not $DescriptionsPath) {
+        Write-Warning "DescriptionsPath not set - app treated as not found. Set -DescriptionsPath or env:INTUNE_DESCRIPTIONS_PATH."
+        return @{ Found = $false; Description = $FallbackName }
+    }
 
     try {
-        # Fetch a fresh token using the same client credentials
-        $tokenBody = @{
-            grant_type    = "client_credentials"
-            client_id     = $ClientID
-            client_secret = $ClientSecret
-            scope         = "https://graph.microsoft.com/.default"
+        # Determine source: URL or local file
+        if ($DescriptionsPath -match "^https://") {
+            $json = Invoke-RestMethod -Uri $DescriptionsPath
         }
-        $token   = (Invoke-RestMethod -Uri "https://login.microsoftonline.com/$TenantID/oauth2/v2.0/token" -Method Post -Body $tokenBody).access_token
-        $headers = @{ Authorization = "Bearer $token" }
+        else {
+            $resolvedPath = (Resolve-Path -Path $DescriptionsPath).Path
+            $json = Get-Content -Path $resolvedPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        }
 
-        $json        = Invoke-RestMethod -Uri $uri -Headers $headers
-        $descriptions = $json | ConvertTo-Json -Depth 2 | ConvertFrom-Json -AsHashtable
+        # Convert PSCustomObject to hashtable
+        $descriptions = @{}
+        $json.PSObject.Properties | ForEach-Object { $descriptions[$_.Name] = $_.Value }
     }
     catch {
-        Write-Warning "Could not fetch app descriptions from SharePoint: $_ - using display name as fallback."
-        return $FallbackName
+        Write-Warning "Could not load app descriptions from '$DescriptionsPath': $_ - app treated as not found."
+        return @{ Found = $false; Description = $FallbackName }
     }
 
     # Exact match
     if ($descriptions.ContainsKey($AppName)) {
-        return $descriptions[$AppName]
+        return @{ Found = $true; Description = $descriptions[$AppName] }
     }
 
     # Partial match
     foreach ($key in $descriptions.Keys) {
         if ($AppName -like "*$key*" -or $key -like "*$AppName*") {
-            return $descriptions[$key]
+            return @{ Found = $true; Description = $descriptions[$key] }
         }
     }
 
-    Write-Warning "No description found for '$AppName' in SharePoint JSON - using display name as fallback."
-    return $FallbackName
+    Write-Warning "No description found for '$AppName' in descriptions file - app treated as not found."
+    return @{ Found = $false; Description = $FallbackName }
 }
 
+
+
+function Read-TextFileSmart {
+    <#
+    .SYNOPSIS
+        Reads a text file and decodes it correctly regardless of source encoding.
+        Handles UTF-8/UTF-16 BOM, plain UTF-8, Mac Roman (macOS packaging) and
+        Windows-1252 (Windows packaging). When the file is not valid UTF-8, the
+        decoding that produces the most valid Swedish characters (aaoAAO) is chosen.
+    #>
+    param (
+        [string]$Path
+    )
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+
+    # BOM detection
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        return [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3)
+    }
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+        return [System.Text.Encoding]::Unicode.GetString($bytes)          # UTF-16 LE
+    }
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+        return [System.Text.Encoding]::BigEndianUnicode.GetString($bytes) # UTF-16 BE
+    }
+
+    # Try strict UTF-8 (throws on invalid byte sequences)
+    try {
+        $utf8Strict = [System.Text.UTF8Encoding]::new($false, $true)
+        return $utf8Strict.GetString($bytes)
+    }
+    catch {
+        # Not valid UTF-8 - fall back to legacy single-byte encodings.
+        # .NET Core needs the code pages provider registered for 1252 and Mac Roman (10000).
+        try { [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance) } catch { }
+
+        $candidates = @()
+        foreach ($cp in @(10000, 1252)) {
+            try { $candidates += [System.Text.Encoding]::GetEncoding($cp) } catch { }
+        }
+        if ($candidates.Count -eq 0) {
+            # Last resort: Latin-1 maps every byte 1:1
+            return [System.Text.Encoding]::GetEncoding("ISO-8859-1").GetString($bytes)
+        }
+
+        # Score each decoding by number of valid Swedish characters
+        $swedish = [char[]]"åäöÅÄÖ"
+        $best       = $null
+        $bestScore  = -1
+        foreach ($enc in $candidates) {
+            $text  = $enc.GetString($bytes)
+            $score = @($text.ToCharArray() | Where-Object { $swedish -contains $_ }).Count
+            if ($score -gt $bestScore) {
+                $bestScore = $score
+                $best      = $text
+            }
+        }
+        return $best
+    }
+}
 
 function Get-AppInfoValue {
     <#
@@ -237,6 +311,21 @@ function Parse-DetectionRule {
         "<=" = "lessThanOrEqual"
         ">"  = "greaterThan"
         "<"  = "lessThan"
+    }
+
+    # Normalise short hive abbreviations (HKLM\...) to their full names (HKEY_LOCAL_MACHINE\...)
+    $hiveMap = [ordered]@{
+        "HKLM" = "HKEY_LOCAL_MACHINE"
+        "HKCU" = "HKEY_CURRENT_USER"
+        "HKCR" = "HKEY_CLASSES_ROOT"
+        "HKU"  = "HKEY_USERS"
+        "HKCC" = "HKEY_CURRENT_CONFIG"
+    }
+    foreach ($abbr in $hiveMap.Keys) {
+        if ($DetectionString -match "^$abbr\\") {
+            $DetectionString = $DetectionString -replace "^$abbr\\", "$($hiveMap[$abbr])\"
+            break
+        }
     }
 
     # --- Registry: HKEY_...\KeyPath\ValueName <op> value ---
@@ -445,9 +534,19 @@ catch {
 Write-Host "`n=== Step 3: Files ===" -ForegroundColor Cyan
 
 try {
-    $unzippedDir = Get-ChildItem -Path $tempDir -Directory | Select-Object -First 1
+    # Skip macOS metadata folders (__MACOSX) and pick the directory that actually
+    # contains ApplicationInformation.txt
+    $candidateDirs = Get-ChildItem -Path $tempDir -Directory | Where-Object { $_.Name -ne "__MACOSX" }
+    $unzippedDir   = $candidateDirs | Where-Object {
+        Get-ChildItem -Path $_.FullName -Filter "ApplicationInformation.txt" -ErrorAction SilentlyContinue
+    } | Select-Object -First 1
+
+    # Fall back to first non-metadata directory if none matched (error surfaces below)
     if (-not $unzippedDir) {
-        Write-Error "No directory found in $tempDir"
+        $unzippedDir = $candidateDirs | Select-Object -First 1
+    }
+    if (-not $unzippedDir) {
+        Write-Error "No application directory found in $tempDir"
         exit 1
     }
     Write-Host "Extracted directory: $($unzippedDir.FullName)"
@@ -476,14 +575,19 @@ catch {
 Write-Host "`n=== Step 4: ApplicationInformation.txt ===" -ForegroundColor Cyan
 
 try {
-    $appInfo = Get-Content -Path $appInfoFile.FullName -Raw
+    $appInfo = Read-TextFileSmart -Path $appInfoFile.FullName
 
     $vendor          = Get-AppInfoValue -Content $appInfo -Label "Application - Vendor"
     $appName         = Get-AppInfoValue -Content $appInfo -Label "Application - Name"
     $appVersion      = Get-AppInfoValue -Content $appInfo -Label "Application - Version"
     $installCmd      = Get-AppInfoValue -Content $appInfo -Label "Install command"
     $uninstallCmd    = Get-AppInfoValue -Content $appInfo -Label "Uninstall command"
-    $detectionMethod = Get-AppInfoValue -Content $appInfo -Label "DetectionMethod\.\(REG\)"
+    # Detection method may be declared as REG, MSI or FILE - read whichever is present
+    $detectionMethod = $null
+    foreach ($detType in @("REG", "MSI", "FILE")) {
+        $value = Get-AppInfoValue -Content $appInfo -Label "DetectionMethod\.\($detType\)"
+        if ($value) { $detectionMethod = $value; break }
+    }
     $diskSpace       = Get-AppInfoValue -Content $appInfo -Label "Estimated Disk Space"
 
     $missingFields = @()
@@ -492,7 +596,7 @@ try {
     if (-not $appVersion)      { $missingFields += "Application - Version" }
     if (-not $installCmd)      { $missingFields += "Install command" }
     if (-not $uninstallCmd)    { $missingFields += "Uninstall command" }
-    if (-not $detectionMethod) { $missingFields += "DetectionMethod.(REG)" }
+    if (-not $detectionMethod) { $missingFields += "DetectionMethod.(REG/MSI/FILE)" }
 
     if ($missingFields.Count -gt 0) {
         Write-Error "Missing required fields in ApplicationInformation.txt: $($missingFields -join ', ')"
@@ -522,13 +626,19 @@ try {
     $today       = Get-Date -Format "yyyy-MM-dd"
     $todayUtc    = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
     $displayName   = "$vendor $appName $appVersion"
-    $appDescription = Get-AppDescription -AppName $appName -FallbackName $displayName
+    $descResult     = Get-AppDescription -AppName $appName -FallbackName $displayName
+    $appDescription = $descResult.Description
+    # notes: "Base Application <date>" if the app is known in IntuneAppDescriptions.json, otherwise just the date
+    $appNotes       = if ($descResult.Found) { "Base Application $today" } else { "$today" }
     $diskSpaceMB   = ConvertTo-MB -DiskSpaceString $diskSpace
     $pngBase64   = Get-PngBase64 -PngFile $pngFile
 
     $parsed = Parse-DetectionRule -DetectionString $detectionMethod
     Write-Host "Detection type : $($parsed.DetectionRule.'@odata.type' -replace '#microsoft.graph.win32LobApp','')"
-    Write-Host "Detection dtype: $($parsed.DetectionRule.detectionType ?? $parsed.DetectionRule.productVersionOperator)"
+    $detDtype = if ($parsed.DetectionRule.Contains("detectionType")) { $parsed.DetectionRule.detectionType }
+                elseif ($parsed.DetectionRule.Contains("productVersionOperator")) { $parsed.DetectionRule.productVersionOperator }
+                else { "n/a" }
+    Write-Host "Detection dtype: $detDtype"
 
     $appJson = [ordered]@{
         "@odata.context"          = "https://graph.microsoft.com/beta/`$metadata#deviceAppManagement/mobileApps(categories(),assignments())/`$entity"
@@ -544,7 +654,7 @@ try {
         "informationUrl"          = $null
         "owner"                   = "Advania"
         "developer"               = ""
-        "notes"                   = "Basapplikation $today"
+        "notes"                   = $appNotes
         "uploadState"             = 1
         "publishingState"         = "published"
         "isAssigned"              = $true
@@ -660,7 +770,7 @@ try {
         -Description          $appDescription `
         -Publisher            $vendor `
         -AppVersion           $appVersion `
-        -Notes                "Basapplikation $today" `
+        -Notes                $appNotes `
         -InstallCommandLine   $installCmd `
         -UninstallCommandLine $uninstallCmd `
         -InstallExperience    "system" `
