@@ -65,7 +65,12 @@
     supplying any other assignment parameter without a group ID raises an error.
 
 .PARAMETER AssignmentIntent
-    required, available or uninstall. Defaults to required.
+    How the app is published to the group:
+      required  - enforced installation (the default)
+      available - published to Company Portal for the user to install on demand
+      uninstall - removes the app from the group
+    Defaults to required, so passing only -AppPath with a group configured publishes
+    the app as required, immediately.
 
 .PARAMETER AssignmentNotification
     End user notification behaviour: showAll, showReboot or hideAll. Defaults to showAll.
@@ -73,23 +78,16 @@
 .PARAMETER AvailableTime
     When the app becomes available. A future value requires -DeadlineTime as well,
     because the IntuneWin32App module rejects that combination.
-
-    If neither this nor -DeadlineTime is supplied, both default to the next Patch
-    Tuesday (see -NoPatchTuesdayDefault).
+    Omitting both this and -DeadlineTime publishes the app immediately.
 
 .PARAMETER DeadlineTime
     Installation deadline. Must be later than -AvailableTime when both are given.
 
-.PARAMETER PatchTuesdayAvailableTime
-    Time of day used for the available time when defaulting to Patch Tuesday. Defaults to 08:00.
-
-.PARAMETER PatchTuesdayDeadlineTime
-    Time of day used for the deadline when defaulting to Patch Tuesday. Defaults to 17:00,
-    i.e. the same day as the available time.
-
-.PARAMETER NoPatchTuesdayDefault
-    Suppresses the Patch Tuesday defaulting, making the app available immediately with
-    no deadline when no times are supplied.
+.PARAMETER PatchTuesday
+    Schedules the assignment on the next Patch Tuesday - the second Tuesday of the month -
+    available at 00:00 and with a deadline at 12:00 the same day. Cannot be combined with
+    -AvailableTime or -DeadlineTime. If the current day is itself a Patch Tuesday, the
+    following month is used.
 
 .PARAMETER UseLocalTime
     $true (default) interprets the assignment timestamps in the device's local time.
@@ -114,16 +112,19 @@
     .\New-IntuneWin32AppJson.ps1 -AppPath ".\LegacyApp_2.0.zip" -Architecture x64x86 -MinimumWindowsRelease W10_22H2
 
 .EXAMPLE
-    # Assign as required - schedule defaults to the next Patch Tuesday, 08:00 to 17:00
-    .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -AssignmentGroupId "8f3c1e20-4d5a-4f1b-9c2e-7a6b5c4d3e2f"
+    # With $env:INTUNE_ASSIGNMENT_GROUP_ID set: publish as required, immediately
+    .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip"
 
 .EXAMPLE
-    # Patch Tuesday schedule with a wider window, 06:00 until 22:00
-    .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -AssignmentGroupId "8f3c1e20-4d5a-4f1b-9c2e-7a6b5c4d3e2f" `
-        -PatchTuesdayAvailableTime "06:00" -PatchTuesdayDeadlineTime "22:00"
+    # Publish to Company Portal for users to install themselves
+    .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -AssignmentIntent available
 
 .EXAMPLE
-    # Upload and assign as required, available from 1 Sep, deadline 8 Sep (device local time)
+    # Required, scheduled on the next Patch Tuesday: available 00:00, deadline 12:00
+    .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -PatchTuesday
+
+.EXAMPLE
+    # Required with an explicit window (device local time)
     .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" `
         -AssignmentGroupId "8f3c1e20-4d5a-4f1b-9c2e-7a6b5c4d3e2f" `
         -AvailableTime (Get-Date "2026-09-01 08:00") `
@@ -194,16 +195,10 @@ param (
     [Parameter()]
     [bool]$UseLocalTime = $true,
 
-    # When a group is assigned but no times are given, both default to the next Patch Tuesday
+    # Schedules the assignment on the next Patch Tuesday: available 00:00, deadline 12:00.
+    # Without it, and without explicit times, the app is published immediately.
     [Parameter()]
-    [timespan]$PatchTuesdayAvailableTime = "08:00",
-
-    [Parameter()]
-    [timespan]$PatchTuesdayDeadlineTime = "17:00",
-
-    # Opt out to assign immediately with no deadline instead
-    [Parameter()]
-    [switch]$NoPatchTuesdayDefault
+    [switch]$PatchTuesday
 )
 
 Set-StrictMode -Version Latest
@@ -776,7 +771,7 @@ if ($missingCredentials.Count -gt 0) {
 }
 
 # Assignment parameters are validated up front so a misconfiguration fails before the upload
-$assignmentParameters = @("AssignmentIntent", "AssignmentNotification", "AvailableTime", "DeadlineTime", "UseLocalTime")
+$assignmentParameters = @("AssignmentIntent", "AssignmentNotification", "AvailableTime", "DeadlineTime", "UseLocalTime", "PatchTuesday")
 $assignmentRequested  = @($assignmentParameters | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0
 
 if ($assignmentRequested -and -not $AssignmentGroupId) {
@@ -789,18 +784,15 @@ if ($AssignmentGroupId) {
         throw "AssignmentGroupId '$AssignmentGroupId' is not a valid GUID. Use the Entra group's object ID, not its display name."
     }
 
-    # With no schedule given, anchor both times on the next Patch Tuesday. Both must be set:
-    # the module rejects a future available time that has no accompanying deadline.
-    $patchTuesdayApplied = $false
-    if (-not $AvailableTime -and -not $DeadlineTime -and -not $NoPatchTuesdayDefault) {
-        if ($PatchTuesdayDeadlineTime -le $PatchTuesdayAvailableTime) {
-            throw "-PatchTuesdayDeadlineTime ($PatchTuesdayDeadlineTime) must be later in the day than -PatchTuesdayAvailableTime ($PatchTuesdayAvailableTime)."
+    # -PatchTuesday derives both times, so it cannot be combined with explicit ones
+    if ($PatchTuesday) {
+        if ($AvailableTime -or $DeadlineTime) {
+            throw "-PatchTuesday cannot be combined with -AvailableTime or -DeadlineTime. Use either the switch or explicit times."
         }
-        $patchTuesday        = Get-NextPatchTuesday
-        $AvailableTime       = $patchTuesday.Add($PatchTuesdayAvailableTime)
-        $DeadlineTime        = $patchTuesday.Add($PatchTuesdayDeadlineTime)
-        $patchTuesdayApplied = $true
-        Write-Verbose "No schedule supplied - defaulting to next Patch Tuesday $($patchTuesday.ToString('yyyy-MM-dd'))."
+        $nextPatchTuesday = Get-NextPatchTuesday
+        $AvailableTime    = $nextPatchTuesday                # 00:00 on the day
+        $DeadlineTime     = $nextPatchTuesday.AddHours(12)   # 12:00 on the day
+        Write-Verbose "-PatchTuesday: scheduling on $($nextPatchTuesday.ToString('yyyy-MM-dd')), available 00:00, deadline 12:00."
     }
 
     # Add-IntuneWin32AppAssignmentGroup rejects a future available time unless a deadline is also
@@ -1174,7 +1166,7 @@ if ($AssignmentGroupId -and $appId) {
         $deadlineText  = $DeadlineTime  ? $DeadlineTime.ToString("yyyy-MM-dd HH:mm")  : "none"
         $timeBaseText  = $UseLocalTime ? "device local time" : "UTC"
 
-        $scheduleSource = $patchTuesdayApplied ? " [defaulted to next Patch Tuesday]" : ""
+        $scheduleSource = $PatchTuesday ? " [-PatchTuesday]" : ""
 
         Write-Host "Assigned to group $AssignmentGroupId as '$AssignmentIntent'." -ForegroundColor Green
         Write-Host "  Available: $availableText   Deadline: $deadlineText   ($timeBaseText)$scheduleSource"
@@ -1186,7 +1178,7 @@ if ($AssignmentGroupId -and $appId) {
 elseif ($AssignmentGroupId -and $WhatIfPreference) {
     $whatIfAvailable = $AvailableTime ? "available $($AvailableTime.ToString('yyyy-MM-dd HH:mm'))" : "available immediately"
     $whatIfDeadline  = $DeadlineTime  ? "deadline $($DeadlineTime.ToString('yyyy-MM-dd HH:mm'))"   : "no deadline"
-    $whatIfSource    = $patchTuesdayApplied ? " [defaulted to next Patch Tuesday]" : ""
+    $whatIfSource    = $PatchTuesday ? " [-PatchTuesday]" : ""
     Write-Host "`nWhatIf: would assign to group $AssignmentGroupId as '$AssignmentIntent' ($whatIfAvailable, $whatIfDeadline)$whatIfSource." -ForegroundColor Yellow
 }
 
