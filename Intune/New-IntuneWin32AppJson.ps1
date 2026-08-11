@@ -1,4 +1,5 @@
 #Requires -Version 7.4
+
 <#
 .SYNOPSIS
     Packages and uploads an Intune Win32 app from a zip-packaged PSADT application.
@@ -6,7 +7,7 @@
 .DESCRIPTION
     The script accepts a path to a zip file, extracts it to a temporary directory
     alongside the zip file, reads ApplicationInformation.txt, and retrieves the
-    .intunewin and .png files. A JSON file in Intune Graph API format (UTF-16 LE)
+    intunewin and png files. A JSON file in Intune Graph API format (UTF-16 LE)
     is written to the extracted application directory, and the app is uploaded to
     Intune via the IntuneWin32App module using non-interactive client credentials.
 
@@ -129,6 +130,57 @@
         -AssignmentGroupId "8f3c1e20-4d5a-4f1b-9c2e-7a6b5c4d3e2f" `
         -AvailableTime (Get-Date "2026-09-01 08:00") `
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
+
+.NOTES
+    Version:        2.1.0
+    Creation Date:  2026-05-07
+    Last Updated:   2026-08-11
+    Author:         Peter Olausson
+    Contact:        fitur@duck.com
+
+    Requires PowerShell 7.4+ and the IntuneWin32App module, which is installed
+    automatically on first run. Graph permission: DeviceManagementApps.ReadWrite.All
+    as an Application permission with admin consent.
+
+    CHANGELOG
+
+        2.1.0 - 2026-08-11
+            Optional assignment to an Entra group via -AssignmentGroupId or
+            $env:INTUNE_ASSIGNMENT_GROUP_ID, with -AssignmentIntent (required/available/
+            uninstall) and an optional schedule. -PatchTuesday sets available 00:00 and
+            deadline 12:00 on the next second Tuesday; without it the app publishes
+            immediately. Assignment input is validated before extraction, including the
+            module quirk where a future available time without a deadline is silently
+            skipped.
+
+        2.0.0 - 2026-08-11
+            Rewritten for PowerShell 7.4; no longer runs on 5.1. Added -WhatIf, which
+            validates and builds the JSON without authenticating or uploading. Fixed the
+            requirement rule never being sent, which made Intune fall back to Windows 10
+            20H2 and drop the disk space requirement entirely - now configurable via
+            -Architecture and -MinimumWindowsRelease, defaulting to x64 and W11_21H2.
+            Descriptions file entries may now override the app name via displayName, and
+            name matching ignores case and punctuation so "7Zip" matches "7-Zip".
+
+        1.2.0 - 2026-06-15
+            Detection rules extended beyond registry to MSI product codes and file paths,
+            with short hive names (HKLM, HKCU, ...) accepted. Text encoding is now detected
+            automatically across UTF-8, UTF-16, Mac Roman and Windows-1252, so Swedish
+            characters survive packages built on either macOS or Windows. macOS __MACOSX
+            folders in the zip are ignored.
+
+        1.1.0 - 2026-06-04
+            App descriptions moved out of the script to an external JSON file, reachable
+            by local path or URL, so they can be maintained without editing code. -AppPath
+            now points at the zip file itself rather than a folder. Credentials and
+            required ApplicationInformation.txt fields are validated up front, reporting
+            everything missing at once.
+
+        1.0.0 - 2026-05-07
+            First working version: extracts the zip, parses ApplicationInformation.txt,
+            builds the Intune JSON and uploads via the IntuneWin32App module. Return code
+            1641 is patched to softReboot afterwards, since passing return codes to the
+            module appends them to its defaults and produces duplicates.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
