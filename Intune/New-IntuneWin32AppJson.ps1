@@ -84,6 +84,10 @@
 .PARAMETER DeadlineTime
     Installation deadline. Must be later than -AvailableTime when both are given.
 
+.PARAMETER IntuneWin32AppVersion
+    Pins the IntuneWin32App module to a specific version, so a new release cannot change
+    behaviour unnoticed in production. Recommended for scheduled or unattended runs.
+
 .PARAMETER PatchTuesday
     Schedules the assignment on the next Patch Tuesday - the second Tuesday of the month -
     available at 00:00 and with a deadline at 12:00 the same day. Cannot be combined with
@@ -132,9 +136,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        2.1.0
+    Version:        2.2.0
     Creation Date:  2026-05-07
-    Last Updated:   2026-08-11
+    Last Updated:   2026-08-12
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -143,6 +147,18 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        2.2.0 - 2026-08-12
+            Hardening after an external code review. The JSON artifact is now copied
+            next to the zip before cleanup, so the returned JsonPath no longer points
+            at a deleted file. The return code patch and the group assignment each got
+            their own try/catch: both run after the app exists in Intune, so failing
+            them no longer reports an upload failure that invites a duplicate-creating
+            rerun. Temp directories are unique per run for parallel execution. Encoding
+            detection handles BOM-less UTF-16 and no longer picks Mac Roman on a tie.
+            Added -IntuneWin32AppVersion for module pinning, a guard against a past
+            deadline without an available time, retries on Graph calls, and filename
+            sanitising for displayName overrides.
 
         2.1.0 - 2026-08-11
             Optional assignment to an Entra group via -AssignmentGroupId or
@@ -250,7 +266,12 @@ param (
     # Schedules the assignment on the next Patch Tuesday: available 00:00, deadline 12:00.
     # Without it, and without explicit times, the app is published immediately.
     [Parameter()]
-    [switch]$PatchTuesday
+    [switch]$PatchTuesday,
+
+    # Pin the IntuneWin32App module version so a new release cannot silently change behaviour
+    # in production. Empty means "whatever is installed or latest".
+    [Parameter()]
+    [string]$IntuneWin32AppVersion
 )
 
 Set-StrictMode -Version Latest
@@ -261,6 +282,9 @@ $AppPath = (Resolve-Path -Path $AppPath).Path
 
 # These mirror the lookup tables inside New-IntuneWin32AppRequirementRule so the generated
 # JSON artifact records the same values that are actually sent to Intune.
+# 1x1 transparent PNG, used when a package ships without an icon
+$script:BlankPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
 $architectureMap = @{
     "x64" = "x64"; "x86" = "x86"; "arm64" = "arm64"
     "x64x86" = "x64,x86"; "AllWithARM64" = "x64,x86,arm64"
@@ -347,7 +371,9 @@ function Get-AppDescription {
         if ($Source -match '^https?://') {
             # Raw hosts (GitHub, blob storage) usually serve text/plain, in which case
             # Invoke-RestMethod returns a plain string instead of parsing the JSON.
-            $response = Invoke-RestMethod -Uri $Source -ErrorAction Stop
+            # ConnectionTimeoutSeconds rather than the TimeoutSec alias; default is 100 s
+            $response = Invoke-RestMethod -Uri $Source `
+                -ConnectionTimeoutSeconds 30 -MaximumRetryCount 2 -RetryIntervalSec 3 -ErrorAction Stop
             $rawText  = $response -is [string] ? $response : ($response | ConvertTo-Json -Depth 20)
         }
         else {
@@ -382,10 +408,13 @@ function Get-AppDescription {
     }
 
     # Pass 3: normalised substring, longest key first so specific entries win
-    if (-not $matchedKey) {
+    # Guarded on length because a short name matches almost anything, and a wrong match here
+    # also applies the wrong displayName override.
+    if (-not $matchedKey -and $target.Length -ge 3) {
         foreach ($key in ($descriptions.Keys | Sort-Object -Property Length -Descending)) {
             $normKey = Get-NormalizedKey -Value $key
-            if ($normKey -and ($target.Contains($normKey) -or $normKey.Contains($target))) {
+            if ($normKey.Length -ge 3 -and ($target.Contains($normKey) -or $normKey.Contains($target))) {
+                Write-Verbose "Matched '$AppName' to descriptions entry '$key' by substring."
                 $matchedKey = $key; break
             }
         }
@@ -437,6 +466,15 @@ function Read-TextFileSmart {
         return [System.Text.Encoding]::BigEndianUnicode.GetString($bytes)  # UTF-16 BE
     }
 
+    # UTF-16 without a BOM is technically valid UTF-8 (NUL bytes are legal), so it would pass
+    # the strict test below and yield text with embedded NULs that every regex then misses.
+    $nulIndex = [Array]::IndexOf($bytes, [byte]0)
+    if ($nulIndex -ge 0 -and $nulIndex -lt 512) {
+        return ($nulIndex % 2 -eq 1) ?
+            [System.Text.Encoding]::Unicode.GetString($bytes) :
+            [System.Text.Encoding]::BigEndianUnicode.GetString($bytes)
+    }
+
     # Strict UTF-8 throws on invalid byte sequences, which is how we detect legacy encodings
     try {
         return [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
@@ -444,7 +482,9 @@ function Read-TextFileSmart {
     catch [System.Text.DecoderFallbackException] {
         try { [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance) } catch { }
 
-        $candidates = foreach ($codePage in 10000, 1252) {
+        # 1252 first so it wins ties: a file whose only non-ASCII characters fall outside the
+        # scored set would otherwise become Mac Roman purely because it was tried first.
+        $candidates = foreach ($codePage in 1252, 10000) {
             try { [System.Text.Encoding]::GetEncoding($codePage) } catch { }
         }
         $candidates = @($candidates)
@@ -454,7 +494,8 @@ function Read-TextFileSmart {
             return [System.Text.Encoding]::GetEncoding("ISO-8859-1").GetString($bytes)
         }
 
-        $swedish   = [char[]]"åäöÅÄÖ"
+        # Wider than Swedish so other Latin diacritics do not all tie at zero
+        $swedish   = [char[]]"åäöÅÄÖéèêëüúóíáàâîôçñ"
         $best      = $null
         $bestScore = -1
         foreach ($encoding in $candidates) {
@@ -531,6 +572,9 @@ function ConvertTo-MB {
         }
         return $result
     }
+    if (-not [string]::IsNullOrWhiteSpace($DiskSpaceString)) {
+        Write-Warning "Could not parse disk space '$DiskSpaceString' (expected e.g. '500 MB' or '2 GB') - no disk requirement will be set."
+    }
     return $null
 }
 
@@ -545,12 +589,11 @@ function Expand-AppPackage {
         [Parameter(Mandatory)][string]$ZipPath
     )
     $parentDir = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ZipPath))
-    $tempDir   = Join-Path -Path $parentDir -ChildPath "AppUnzip"
+    # Unique per run so parallel invocations (e.g. several Azure Function executions sharing
+    # an instance filesystem) cannot delete each other's extraction mid-step
+    $tempDir = Join-Path -Path $parentDir -ChildPath ("AppUnzip_{0}" -f [guid]::NewGuid().ToString("N").Substring(0, 8))
 
     # -WhatIf:$false so local preparation always runs; -WhatIf only gates the Intune upload
-    if (Test-Path -Path $tempDir) {
-        Remove-Item -Path $tempDir -Recurse -Force -WhatIf:$false
-    }
     New-Item -Path $tempDir -ItemType Directory -WhatIf:$false | Out-Null
     Expand-Archive -Path $ZipPath -DestinationPath $tempDir -Force -WhatIf:$false
     return $tempDir
@@ -567,11 +610,9 @@ function Get-PngBase64 {
         [Parameter()][AllowNull()][System.IO.FileInfo]$PngFile
     )
 
-    $blankPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
-
     if ($null -eq $PngFile) {
         Write-Warning "No PNG file found - using blank icon."
-        return $blankPng
+        return $script:BlankPngBase64
     }
 
     try {
@@ -579,7 +620,7 @@ function Get-PngBase64 {
     }
     catch {
         Write-Warning "Could not read PNG '$($PngFile.FullName)': $($PSItem.Exception.Message) - using blank icon."
-        return $blankPng
+        return $script:BlankPngBase64
     }
 }
 
@@ -855,6 +896,11 @@ if ($AssignmentGroupId) {
     if ($AvailableTime -and $DeadlineTime -and $DeadlineTime -le $AvailableTime) {
         throw "-DeadlineTime ($DeadlineTime) must be later than -AvailableTime ($AvailableTime)."
     }
+    # Mirrors the module's second guard: a past deadline with no available time is rejected
+    # there with a warning and a silent skip.
+    if ($DeadlineTime -and -not $AvailableTime -and $DeadlineTime -lt (Get-Date)) {
+        throw "-DeadlineTime ($DeadlineTime) is in the past. Supply a future deadline, or add -AvailableTime."
+    }
 }
 
 #endregion
@@ -1072,7 +1118,10 @@ try {
     }
 
     # UTF-16 LE matches the Intune Graph API export format
-    $outputPath = Join-Path -Path $unzippedDir.FullName -ChildPath "$displayName.json"
+    # displayName can come from the descriptions file and may contain characters that are
+    # illegal in a filename on either macOS or Windows
+    $safeFileName = ($displayName -replace '[\\/:*?"<>|]', '_') + ".json"
+    $outputPath   = Join-Path -Path $unzippedDir.FullName -ChildPath $safeFileName
     [System.IO.File]::WriteAllText($outputPath, ($appJson | ConvertTo-Json -Depth 10), [System.Text.Encoding]::Unicode)
     Write-Host "JSON saved to: $outputPath" -ForegroundColor Green
 }
@@ -1094,11 +1143,14 @@ if (-not $PSCmdlet.ShouldProcess($displayName, "Upload Win32 app to Intune")) {
 }
 else {
     try {
-        if (-not (Get-Module -ListAvailable -Name IntuneWin32App)) {
-            Write-Host "Installing IntuneWin32App module..."
-            Install-Module -Name IntuneWin32App -Scope CurrentUser -Force
+        $moduleSplat = @{ Name = "IntuneWin32App" }
+        if ($IntuneWin32AppVersion) { $moduleSplat["RequiredVersion"] = $IntuneWin32AppVersion }
+
+        if (-not (Get-Module -ListAvailable @moduleSplat)) {
+            Write-Host "Installing IntuneWin32App module$($IntuneWin32AppVersion ? " $IntuneWin32AppVersion" : '')..."
+            Install-Module @moduleSplat -Scope CurrentUser -Force
         }
-        Import-Module IntuneWin32App
+        Import-Module @moduleSplat
 
         Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
         Write-Host "Authenticated to Microsoft Graph"
@@ -1114,8 +1166,7 @@ else {
         }
         else {
             $blankPngPath = Join-Path -Path $tempDir -ChildPath "blank.png"
-            [System.IO.File]::WriteAllBytes($blankPngPath, [System.Convert]::FromBase64String(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="))
+            [System.IO.File]::WriteAllBytes($blankPngPath, [System.Convert]::FromBase64String($script:BlankPngBase64))
             $blankPngPath
         }
 
@@ -1158,7 +1209,8 @@ else {
         $appId     = ${appObject}?.id
 
         if (-not $appId) {
-            Write-Warning "App was uploaded but no ID was returned - skipping return code patch. Verify in the Intune portal."
+            $skipped = $AssignmentGroupId ? "return code patch AND group assignment" : "return code patch"
+            Write-Warning "App was uploaded but no ID was returned - skipping $skipped. Verify in the Intune portal."
         }
         else {
             Write-Host "App uploaded successfully. Intune App ID: $appId" -ForegroundColor Green
@@ -1175,14 +1227,24 @@ else {
                 )
             } | ConvertTo-Json -Depth 5
 
-            # Reuse the authentication header established by Connect-MSIntuneGraph
-            Invoke-RestMethod `
-                -Uri     "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId" `
-                -Method  Patch `
-                -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" } `
-                -Body    $patchBody | Out-Null
+            # Separate try/catch: the app already exists in Intune at this point, so a failed
+            # patch must not be reported as an upload failure - a rerun would create a duplicate.
+            try {
+                # Reuse the authentication header established by Connect-MSIntuneGraph
+                Invoke-RestMethod `
+                    -Uri               "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId" `
+                    -Method            Patch `
+                    -Headers           @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" } `
+                    -Body              $patchBody `
+                    -MaximumRetryCount 3 `
+                    -RetryIntervalSec  5 | Out-Null
 
-            Write-Host "Return code 1641 patched to softReboot." -ForegroundColor Green
+                Write-Host "Return code 1641 patched to softReboot." -ForegroundColor Green
+            }
+            catch {
+                Write-Warning "App $appId was uploaded, but patching return code 1641 failed: $($PSItem.Exception.Message)"
+                Write-Warning "Set return code 1641 to softReboot manually in the Intune portal. Do not rerun the script - that would create a duplicate app."
+            }
         }
     }
     catch {
@@ -1224,7 +1286,10 @@ if ($AssignmentGroupId -and $appId) {
         Write-Host "  Available: $availableText   Deadline: $deadlineText   ($timeBaseText)$scheduleSource"
     }
     catch {
-        throw "Assignment failed: $($PSItem.Exception.Message)"
+        # The app is uploaded and patched by now, so this is not a total failure. Throwing here
+        # would invite a rerun, which would create a duplicate app.
+        Write-Warning "App $appId was uploaded, but the group assignment failed: $($PSItem.Exception.Message)"
+        Write-Warning "Assign the app to $AssignmentGroupId manually in the Intune portal."
     }
 }
 elseif ($AssignmentGroupId -and $WhatIfPreference) {
@@ -1243,8 +1308,20 @@ if ($WhatIfPreference) {
     Write-Host "`nWhatIf: leaving $tempDir in place so the generated JSON can be inspected." -ForegroundColor Yellow
 }
 elseif (Test-Path -Path $tempDir) {
+    # The JSON lives inside the temp directory, so preserve it next to the zip before
+    # cleanup - otherwise the JsonPath returned to the caller points at a deleted file
+    try {
+        $preservedPath = Join-Path -Path ([System.IO.Path]::GetDirectoryName($AppPath)) -ChildPath $safeFileName
+        Copy-Item -Path $outputPath -Destination $preservedPath -Force
+        $outputPath = $preservedPath
+        Write-Host "`nJSON kept at: $outputPath" -ForegroundColor DarkGray
+    }
+    catch {
+        Write-Warning "Could not preserve the JSON artifact before cleanup: $($PSItem.Exception.Message)"
+    }
+
     Remove-Item -Path $tempDir -Recurse -Force
-    Write-Host "`nCleaned up: $tempDir" -ForegroundColor DarkGray
+    Write-Host "Cleaned up: $tempDir" -ForegroundColor DarkGray
 }
 
 #endregion
