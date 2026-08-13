@@ -71,7 +71,7 @@ Application - Version.: 26.02
 Install command.......: Invoke-AppDeployToolkit.exe Install Silent
 Uninstall command.....: Invoke-AppDeployToolkit.exe Uninstall Silent
 
-DetectionMethod.(REG).: HKLM\Software\Advania\IgorPavlov 7Zip 26.02 x64 = Installed
+DetectionMethod.(REG).: HKLM\Software\<COMPANY>\IgorPavlov 7Zip 26.02 x64 = Installed
 
 Estimated Disk Space..: 15 MB
 ```
@@ -90,7 +90,7 @@ The label may be `DetectionMethod.(REG)`, `.(MSI)` or `.(FILE)`:
 
 ```
 HKEY_LOCAL_MACHINE\SOFTWARE\...\ClientState\{GUID}\pv >= 149.0.7827.54
-HKLM\Software\Advania\IgorPavlov 7Zip 26.02 x64 = Installed
+HKLM\Software\<COMPANY>\IgorPavlov 7Zip 26.02 x64 = Installed
 {D9275287-A12D-49AB-94DD-EC5AC30E95FC}
 %ProgramFiles%\App\file.exe >= 1.2.3
 ```
@@ -112,6 +112,7 @@ so it is immediately clear what needs fixing in the text file.
 | `INTUNE_CLIENT_SECRET` | Yes | App registration secret |
 | `INTUNE_ASSIGNMENT_GROUP_ID` | No | Entra group object ID. Without it, assignment is skipped entirely |
 | `INTUNE_DESCRIPTIONS_PATH` | No | Path or URL to `IntuneAppDescriptions.json`. Defaults to the copy in this repo |
+| `INTUNE_APP_OWNER` | No | Owner recorded on the app in Intune. Left empty if unset |
 
 ```powershell
 $env:INTUNE_TENANT_ID           = "..."
@@ -139,6 +140,7 @@ passed on the command line ends up in shell history and transcript logs.
 | `-MinimumWindowsRelease` | `W11_21H2` | `W10_1607` through `W11_22H2` |
 | `-DescriptionsPath` | GitHub URL | Path or URL to the descriptions file |
 | `-IntuneWin32AppVersion` | — | Pins the module version |
+| `-Owner` | env var | Owner recorded on the app in Intune |
 | `-TenantID` `-ClientID` `-ClientSecret` | env vars | Avoid on the command line |
 | `-WhatIf` | — | Dry run |
 
@@ -201,7 +203,7 @@ $result.AppId
 
 ## App names and descriptions
 
-`IntuneAppDescriptions.json` supplies the description shown in Company Portal, and can
+`data/IntuneAppDescriptions.json` supplies the description shown in Company Portal, and can
 override the app name. Entries are matched against `Application - Name`, ignoring case and
 punctuation, so `7Zip` matches `7-Zip`.
 

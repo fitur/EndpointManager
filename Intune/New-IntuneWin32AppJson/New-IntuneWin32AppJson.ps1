@@ -21,7 +21,8 @@
     If the PNG icon is missing or unreadable a blank 1x1 pixel PNG is used instead.
 
     Credentials can be supplied as parameters or via environment variables
-    (INTUNE_TENANT_ID, INTUNE_CLIENT_ID, INTUNE_CLIENT_SECRET).
+    (INTUNE_TENANT_ID, INTUNE_CLIENT_ID, INTUNE_CLIENT_SECRET). Nothing in the script is
+    tied to a specific organisation: the app owner comes from -Owner or INTUNE_APP_OWNER.
 
     NOTE: requires PowerShell 7.4+. Uses ternary operators, null-coalescing and
     ConvertFrom-Json -AsHashtable, none of which work on Windows PowerShell 5.1.
@@ -84,6 +85,10 @@
 .PARAMETER DeadlineTime
     Installation deadline. Must be later than -AvailableTime when both are given.
 
+.PARAMETER Owner
+    Owner recorded on the app in Intune. Falls back to $env:INTUNE_APP_OWNER, and is left
+    empty when neither is set.
+
 .PARAMETER IntuneWin32AppVersion
     Pins the IntuneWin32App module to a specific version, so a new release cannot change
     behaviour unnoticed in production. Recommended for scheduled or unattended runs.
@@ -136,9 +141,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        2.2.0
+    Version:        2.3.0
     Creation Date:  2026-05-07
-    Last Updated:   2026-08-12
+    Last Updated:   2026-08-13
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -147,6 +152,12 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        2.3.0 - 2026-08-13
+            Removed the hardcoded app owner. It now comes from -Owner or
+            $env:INTUNE_APP_OWNER and is empty when neither is set. The value is also
+            passed to Add-IntuneWin32App, which it previously was not - the owner
+            appeared in the JSON artifact but never reached Intune.
 
         2.2.0 - 2026-08-12
             Hardening after an external code review. The JSON artifact is now copied
@@ -224,7 +235,7 @@ param (
 
     [Parameter()]
     [string]$DescriptionsPath = ($env:INTUNE_DESCRIPTIONS_PATH ??
-        "https://raw.githubusercontent.com/fitur/EndpointManager/refs/heads/master/Intune/New-IntuneWin32AppJson/IntuneAppDescriptions.json"),
+        "https://raw.githubusercontent.com/fitur/EndpointManager/refs/heads/master/Intune/data/IntuneAppDescriptions.json"),
 
     # ValidateSet values mirror New-IntuneWin32AppRequirementRule in the IntuneWin32App module
     [Parameter()]
@@ -271,7 +282,12 @@ param (
     # Pin the IntuneWin32App module version so a new release cannot silently change behaviour
     # in production. Empty means "whatever is installed or latest".
     [Parameter()]
-    [string]$IntuneWin32AppVersion
+    [string]$IntuneWin32AppVersion,
+
+    # Owner shown on the app in Intune. Left empty when neither this nor the environment
+    # variable is set, which matches the module's own default.
+    [Parameter()]
+    [string]$Owner = $env:INTUNE_APP_OWNER
 )
 
 Set-StrictMode -Version Latest
@@ -1051,7 +1067,7 @@ try {
         "isFeatured"              = $false
         "privacyInformationUrl"   = $null
         "informationUrl"          = $null
-        "owner"                   = "Advania"
+        "owner"                   = $Owner
         "developer"               = ""
         "notes"                   = $appNotes
         "uploadState"             = 1
@@ -1192,6 +1208,7 @@ else {
             -DisplayName          $displayName `
             -Description          $appDescription `
             -Publisher            $vendor `
+            -Owner                $Owner `
             -AppVersion           $appVersion `
             -Notes                $appNotes `
             -InstallCommandLine   $installCmd `
