@@ -1447,8 +1447,8 @@ if ($Supersede -and $appId) {
         # DisplayName is $null when the descriptions file supplies no override
         $nameBases = @($descResult.DisplayName, "$vendor $appName") | Where-Object { $_ }
 
-        $candidates = @(Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
-                                              -ExcludeId $appId -AllApps (Get-Win32AppInventory))
+        $candidates = Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
+                                             -ExcludeId $appId -AllApps (Get-Win32AppInventory)
 
         if ($candidates.Count -eq 0) {
             Write-Host "No earlier versions found to supersede."
