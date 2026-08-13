@@ -201,7 +201,7 @@ $result.AppId
 
 ## App names and descriptions
 
-`data/IntuneAppDescriptions.json` supplies the description shown in Company Portal, and can
+`IntuneAppDescriptions.json` supplies the description shown in Company Portal, and can
 override the app name. Entries are matched against `Application - Name`, ignoring case and
 punctuation, so `7Zip` matches `7-Zip`.
 
