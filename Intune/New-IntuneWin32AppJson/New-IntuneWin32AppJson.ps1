@@ -89,6 +89,15 @@
     Owner recorded on the app in Intune. Falls back to $env:INTUNE_APP_OWNER, and is left
     empty when neither is set.
 
+.PARAMETER Supersede
+    Finds earlier versions of the same app already in Intune and marks them as superseded
+    by this upload. An app qualifies only when its name is exactly "<base> <version>" for
+    the resolved display name or the "<Vendor> <Name>" fallback, and its version is strictly
+    lower than the one being uploaded.
+
+.PARAMETER SupersedenceType
+    Update (default) installs over the earlier version; Replace uninstalls it first.
+
 .PARAMETER IntuneWin32AppVersion
     Pins the IntuneWin32App module to a specific version, so a new release cannot change
     behaviour unnoticed in production. Recommended for scheduled or unattended runs.
@@ -126,6 +135,10 @@
     .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip"
 
 .EXAMPLE
+    # Publish and supersede earlier versions of the same app
+    .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -Supersede
+
+.EXAMPLE
     # Publish to Company Portal for users to install themselves
     .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -AssignmentIntent available
 
@@ -141,7 +154,7 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        2.3.0
+    Version:        2.4.0
     Creation Date:  2026-05-07
     Last Updated:   2026-08-13
     Author:         Peter Olausson
@@ -152,6 +165,14 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        2.4.0 - 2026-08-13
+            Added optional supersedence via -Supersede and -SupersedenceType. Earlier
+            versions of the same app are located by an exact "<base> <version>" name
+            match against both naming conventions, with a strict version comparison so
+            newer versions and similarly named products are never touched. All
+            relationships are submitted in one call, because the module replaces the
+            whole supersedence set on each write.
 
         2.3.0 - 2026-08-13
             Removed the hardcoded app owner. It now comes from -Owner or
@@ -287,7 +308,16 @@ param (
     # Owner shown on the app in Intune. Left empty when neither this nor the environment
     # variable is set, which matches the module's own default.
     [Parameter()]
-    [string]$Owner = $env:INTUNE_APP_OWNER
+    [string]$Owner = $env:INTUNE_APP_OWNER,
+
+    # Marks earlier versions of the same app in Intune as superseded by this upload
+    [Parameter()]
+    [switch]$Supersede,
+
+    # Update installs over the old version; Replace uninstalls it first
+    [Parameter()]
+    [ValidateSet("Update", "Replace")]
+    [string]$SupersedenceType = "Update"
 )
 
 Set-StrictMode -Version Latest
@@ -525,6 +555,93 @@ function Read-TextFileSmart {
         }
         return $best
     }
+}
+
+function Get-Win32AppInventory {
+    <#
+    .SYNOPSIS
+        Returns every Win32 app in the tenant as id/displayName pairs.
+
+    .DESCRIPTION
+        Uses the list endpoint and follows @odata.nextLink. Deliberately avoids
+        Get-IntuneWin32App, which issues an extra request per app to fetch full details
+        and triggers throttling on tenants with many apps - the list response already
+        carries the only two fields needed here.
+    #>
+    [OutputType([pscustomobject[]])]
+    param ()
+
+    $uri  = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$filter=isof('microsoft.graph.win32LobApp')"
+    $apps = [System.Collections.Generic.List[pscustomobject]]::new()
+
+    while ($uri) {
+        $response = Invoke-RestMethod -Uri $uri -Method Get `
+            -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
+            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+
+        foreach ($item in $response.value) { $apps.Add($item) }
+        $uri = $response.PSObject.Properties.Name -contains "@odata.nextLink" ? $response.'@odata.nextLink' : $null
+    }
+
+    return ,$apps.ToArray()
+}
+
+function Select-SupersedableApp {
+    <#
+    .SYNOPSIS
+        Picks the apps in the tenant that are earlier versions of the app just uploaded.
+
+    .DESCRIPTION
+        Matching is deliberately strict, because a false positive marks an unrelated app as
+        superseded. A candidate qualifies only when its display name is exactly
+        "<base> <version>" for one of the supplied name bases, the trailing version parses,
+        and it is strictly lower than the new version. That rejects newer versions, other
+        products sharing a prefix ("7-Zip Pro 1.0"), names without a version, and names
+        where the base is merely contained ("My 7-Zip 1.0").
+
+    .NOTES
+        Two bases are normally supplied: the resolved display name and the
+        "<Vendor> <Name>" fallback, so apps uploaded before a displayName override existed
+        are still recognised.
+    #>
+    [OutputType([pscustomobject[]])]
+    param (
+        [Parameter(Mandatory)][AllowEmptyString()][string[]]$NameBases,
+        [Parameter(Mandatory)][string]$NewVersion,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ExcludeId,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AllApps
+    )
+
+    $newParsed = $null
+    if (-not [version]::TryParse($NewVersion, [ref]$newParsed)) {
+        Write-Warning "Version '$NewVersion' is not comparable - skipping supersedence to avoid superseding the wrong app."
+        return ,@()
+    }
+
+    $patterns = foreach ($base in ($NameBases | Where-Object { $_ } | Select-Object -Unique)) {
+        "^" + [regex]::Escape($base) + '\s+(\d+(?:\.\d+){0,3})$'
+    }
+
+    $matched = foreach ($app in $AllApps) {
+        if ($app.id -eq $ExcludeId) { continue }
+        foreach ($pattern in $patterns) {
+            $match = [regex]::Match($app.displayName, $pattern)
+            if (-not $match.Success) { continue }
+
+            $oldParsed = $null
+            if (-not [version]::TryParse($match.Groups[1].Value, [ref]$oldParsed)) {
+                Write-Verbose "Skipping '$($app.displayName)': version not comparable."
+                continue
+            }
+            if ($oldParsed -ge $newParsed) { continue }
+
+            [pscustomobject]@{ Id = $app.id; DisplayName = $app.displayName; Version = $oldParsed }
+            break
+        }
+    }
+
+    # Comma operator: without it an empty result unrolls to $null and .Count fails under StrictMode
+    return ,@($matched)
 }
 
 function Get-NextPatchTuesday {
@@ -1318,6 +1435,49 @@ elseif ($AssignmentGroupId -and $WhatIfPreference) {
 
 #endregion
 
+#region Step 8 - Supersede earlier versions (optional)
+
+$supersededApps = @()
+
+if ($Supersede -and $appId) {
+    Write-Host "`n=== Step 8: Supersedence ===" -ForegroundColor Cyan
+    try {
+        # Both naming conventions: the resolved name and the "<Vendor> <Name>" fallback,
+        # so apps uploaded before a displayName override existed are still found
+        # DisplayName is $null when the descriptions file supplies no override
+        $nameBases = @($descResult.DisplayName, "$vendor $appName") | Where-Object { $_ }
+
+        $candidates = @(Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
+                                              -ExcludeId $appId -AllApps (Get-Win32AppInventory))
+
+        if ($candidates.Count -eq 0) {
+            Write-Host "No earlier versions found to supersede."
+        }
+        else {
+            # Sent in a single call: the module replaces the whole supersedence set each time,
+            # so adding them one by one would leave only the last one in place
+            $supersedence = foreach ($candidate in $candidates) {
+                New-IntuneWin32AppSupersedence -ID $candidate.Id -SupersedenceType $SupersedenceType
+            }
+            Add-IntuneWin32AppSupersedence -ID $appId -Supersedence $supersedence | Out-Null
+
+            $supersededApps = $candidates
+            Write-Host "Superseded $($candidates.Count) earlier version(s) using '$SupersedenceType':" -ForegroundColor Green
+            foreach ($candidate in $candidates) { Write-Host "  $($candidate.DisplayName)" }
+        }
+    }
+    catch {
+        # The app is uploaded and assigned by now, so this must not be fatal
+        Write-Warning "App $appId was uploaded, but configuring supersedence failed: $($PSItem.Exception.Message)"
+        Write-Warning "Set supersedence manually in the Intune portal."
+    }
+}
+elseif ($Supersede -and $WhatIfPreference) {
+    Write-Host "`nWhatIf: would look for earlier versions to supersede using '$SupersedenceType'." -ForegroundColor Yellow
+}
+
+#endregion
+
 #region Cleanup
 
 # Only runs when every step above succeeded - on failure the directory is left for troubleshooting
@@ -1351,4 +1511,5 @@ elseif (Test-Path -Path $tempDir) {
     DetectionType    = $detectionOdataType
     DescriptionFound = $descResult.Found
     AssignedGroupId  = $assignedGroupId
+    SupersededApps   = $supersededApps
 }

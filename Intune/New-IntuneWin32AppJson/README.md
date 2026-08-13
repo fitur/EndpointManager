@@ -141,6 +141,8 @@ passed on the command line ends up in shell history and transcript logs.
 | `-DescriptionsPath` | GitHub URL | Path or URL to the descriptions file |
 | `-IntuneWin32AppVersion` | — | Pins the module version |
 | `-Owner` | env var | Owner recorded on the app in Intune |
+| `-Supersede` | off | Marks earlier versions of the same app as superseded |
+| `-SupersedenceType` | `Update` | `Update` installs over the old version, `Replace` uninstalls it first |
 | `-TenantID` `-ClientID` `-ClientSecret` | env vars | Avoid on the command line |
 | `-WhatIf` | — | Dry run |
 
@@ -160,6 +162,9 @@ passed on the command line ends up in shell history and transcript logs.
 ./New-IntuneWin32AppJson.ps1 -AppPath "./App_1.0_Intune.zip" `
     -AvailableTime (Get-Date "2026-09-01 08:00") `
     -DeadlineTime  (Get-Date "2026-09-08 17:00")
+
+# Supersede earlier versions of the same app
+./New-IntuneWin32AppJson.ps1 -AppPath "./App_1.0_Intune.zip" -Supersede
 
 # Dry run: validates everything and writes the JSON, without touching Intune
 ./New-IntuneWin32AppJson.ps1 -AppPath "./App_1.0_Intune.zip" -WhatIf
@@ -200,6 +205,22 @@ $result.AppId
 | `DetectionType` | `RegistryDetection`, `ProductCodeDetection` or `FileSystemDetection` |
 | `DescriptionFound` | Whether the app matched an entry in the descriptions file |
 | `AssignedGroupId` | Set only once assignment actually succeeded |
+| `SupersededApps` | The earlier versions that were marked superseded |
+
+### Superseding earlier versions
+
+`-Supersede` finds earlier versions already in Intune and marks them as superseded by the
+upload. Matching is deliberately strict, because a false positive would mark an unrelated app
+as superseded: a candidate qualifies only when its name is exactly `<base> <version>` for
+either the resolved display name or the `<Vendor> <Name>` fallback, and its version parses
+and is strictly lower than the one being uploaded.
+
+Uploading `7-Zip 26.02` therefore supersedes `7-Zip 26.01` and `IgorPavlov 7Zip 25.00`,
+while leaving `7-Zip 27.00`, `7-Zip Pro 26.01`, `My 7-Zip 26.01` and a plain `7-Zip` alone.
+Both naming conventions are checked so apps uploaded before a `displayName` override existed
+are still recognised.
+
+`Update` installs over the earlier version; `Replace` uninstalls it first.
 
 ## App names and descriptions
 
@@ -259,6 +280,9 @@ read it before running it against a tenant you care about, and use `-WhatIf` fir
 - **Patch Tuesday is calculated in the server's time zone** but interpreted in the device's,
   which can differ by a day for runs late in the evening under UTC.
 - **One detection rule per app.** Multi-rule detection is not supported.
+- **Supersedence relies on the naming convention.** Apps named outside `<base> <version>`
+  are not found, and a version that does not parse as a version number is skipped rather
+  than guessed at.
 
 ## License
 
