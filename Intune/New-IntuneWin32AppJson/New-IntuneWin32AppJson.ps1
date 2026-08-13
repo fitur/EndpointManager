@@ -235,7 +235,7 @@ param (
 
     [Parameter()]
     [string]$DescriptionsPath = ($env:INTUNE_DESCRIPTIONS_PATH ??
-        "https://raw.githubusercontent.com/fitur/EndpointManager/refs/heads/master/Intune/data/IntuneAppDescriptions.json"),
+        "https://raw.githubusercontent.com/fitur/EndpointManager/refs/heads/master/Intune/New-IntuneWin32AppJson/IntuneAppDescriptions.json"),
 
     # ValidateSet values mirror New-IntuneWin32AppRequirementRule in the IntuneWin32App module
     [Parameter()]
