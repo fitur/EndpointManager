@@ -89,6 +89,15 @@
     Owner recorded on the app in Intune. Falls back to $env:INTUNE_APP_OWNER, and is left
     empty when neither is set.
 
+.PARAMETER CustomerConfigPath
+    Path to a local JSON file holding credentials for several customers. When supplied, the
+    customer's tenant ID, client ID, secret and optionally assignment group, owner and
+    descriptions path are used instead of the environment variables. Explicitly passed
+    parameters still win over the file.
+
+.PARAMETER CustomerName
+    Selects a customer from the file without prompting. Required for unattended runs.
+
 .PARAMETER Supersede
     Finds earlier versions of the same app already in Intune and marks them as superseded
     by this upload. An app qualifies only when its name is exactly "<base> <version>" for
@@ -135,6 +144,15 @@
     .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip"
 
 .EXAMPLE
+    # Pick a customer from the local credential file, prompting for which one
+    .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -CustomerConfigPath ~/.config/endpointmanager/customers.json
+
+.EXAMPLE
+    # Same, unattended
+    .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" `
+        -CustomerConfigPath ~/.config/endpointmanager/customers.json -CustomerName "Contoso"
+
+.EXAMPLE
     # Publish and supersede earlier versions of the same app
     .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -Supersede
 
@@ -154,9 +172,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        2.4.0
+    Version:        2.5.0
     Creation Date:  2026-05-07
-    Last Updated:   2026-08-13
+    Last Updated:   2026-08-19
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -165,6 +183,14 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        2.5.0 - 2026-08-19
+            Added -CustomerConfigPath and -CustomerName for working across several
+            customer tenants from one local credential file. The logic is embedded in
+            the script rather than a module, so it stays a single file. Selection happens
+            before the credential parameters are consumed, values not defined for a
+            customer are cleared rather than inherited from the environment, and
+            explicitly passed parameters still take precedence over the file.
 
         2.4.0 - 2026-08-13
             Added optional supersedence via -Supersede and -SupersedenceType. Earlier
@@ -310,6 +336,15 @@ param (
     [Parameter()]
     [string]$Owner = $env:INTUNE_APP_OWNER,
 
+    # Local JSON file holding per-customer credentials. When supplied, the customer is
+    # selected (prompted for unless -CustomerName is given) and its values populate the
+    # INTUNE_* environment variables before anything else runs.
+    [Parameter()]
+    [string]$CustomerConfigPath,
+
+    [Parameter()]
+    [string]$CustomerName,
+
     # Marks earlier versions of the same app in Intune as superseded by this upload
     [Parameter()]
     [switch]$Supersede,
@@ -325,6 +360,146 @@ $ErrorActionPreference = "Stop"
 
 # Resolve to absolute path so relative input works from any working directory
 $AppPath = (Resolve-Path -Path $AppPath).Path
+
+#region Customer selection
+
+# Resolves credentials from a local multi-customer JSON file. Self-contained on purpose:
+# the script stays a single file that can be copied to a machine on its own.
+#
+# The credential parameters default to the INTUNE_* environment variables, which are
+# evaluated when the script is invoked, so the values have to be assigned here rather than
+# by setting the environment.
+if ($CustomerConfigPath) {
+
+    if (-not (Test-Path -Path $CustomerConfigPath -PathType Leaf)) {
+        throw "Customer config '$CustomerConfigPath' does not exist or is not a file."
+    }
+    $customerConfigResolved = (Resolve-Path -Path $CustomerConfigPath).Path
+
+    # Warn when the file is readable by more than its owner. UnixMode is not populated on Windows.
+    if (-not $IsWindows) {
+        $configItem = Get-Item -Path $customerConfigResolved
+        if ($configItem.PSObject.Properties.Name -contains "UnixMode" -and
+            $configItem.UnixMode.Substring(4) -match '[rwx]') {
+            Write-Warning "'$customerConfigResolved' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$customerConfigResolved'"
+        }
+    }
+
+    try {
+        $customerConfig = Get-Content -Path $customerConfigResolved -Raw -Encoding UTF8 |
+            ConvertFrom-Json -AsHashtable -ErrorAction Stop
+    }
+    catch {
+        throw "Could not parse '$customerConfigResolved' as JSON: $($PSItem.Exception.Message)"
+    }
+
+    if (-not $customerConfig.ContainsKey("customers")) {
+        throw "'$customerConfigResolved' has no 'customers' array."
+    }
+
+    $customers = @($customerConfig["customers"] | Where-Object { $_ -and $_.ContainsKey("name") -and $_["name"] })
+    if ($customers.Count -eq 0) {
+        throw "'$customerConfigResolved' contains no usable customer entries."
+    }
+
+    $duplicateNames = @($customers | Group-Object { $_["name"] } | Where-Object { $_.Count -gt 1 })
+    if ($duplicateNames.Count -gt 0) {
+        throw "Duplicate customer names in '$customerConfigResolved': $(($duplicateNames.Name) -join ', ')"
+    }
+
+    # Select the customer: by name when given, otherwise ask
+    if ($CustomerName) {
+        $customer = $customers | Where-Object { $_["name"] -eq $CustomerName } | Select-Object -First 1
+        if (-not $customer) {
+            throw "Customer '$CustomerName' not found. Available: $((($customers | ForEach-Object { $_["name"] }) -join ', '))"
+        }
+    }
+    else {
+        $customerNames = $customers | ForEach-Object { $_["name"] }
+        $customer      = $null
+
+        # Native picker on macOS, console menu everywhere else and on cancel/failure
+        if ($IsMacOS) {
+            $quotedNames  = ($customerNames | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ", "
+            $chosenName   = & osascript -e ("choose from list {$quotedNames} with prompt ""Select customer tenant"" with title ""EndpointManager""") 2>$null
+            if ($chosenName -eq "false") { throw "Customer selection cancelled." }
+            if ($LASTEXITCODE -eq 0 -and $chosenName) {
+                $customer = $customers | Where-Object { $_["name"] -eq $chosenName.Trim() } | Select-Object -First 1
+            }
+        }
+
+        if (-not $customer) {
+            Write-Host "`nAvailable customers:" -ForegroundColor Cyan
+            for ($i = 0; $i -lt $customers.Count; $i++) {
+                Write-Host ("  [{0}] {1}" -f ($i + 1), $customers[$i]["name"])
+            }
+            while (-not $customer) {
+                $answer = Read-Host "`nSelect customer (1-$($customers.Count), or Q to quit)"
+                if ($answer -match '^[Qq]') { throw "Customer selection cancelled." }
+                $index = 0
+                if ([int]::TryParse($answer, [ref]$index) -and $index -ge 1 -and $index -le $customers.Count) {
+                    $customer = $customers[$index - 1]
+                }
+                else {
+                    Write-Warning "Enter a number between 1 and $($customers.Count), or Q to quit."
+                }
+            }
+        }
+    }
+
+    foreach ($requiredKey in "tenantId", "clientId") {
+        if (-not ($customer.ContainsKey($requiredKey) -and $customer[$requiredKey])) {
+            throw "Customer '$($customer["name"])' is missing '$requiredKey'."
+        }
+    }
+
+    # Secret comes either inline or from a SecretManagement vault
+    $usesVault = ($customer.ContainsKey("secretVault") -and $customer["secretVault"]) -or
+                 ($customer.ContainsKey("secretName")  -and $customer["secretName"])
+
+    if ($usesVault) {
+        if (-not (($customer.ContainsKey("secretVault") -and $customer["secretVault"]) -and
+                  ($customer.ContainsKey("secretName")  -and $customer["secretName"]))) {
+            throw "Customer '$($customer["name"])' must define both secretVault and secretName, or neither."
+        }
+        if (-not (Get-Module -ListAvailable -Name Microsoft.PowerShell.SecretManagement)) {
+            throw "Customer '$($customer["name"])' uses a secret vault, but Microsoft.PowerShell.SecretManagement is not installed."
+        }
+        Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
+        $ClientSecret = Get-Secret -Vault $customer["secretVault"] -Name $customer["secretName"] -AsPlainText -ErrorAction Stop
+        if (-not $ClientSecret) {
+            throw "Secret '$($customer["secretName"])' in vault '$($customer["secretVault"])' is empty."
+        }
+    }
+    elseif ($customer.ContainsKey("clientSecret") -and $customer["clientSecret"]) {
+        $ClientSecret = [string]$customer["clientSecret"]
+    }
+    else {
+        throw "Customer '$($customer["name"])' has no clientSecret and no secretVault/secretName."
+    }
+
+    $TenantID = [string]$customer["tenantId"]
+    $ClientID = [string]$customer["clientId"]
+
+    # The file is authoritative for the optional values too: a value the customer does not
+    # define is cleared rather than left at whatever the environment held, so a group ID
+    # from a previously selected customer cannot follow into this run.
+    if (-not $PSBoundParameters.ContainsKey("AssignmentGroupId")) {
+        $AssignmentGroupId = $customer.ContainsKey("assignmentGroupId") ? [string]$customer["assignmentGroupId"] : $null
+    }
+    if (-not $PSBoundParameters.ContainsKey("Owner")) {
+        $Owner = $customer.ContainsKey("appOwner") ? [string]$customer["appOwner"] : $null
+    }
+    # DescriptionsPath has a working default, so only replace it when the customer sets one
+    if ($customer.ContainsKey("descriptionsPath") -and $customer["descriptionsPath"] -and
+        -not $PSBoundParameters.ContainsKey("DescriptionsPath")) {
+        $DescriptionsPath = [string]$customer["descriptionsPath"]
+    }
+
+    Write-Host "Customer: $($customer["name"])  (tenant $TenantID)" -ForegroundColor Green
+}
+
+#endregion
 
 # These mirror the lookup tables inside New-IntuneWin32AppRequirementRule so the generated
 # JSON artifact records the same values that are actually sent to Intune.

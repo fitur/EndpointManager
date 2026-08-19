@@ -1,0 +1,90 @@
+{
+    "7-Zip": {
+        "displayName": "7-Zip",
+        "description": "## 7-Zip\n\n7-Zip is a free program for compressing and extracting files. It supports a large number of archive formats and is known for its high compression ratio, especially for the 7z format.\n\n### Use cases\n\n- Compressing files and folders into archives\n- Extracting compressed archives in formats such as ZIP, 7z, RAR, and more\n- Integration into File Explorer via right-click menu\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Acrobat Reader 2024": {
+        "displayName": "Adobe Acrobat Reader 2024",
+        "description": "## Adobe Acrobat Reader 2024\n\nAdobe Acrobat Reader 2024 is a program for viewing, printing, and annotating PDF documents. It supports modern PDF standards and offers improved performance compared to previous versions.\n\n### Use cases\n\n- View and read PDF files\n- Print and annotate documents\n- Fill in and sign PDF forms\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Acrobat Reader DC": {
+        "displayName": "Adobe Acrobat Reader DC",
+        "description": "## Adobe Acrobat Reader DC\n\nAdobe Acrobat Reader DC is the standard program for viewing, printing, and annotating PDF files. The DC version is connected to Adobe Document Cloud and receives continuous updates.\n\n### Use cases\n\n- View and read PDF files\n- Print and annotate documents\n- Fill in and sign PDF forms\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Audacity": {
+        "displayName": "Audacity",
+        "description": "## Audacity\n\nAudacity is a free program for recording and editing audio with multi-track support. It is used to record, edit, and export audio files in a variety of formats.\n\n### Use cases\n\n- Recording audio from microphone or other input interface\n- Editing and mixing audio tracks\n- Converting between audio formats\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "BankID": {
+        "displayName": "BankID",
+        "description": "## BankID\n\nBankID is an electronic identity document used for digital identification and signing. The application is used for login and signing with government agencies, banks, and other services.\n\n### Use cases\n\n- Digital identification with public and private services\n- Electronic signing of documents and agreements\n\n### Prerequisites\n\nA valid BankID issued by the user's bank is required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Chrome": {
+        "displayName": "Google Chrome",
+        "description": "## Google Chrome\n\nGoogle Chrome is a web browser developed by Google. It is used for browsing the internet and is known for its speed, stability, and compatibility with modern web standards.\n\n### Use cases\n\n- Internet browsing and web applications\n- Access to cloud-based services and tools\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "ClickShare": {
+        "displayName": "Barco ClickShare",
+        "description": "## Barco ClickShare\n\nBarco ClickShare is a program for wireless presentation sharing in meeting rooms. It enables easy screen sharing from a laptop to the meeting room display without cables.\n\n### Use cases\n\n- Wireless screen sharing in meeting rooms equipped with ClickShare\n- Presentation and collaboration during meetings\n\n### Prerequisites\n\nThe meeting room must be equipped with a Barco ClickShare device.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "FileZilla": {
+        "displayName": "FileZilla",
+        "description": "## FileZilla\n\nFileZilla is a free FTP client for transferring files between a local computer and a remote server. It supports FTP, FTPS, and SFTP.\n\n### Use cases\n\n- Uploading and downloading files via FTP, FTPS, or SFTP\n- Managing files on remote servers\n\n### Prerequisites\n\nAccess to an FTP, FTPS, or SFTP server is required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Firefox": {
+        "displayName": "Mozilla Firefox",
+        "description": "## Mozilla Firefox\n\nMozilla Firefox is a web browser developed by the Mozilla Foundation. It is known for its openness, privacy focus, and support for web standards.\n\n### Use cases\n\n- Internet browsing and web applications\n- Access to cloud-based services and tools\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "GIMP": {
+        "displayName": "GIMP",
+        "description": "## GIMP\n\nGIMP (GNU Image Manipulation Program) is a free image editing program. It offers advanced tools for retouching, compositing, and graphic design.\n\n### Use cases\n\n- Retouching and editing photographs\n- Creating graphics and illustrations\n- Converting and processing images\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Inkscape": {
+        "displayName": "Inkscape",
+        "description": "## Inkscape\n\nInkscape is a free vector graphics program. It is used to create and edit scalable graphics in SVG format and is well suited for logos, illustrations, and technical drawings.\n\n### Use cases\n\n- Creating and editing vector graphics\n- Designing logos, icons, and illustrations\n- Exporting to SVG, PDF, and other formats\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "IrfanView": {
+        "displayName": "IrfanView",
+        "description": "## IrfanView\n\nIrfanView is a fast and lightweight program for viewing and converting images. It supports a large number of image formats and offers basic editing functionality.\n\n### Use cases\n\n- Fast viewing of images in a wide range of formats\n- Batch conversion of image files\n- Basic image editing and cropping\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "KeePass": {
+        "displayName": "KeePass",
+        "description": "## KeePass\n\nKeePass is a free password management program. It stores passwords encrypted in a local database and helps users create and manage strong, unique passwords.\n\n### Use cases\n\n- Storing and managing passwords\n- Generating strong passwords\n- Accessing the password database with a master password\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Lön": {
+        "displayName": "Visma Lön",
+        "description": "## Visma Lön\n\nVisma Lön is a payroll administration application. It is used to calculate salaries, handle taxes and employer contributions, and produce filings for the Swedish Tax Agency.\n\n### Use cases\n\n- Salary calculation and payroll runs\n- Handling of taxes and employer contributions\n- Reporting of employer declarations at individual level (AGI)\n\n### Prerequisites\n\nA valid Visma licence is required. Microsoft OLE DB Driver 19 for SQL Server (x64) is included in the package.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Notepad++": {
+        "displayName": "Notepad++",
+        "description": "## Notepad++\n\nNotepad++ is a free text and code editor with syntax highlighting support for a wide range of programming languages. It is used for editing text files, configuration files, and code.\n\n### Use cases\n\n- Editing text files and configuration files\n- Code editing with syntax highlighting\n- Comparing files with the built-in diff function\n\n### Prerequisites\n\nNo specific prerequisites required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Power BI": {
+        "displayName": "Microsoft Power BI",
+        "description": "## Microsoft Power BI\n\nMicrosoft Power BI is a business intelligence and data visualization tool. It is used to connect to data sources, analyze data, and create interactive reports and dashboards.\n\n### Use cases\n\n- Connecting to and analyzing data sources\n- Creating interactive reports and dashboards\n- Sharing insights within the organization\n\n### Prerequisites\n\nA Microsoft 365 license with Power BI Pro or Power BI Premium is required to publish and share reports.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "QuickSupport": {
+        "displayName": "BeyondTrust QuickSupport",
+        "description": "## BeyondTrust QuickSupport\n\nBeyondTrust QuickSupport is a remote support program used by IT support to remotely connect to and assist users' computers. The application is launched by the end user at the request of IT support.\n\n### Use cases\n\n- Remote support and troubleshooting of computer issues\n- Guidance and assistance from IT support\n\n### Prerequisites\n\nThe application is started at the request of IT support. No separate license is required by the end user.\n\n### Support\n\nThis application is used by IT support. Contact IT support for assistance."
+    },
+    "RStudio": {
+        "displayName": "Posit RStudio",
+        "description": "## Posit RStudio\n\nPosit RStudio is an integrated development environment (IDE) for the R programming language. It is used for statistical analysis, data processing, and creating visualizations and reports.\n\n### Use cases\n\n- Statistical analysis and data processing with R\n- Creating charts, visualizations, and reports\n- Managing R packages and project environments\n\n### Prerequisites\n\nR must be installed on the computer.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Secure Client": {
+        "displayName": "Cisco Secure Client",
+        "description": "## Cisco Secure Client\n\nCisco Secure Client (formerly AnyConnect) is a VPN application used for secure remote connection to the organization's network. It encrypts network traffic and provides access to internal resources regardless of location.\n\n### Use cases\n\n- Secure VPN connection to the organization's network\n- Access to internal systems and resources remotely\n\n### Prerequisites\n\nVPN profile and server address are provided by the IT department.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Secure Client SBL": {
+        "displayName": "Cisco Secure Client SBL",
+        "description": "## Cisco Secure Client SBL\n\nCisco Secure Client SBL (Start Before Login) is a variant of Cisco Secure Client that establishes a VPN connection before the user logs in to Windows. This enables domain login and group policy application for remotely connected computers.\n\n### Use cases\n\n- VPN connection established automatically at startup, before login\n- Domain login and group policy application for remote users\n\n### Prerequisites\n\nVPN profile and server address are provided by the IT department. Requires SBL configuration in the VPN profile.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Teams": {
+        "displayName": "Microsoft Teams",
+        "description": "## Microsoft Teams\n\nMicrosoft Teams is a communication and collaboration platform included in Microsoft 365. It is used for chat, video meetings, file sharing, and collaboration in teams and channels.\n\n### Use cases\n\n- Chat and direct messages with colleagues\n- Video and audio meetings\n- File sharing and collaboration in teams and channels\n- Integration with other Microsoft 365 services\n\n### Prerequisites\n\nA Microsoft 365 license with Teams is required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
+    "Workspace LTSR": {
+        "displayName": "Citrix Workspace LTSR",
+        "description": "## Citrix Workspace LTSR\n\nCitrix Workspace LTSR (Long Term Service Release) is a client for accessing virtual applications and desktops published via Citrix infrastructure. The LTSR version focuses on stability and long-term support.\n\n### Use cases\n\n- Access to virtual Windows applications and remote desktops\n- Connection to Citrix-published resources and environments\n\n### Prerequisites\n\nAccess to a Citrix environment and a valid user license are required. Server address is provided by the IT department.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    }
+}
