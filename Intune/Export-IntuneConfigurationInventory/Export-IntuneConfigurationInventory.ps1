@@ -1,4 +1,3 @@
-#Requires -Version 7.4
 <#
 .SYNOPSIS
     Exports an inventory of Intune policies/configurations to a per-run folder containing a
@@ -84,6 +83,67 @@
     Secrets: read from environment variables by default. Prefer SecretManagement or a
     certificate credential over a client secret for anything long-lived.
 
+    Version:        1.5.0
+    Creation Date:  2026-07-30
+    Last Updated:   2026-08-05
+    Author:         Peter Olausson
+    Contact:        fitur@duck.com
+
+    CHANGELOG
+
+        1.5.0 - 2026-08-05
+            Hardening after an external code review, plus optional orchestration.
+            Credentials are now validated in an explicit preflight: [ValidateNotNullOrEmpty()]
+            never runs on default values, so an unset INTUNE_* variable used to surface as a
+            request against "login.microsoftonline.com//oauth2/...". ClientId is checked
+            against a GUID pattern and TenantId against GUID or domain. Passing -ClientSecret
+            on the command line now warns about history and transcripts. Assignment filters
+            are no longer fetched twice - the area is first in the definition list and doubles
+            as the filter-name cache. A literal "value": null from Graph no longer produces a
+            phantom row. Fixed a latent collision where two runs in the same minute got
+            separate folders but an identical file stamp, silently overwriting the first run's
+            zip; seconds are now appended to both stamps. Added -CompareWithPrevious, which
+            runs the comparison script after a successful export without merging the two.
+
+        1.4.0 - 2026-07-31
+            Added -CompressOutput, producing a zip of the run folder for handover. The folder
+            remains the source of truth: diffing two runs from archives would mean unpacking
+            both first. Uses [System.IO.Compression.ZipFile] rather than Compress-Archive,
+            which is markedly faster on many small files.
+
+        1.3.0 - 2026-07-31
+            Restructured the output into <Tenant>/<yyyy-MM-dd HH-mm>/ so a run is easy to
+            identify while browsing. File names are now reduced to ASCII: macOS stores names
+            decomposed (NFD) while Linux compares byte-exact, so a Swedish character in a path
+            made every entry in the CSV unresolvable as soon as the folder was copied to
+            another platform. Tenant display name is read from Graph when Organization.Read.All
+            is granted, otherwise the tenant GUID is used.
+
+        1.2.0 - 2026-07-30
+            Configuration moved out of the CSV into one JSON file per policy, with a manifest
+            recording every area's status and object count. Inline JSON had produced single
+            cells of 284 000 characters - past Excel's 32 767 limit and past the default field
+            limit of most CSV readers. The manifest is what lets a diffing consumer tell "this
+            area was empty" from "we could not read this area", the difference between no
+            change and an apparent mass deletion.
+
+        1.1.0 - 2026-07-30
+            Correctness work driven by real runs rather than code reading. Object keys are now
+            canonicalised with ordinal sorting before serialisation: Graph guarantees no
+            property order, and 172 of 175 records had unsorted keys, so every run looked like
+            a change. JSON depth raised from 10 to 20 after measuring Settings Catalog trees at
+            depth 12 - 24 records were being truncated silently. 401 and 403 are now separate
+            exception types: 401 is global and aborts, 403 is scoped to one area and skips it,
+            where previously a single missing scope discarded an otherwise complete export.
+            An empty Graph "value" array no longer unrolls to $null and inserts the raw
+            response envelope as a phantom row.
+
+        1.0.0 - 2026-07-30
+            First working version: 18 policy areas read over Graph REST with client
+            credentials, no SDK. Pagination via @odata.nextLink, 429 handling that respects
+            Retry-After with exponential backoff, group and assignment-filter name resolution,
+            and a CSV with fixed column order and deterministic row order.
+
 .EXAMPLE
     $env:INTUNE_TENANT_ID     = '00000000-0000-0000-0000-000000000000'
     $env:INTUNE_CLIENT_ID     = '00000000-0000-0000-0000-000000000000'
@@ -104,6 +164,8 @@
     # Permission check only - decodes the token, reports tenant, roles and affected areas.
     .\Export-IntuneConfigurationInventory.ps1 -TestPermissionOnly -Verbose
 #>
+
+#Requires -Version 7.4
 
 [CmdletBinding()]
 param(

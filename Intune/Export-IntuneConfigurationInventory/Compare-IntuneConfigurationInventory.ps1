@@ -1,4 +1,3 @@
-#Requires -Version 7.4
 <#
 .SYNOPSIS
     Compares two Export-IntuneConfigurationInventory runs and emits a change set grouped
@@ -69,11 +68,61 @@
     .\Compare-IntuneConfigurationInventory.ps1 -TenantDirectory '.\Data\Wistrand-Advokatbyra'
 
 .EXAMPLE
-    # Every tenant under a root, one change set each
-    Get-ChildItem .\Data -Directory | ForEach-Object {
-        .\Compare-IntuneConfigurationInventory.ps1 -TenantDirectory $_.FullName
-    }
+    # Every tenant under a root - pass the root itself, tenant folders are detected
+    .\Compare-IntuneConfigurationInventory.ps1 -TenantDirectory '.\Data'
+
+.EXAMPLE
+    # A specific pair of runs rather than the latest two
+    .\Compare-IntuneConfigurationInventory.ps1 -TenantDirectory '.\Data\Wistrand-Advokatbyra' `
+        -BaselineRun '2026-07-31 11-25' -CurrentRun '2026-08-05 12-16'
+
+.NOTES
+    Version:        1.2.0
+    Creation Date:  2026-08-03
+    Last Updated:   2026-08-05
+    Author:         Peter Olausson
+    Contact:        fitur@duck.com
+
+    Reads only from disk - no Graph calls, no credentials. Kept separate from the export
+    script deliberately: the comparison is worth re-running after a taxonomy change, or
+    against an older pair of runs, without paying for another full Graph export.
+
+    CHANGELOG
+
+        1.2.0 - 2026-08-05
+            Accepts either a tenant folder or the root above it, detecting tenant folders by
+            looking for run folders one level down. Endpoint Security intents expose no
+            platform property at all, so their platform is now derived from the definitionId
+            prefix of their settings. Added the mobile application management platform
+            aliases, which had left app-scoped assignment filters under Cross-platform.
+
+        1.1.0 - 2026-08-05
+            Pages are now split per platform as well as per category. Platform is resolved in
+            four steps - the Platform column, then PolicyType, then the area's implicit
+            platform, then a peek into the sidecar file - because Graph exposes no platform at
+            all for remediations, platform scripts, Autopilot profiles or update rings.
+            Windows 365 is deliberately not a separate platform: Graph classifies Cloud PC
+            policies as Windows, and separating them would depend on a naming convention that
+            silently misfiles anything not following it.
+
+            Fixed during the same work: functions returning arrays now use the comma operator
+            on every return path, since PowerShell unrolls a returned array and .Count on the
+            resulting $null throws under StrictMode. The call sites were then wrapping those
+            already-protected returns in @() a second time, nesting the array inside a
+            one-element array so every -in comparison silently failed and produced zero pages.
+
+        1.0.0 - 2026-08-03
+            First version. Matches records on RecordKey and detects change through three
+            independent signals: ConfigurationHash for the policy body, the assignment columns
+            separately - assignments are not part of the hash, so comparing it alone misses
+            re-targeting entirely - and the metadata columns. Produces a field-level JSON diff
+            for changed policies, matching array elements by identity where one exists so a
+            reordered array does not read as "everything changed". Areas skipped in either run
+            are reported as uncertain rather than removed, since absence is not evidence of
+            deletion when the area could not be read.
 #>
+
+#Requires -Version 7.4
 
 [CmdletBinding()]
 param(

@@ -1,0 +1,279 @@
+# Intune Configuration Inventory
+
+Reads every policy and configuration in an Intune tenant over Graph REST, writes it to disk
+in a form that is stable enough to diff between runs, and produces a change set describing
+exactly what was added, changed or removed since last time.
+
+Written because "what changed in this tenant since March?" is a question nobody could answer
+without clicking through the portal from memory. The output is deliberately shaped for a
+documentation agent to narrate, but it is perfectly readable on its own.
+
+Two scripts, kept separate on purpose:
+
+| Script | What it does | Needs Graph |
+|---|---|---|
+| `Export-IntuneConfigurationInventory.ps1` | Reads the tenant, writes a timestamped run folder | Yes |
+| `Compare-IntuneConfigurationInventory.ps1` | Diffs two runs, writes a change set | No |
+
+The comparison touches nothing but the filesystem, so it can be re-run after a taxonomy
+change, or against an older pair of runs, without paying for another full export. An export
+of ~170 policies takes a few minutes; the comparison takes seconds.
+
+## The hard requirement
+
+**Two runs against an unchanged tenant must produce byte-identical output.** Without that,
+real changes drown in noise and the whole thing is worthless. Most of the design follows
+from this one constraint:
+
+- Object keys are sorted with **ordinal** comparison before serialisation. Graph guarantees
+  no property order, and culture-aware sorting would order `å ä ö` differently on a Swedish
+  workstation than on a build agent elsewhere.
+- Rows are sorted deterministically, and column order is fixed.
+- `ConfigurationHash` is a SHA256 over exactly the bytes written to the sidecar file, so it
+  can be re-verified with `Get-FileHash`.
+
+Verified over four consecutive runs against a production tenant: zero hash differences
+across all 172 records.
+
+## What it covers
+
+18 policy areas, all read from `beta` except Conditional Access and group lookups:
+
+Settings Catalog · Device Configuration (Templates) · Group Policy Configuration (ADMX) ·
+Endpoint Security (Intents) · Compliance Policies · Remediation Scripts · Platform Scripts
+(Windows) · Shell Scripts (macOS) · Autopilot Deployment Profiles · Enrollment
+Configurations · Windows Feature/Quality/Driver Update Profiles · App Protection (iOS,
+Android) · App Configuration (Managed Apps, Managed Devices) · Assignment Filters ·
+Conditional Access (opt-in)
+
+Adding an area is one line in `$policyDefinitions` — the pipeline is data-driven and needs
+no new code per type.
+
+Not covered: custom compliance scripts, Intune RBAC roles, terms and conditions,
+notification templates, imported ADMX files, reusable policy settings, the applications
+themselves, and Endpoint Analytics. All are one line each if you want them.
+
+## Requirements
+
+**PowerShell 7.4 or later.** Ternary operators, null-coalescing, and
+`[System.Security.Cryptography.SHA256]::HashData`. Developed on macOS, run against
+production tenants; not yet run on Windows or in Azure Functions.
+
+No modules. Graph is called directly with `Invoke-RestMethod` — no SDK to install, no
+version to pin, and no typed deserialisation layer between the response and the hash.
+
+**An Entra ID app registration** with Application permissions and admin consent:
+
+| Permission | Needed for |
+|---|---|
+| `DeviceManagementConfiguration.Read.All` | Settings Catalog, templates, ADMX, compliance, intents, update profiles |
+| `DeviceManagementScripts.Read.All` | Remediations, platform scripts, shell scripts |
+| `DeviceManagementApps.Read.All` | App protection and app configuration |
+| `DeviceManagementServiceConfig.Read.All` | Autopilot, enrollment, assignment filters |
+| `Group.Read.All` | Resolving group IDs to names |
+| `Organization.Read.All` | Optional — tenant name in the folder name |
+| `Policy.Read.All` | Only with `-IncludeConditionalAccess` |
+
+Application, not Delegated — client credentials ignores delegated permissions entirely.
+A `ReadWrite` variant satisfies its `Read` counterpart; Graph emits only one of the two.
+
+`DeviceManagementScripts.Read.All` is enforced separately from
+`DeviceManagementConfiguration.Read.All`. Without it the three script areas return 403 while
+everything else works.
+
+Run `-TestPermissionOnly` first. It decodes the token, prints the tenant and roles, and
+names every area the token cannot reach — without reading a single policy.
+
+## Environment variables
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `INTUNE_TENANT_ID` | Yes | Tenant ID or verified domain |
+| `INTUNE_CLIENT_ID` | Yes | App registration client ID |
+| `INTUNE_CLIENT_SECRET` | Yes | App registration secret |
+
+```powershell
+$env:INTUNE_TENANT_ID     = "..."
+$env:INTUNE_CLIENT_ID     = "..."
+$env:INTUNE_CLIENT_SECRET = "..."
+```
+
+All three have matching parameters, but prefer the variables. Passing `-ClientSecret` on the
+command line puts it in PSReadLine history and any active transcript, and the script warns
+when you do.
+
+## Usage
+
+```powershell
+# Export, diff against the previous run, and produce a handover zip
+./Export-IntuneConfigurationInventory.ps1 -CompareWithPrevious -CompressOutput -Verbose
+
+# Permission check only
+./Export-IntuneConfigurationInventory.ps1 -TestPermissionOnly -Verbose
+
+# Fast run without per-policy settings
+./Export-IntuneConfigurationInventory.ps1 -SkipDetailedSettings
+
+# Diff every tenant under a root - tenant folders are detected automatically
+./Compare-IntuneConfigurationInventory.ps1 -TenantDirectory ./Data
+
+# Diff a specific pair of runs
+./Compare-IntuneConfigurationInventory.ps1 -TenantDirectory ./Data/Contoso `
+    -BaselineRun '2026-07-31 11-25' -CurrentRun '2026-08-05 12-16'
+```
+
+## Output
+
+```
+Data/
+  Contoso-AB/
+    2026-08-05 12-16/
+      IntuneConfigurationInventory_Contoso-AB_2026-08-05_1216.csv
+      _manifest_2026-08-05_1216.json
+      _changeset_vs_2026-07-31-11-25.json
+      Settings-Catalog/
+        WIN-C-ES-SB-Windows-11_<id>_2026-08-05_1216.json
+      Compliance-Policy/
+        ...
+    Contoso-AB_2026-08-05_1216.zip          ← only with -CompressOutput
+```
+
+Folder and file names use **local** time so a run is easy to identify while browsing; the
+manifest records the same instant in UTC, in local time, and with the offset, so nothing is
+ambiguous. A scheduled run on a UTC host will name its folder in UTC.
+
+### The CSV
+
+One row per policy, fixed column order:
+
+`RunTimestamp` · `RecordKey` · `PolicyArea` · `PolicyType` · `DisplayName` · `Id` ·
+`Description` · `Platform` · `TemplateName` · `Version` · `CreatedDateTime` ·
+`LastModifiedDateTime` · `AssignedGroups` · `ExcludedGroups` · `AssignmentFilters` ·
+`AssignmentCount` · `ConfigurationHash` · `ConfigurationFile` · `GraphResourceUri`
+
+The configuration itself lives in a sidecar JSON file, not in the CSV. Inline, single cells
+reached 284 000 characters — past Excel's 32 767 limit per cell and past the default field
+limit of most CSV readers, including Python's. The sidecar files are written indented so a
+per-policy diff is readable line by line.
+
+### The manifest
+
+Records every area with `status` (`exported` or `skipped`), `objectCount` and the role it
+required. This is what lets a consumer tell **"this area was empty"** from **"we could not
+read this area"** — without it, a missing permission looks identical to someone having
+deleted every policy in a category.
+
+`exportComplete: false` means at least one area was skipped and the run is not a complete
+picture.
+
+### The change set
+
+Produced by the comparison script, grouped into one entry per documentation page — by
+category and platform. Change is detected through three independent signals:
+
+- **`ConfigurationHash`** for the policy body.
+- **The assignment columns separately.** Assignments are *not* part of the hash, so a policy
+  that only gets re-targeted has an unchanged hash. Comparing the hash alone would miss
+  re-targeting entirely, which in an Intune tenant is often the change that matters most.
+- **The metadata columns** — name, description, version, template.
+
+Changed policies get a field-level JSON diff, matching array elements by identity where one
+exists so a reordered array does not read as "everything changed".
+
+Policies missing from an area that was **skipped** in either run are reported as
+`uncertain`, never as removed. Absence is not evidence of deletion when the area could not
+be read.
+
+### Platform grouping
+
+Graph exposes no platform at all for remediations, platform scripts, Autopilot profiles,
+update rings or assignment filters. The comparison script resolves it in four steps, first
+hit wins: the `Platform` column, then `PolicyType` (which carries the Graph odata type),
+then the area's implicit platform, then a peek inside the sidecar file.
+
+Endpoint Security intents carry no platform property either, so theirs is derived from the
+`definitionId` prefix of their settings. That is a heuristic on Microsoft's naming, not a
+contract — if it stops holding, intents land under Cross-platform, which is the right kind
+of failure because it is visible.
+
+Windows 365 is deliberately **not** a separate platform. Graph classifies Cloud PC policies
+as Windows, and splitting them out would depend on a naming convention that silently
+misfiles anything not following it.
+
+## Error semantics
+
+Worth knowing before you troubleshoot, because Intune's own error mapping is misleading:
+
+**403** means a missing scope for that one area. Intune names the scope it wants
+(`Application must have one of the following scopes: ...`). The script skips that area,
+records it in the manifest, and continues.
+
+**401 with a generic Forbidden and no scope named** is not a permission problem at all.
+Graph wraps an Intune-side rejection as `401 UnknownError`. During development this turned
+out to be an expired Intune licence on a developer tenant: Entra ID kept working, `/groups`
+answered fine, and every `deviceManagement` endpoint returned 401 regardless of which
+identity asked — including a delegated Global Admin token. If you see this, check
+`GET /v1.0/subscribedSkus` for a suspended SKU before touching the app registration.
+
+## Data sensitivity
+
+The output contains the tenant's complete security configuration, including script bodies,
+BitLocker settings and security baselines. Nothing in the script protects it — the folder
+and the zip are unencrypted and inherit the permissions of `-OutputDirectory`.
+
+Do not point `-OutputDirectory` at a synchronised folder unless that is a deliberate
+decision, and treat the zip as customer confidential material when handing it over.
+
+## On the code itself
+
+This was written with heavy AI assistance, over about a week rather than a long slow burn.
+That is worth saying plainly rather than leaving it to be discovered.
+
+What it has going for it is that essentially every bug was found by **running it against
+real tenants**, not by reading it. Four production tenants, 116 to 552 policies each. The
+ones worth knowing about:
+
+- An empty Graph `value` array unrolls to `$null` when returned from a PowerShell function,
+  which made empty areas look like single objects and inserted the raw response envelope
+  into the CSV as phantom rows. Three of them, in a run that otherwise looked clean.
+- 172 of 175 records had unsorted JSON keys, so every run produced different hashes. Caught
+  by diffing two consecutive runs before trusting the output, not by inspection.
+- `ConvertTo-Json -Depth 10` silently truncated 24 policies. Measured maximum depth in a real
+  Settings Catalog tree is 12; the default is now 20.
+- A 403 on one area aborted the entire run, discarding 122 already-fetched policies.
+- `[ValidateNotNullOrEmpty()]` does not run on parameter default values, so an unset
+  environment variable produced a request against `login.microsoftonline.com//oauth2/...`
+  instead of a clear error.
+- Two runs in the same minute got distinct folders but an identical file stamp, so the second
+  silently overwrote the first run's zip.
+- `#Requires` placed *above* the comment-based help block makes PowerShell fail to find the
+  help entirely. `Get-Help` had never worked on either script until this was noticed.
+
+An independent AI review at the end found three real issues and several suggestions. Two
+suggestions were rejected with reasoning, and the review missed the zip overwrite above.
+
+Judge it on the behaviour, not the provenance. It is not certified, warrantied or supported.
+It only ever issues `GET` requests, so it cannot change anything in a tenant — but read it
+before running it against one you care about, and start with `-TestPermissionOnly`.
+
+## Known limitations
+
+- **Beta endpoints throughout.** Required for remediations, shell scripts, driver update
+  profiles and intents. Beta can change without notice.
+- **N+1 request patterns** in two places: one call per unique group, and one per policy for
+  Settings Catalog, ADMX and intent settings. `POST /directoryObjects/getByIds` and
+  `POST /$batch` would collapse both, at the cost of POST support and restructuring. Not
+  worth it at the scale tested.
+- **Endpoint Security exists in two models.** Old `intents` and new `configurationPolicies`
+  with a `templateReference`. Both are read, but a policy migrated between them looks
+  removed from one area and added to the other.
+- **`intents` expose no `createdDateTime`.** That column is always empty for the area.
+- **`RecordKey` does not include the tenant ID.** The folder structure separates tenants, but
+  there is no column to disambiguate if several customers' CSVs are loaded together.
+- **No retention.** Roughly 1.6 MB per run, uncompressed. Scheduled use needs a cleanup.
+- **Deleted assignment targets** appear as `<deleted-or-unresolved:guid>`. Deliberately
+  visible rather than hidden.
+
+## License
+
+MIT.
