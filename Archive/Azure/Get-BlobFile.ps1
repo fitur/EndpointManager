@@ -1,7 +1,7 @@
 ﻿## Variables
 $URL = "https://<storage-account>.blob.core.windows.net/branding/Branding/"
-$FilePrefix = "NLTG_TeamsBG_"
-$FileExtension = "jpg"
+$FilePrefix = "<file_prefix>" # Replace with your desired file prefix
+$FileExtension = "<file_extension>" # Replace with your desired file extension
 $DownloadPath = "$env:APPDATA\Microsoft\Teams\Backgrounds\Uploads"
 
 ## Create directory if it doesn't exist
