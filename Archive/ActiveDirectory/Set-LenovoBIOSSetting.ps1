@@ -1,3 +1,14 @@
+<#
+
+.NOTES
+    Version:        1.0.0
+    Creation Date:  2026-08-19
+    Last Updated:   2026-08-19
+    Author:         Peter Olausson
+    Contact:        fitur@duck.com
+
+#>
+
 $SettingName = "SecureBoot"
 $SettingValue = "Enable"
 $SettingPassword = "<bios_password>"

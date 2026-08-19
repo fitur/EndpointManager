@@ -1,4 +1,15 @@
-﻿## Variables
+﻿<#
+
+.NOTES
+    Version:        1.0.0
+    Creation Date:  2026-08-19
+    Last Updated:   2026-08-19
+    Author:         Peter Olausson
+    Contact:        fitur@duck.com
+
+#>
+
+## Variables
 $URL = "https://<storage-account>.blob.core.windows.net/branding/Branding/"
 $FilePrefix = "<file_prefix>" # Replace with your desired file prefix
 $FileExtension = "<file_extension>" # Replace with your desired file extension

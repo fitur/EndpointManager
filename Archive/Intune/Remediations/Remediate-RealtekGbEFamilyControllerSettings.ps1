@@ -14,12 +14,11 @@
     https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
 
 .NOTES
-    Version:        1.0
-    Creation Date:  May 31, 2022
-    Last Updated:   May 31, 2022
+    Version:        1.0.0
+    Creation Date:  2022-05-31
+    Last Updated:   2022-05-31
     Author:         Peter Olausson
     Contact:        fitur@duck.com
-    Web Site:       https://github.com/fitur
 
 #>
 

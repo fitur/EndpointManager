@@ -14,7 +14,6 @@
     Creation Date:  2025-04-29
     Last Updated:   2025-04-29
     Author:         Peter Olausson
-    Organization:   Advania
     Contact:        fitur@duck.com
 
 #>

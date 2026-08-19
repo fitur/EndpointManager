@@ -17,8 +17,8 @@
 
 .NOTES
     Version:        1.0.0
-    Creation Date:  Mars 22, 2024
-    Last Updated:   Mars 22, 2024
+    Creation Date:  2024-03-22
+    Last Updated:   2024-03-22
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 

@@ -1,3 +1,14 @@
+<#
+
+.NOTES
+    Version:        1.0.0
+    Creation Date:  2026-07-31
+    Last Updated:   2026-07-31
+    Author:         Peter Olausson
+    Contact:        fitur@duck.com
+
+#>
+
 Import-Module GroupPolicy
 
 $UnlinkedGPOList = @()
