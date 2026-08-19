@@ -32,8 +32,8 @@ Param (
 
 # Set the registry parameters
 $RegPath = "HKCU:\Software\Test"
-$RegName = "ConnectionString"
-$RegData = "Rb/cVDfW5FSwX9ipWDnxPT1xbAGkfj2Nr5lu5Qqc+NJ72YjQjlx2"
+$RegName = "<key_name>" # Replace with your desired key name
+$RegData = "<value>" # Replace with your desired value
 $RegType = "String"
 
 # Check if the registry key exists

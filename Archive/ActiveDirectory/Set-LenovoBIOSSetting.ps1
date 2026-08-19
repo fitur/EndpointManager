@@ -1,6 +1,6 @@
 $SettingName = "SecureBoot"
 $SettingValue = "Enable"
-$SettingPassword = "syi02nw"
+$SettingPassword = "<bios_password>"
 
 $Lenovo_SetBiosSetting = Get-WmiObject -Class Lenovo_SetBiosSetting -Namespace root/WMI
 $Lenovo_BiosSetting = Get-WmiObject -Class Lenovo_BiosSetting -Namespace root/WMI
