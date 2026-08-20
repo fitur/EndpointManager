@@ -124,6 +124,9 @@ $env:INTUNE_ASSIGNMENT_GROUP_ID = "..."
 The three credential variables have matching parameters, but prefer the variables — a secret
 passed on the command line ends up in shell history and transcript logs.
 
+If you administer more than one tenant, `-CustomerConfigPath` replaces these variables
+entirely. See [Working across several customers](#working-across-several-customers).
+
 ## Parameters
 
 | Parameter | Default | Description |
@@ -143,6 +146,8 @@ passed on the command line ends up in shell history and transcript logs.
 | `-Owner` | env var | Owner recorded on the app in Intune |
 | `-Supersede` | off | Marks earlier versions of the same app as superseded |
 | `-SupersedenceType` | `Update` | `Update` installs over the old version, `Replace` uninstalls it first |
+| `-CustomerConfigPath` | — | Local JSON file with credentials for several customers |
+| `-CustomerName` | — | Selects a customer without prompting |
 | `-TenantID` `-ClientID` `-ClientSecret` | env vars | Avoid on the command line |
 | `-WhatIf` | — | Dry run |
 
@@ -165,6 +170,9 @@ passed on the command line ends up in shell history and transcript logs.
 
 # Supersede earlier versions of the same app
 ./New-IntuneWin32AppJson.ps1 -AppPath "./App_1.0_Intune.zip" -Supersede
+
+# Pick a customer from a local credential file
+./New-IntuneWin32AppJson.ps1 -AppPath "./App_1.0_Intune.zip" -CustomerConfigPath ~/.config/em/customers.json
 
 # Dry run: validates everything and writes the JSON, without touching Intune
 ./New-IntuneWin32AppJson.ps1 -AppPath "./App_1.0_Intune.zip" -WhatIf
@@ -222,9 +230,56 @@ are still recognised.
 
 `Update` installs over the earlier version; `Replace` uninstalls it first.
 
+## Working across several customers
+
+Instead of setting environment variables per tenant, point the script at a local JSON file
+holding credentials for every customer. Without `-CustomerName` it asks which one to use —
+a native picker on macOS, a numbered menu elsewhere.
+
+```powershell
+./New-IntuneWin32AppJson.ps1 -AppPath "./App.zip" -CustomerConfigPath ~/.config/em/customers.json
+./New-IntuneWin32AppJson.ps1 -AppPath "./App.zip" -CustomerConfigPath ~/.config/em/customers.json -CustomerName "Contoso"
+```
+
+`customers.sample.json` in this repo shows the format:
+
+```json
+{
+    "customers": [
+        {
+            "name": "Contoso",
+            "tenantId": "...",
+            "clientId": "...",
+            "clientSecret": "...",
+            "assignmentGroupId": "...",
+            "appOwner": "Contoso IT"
+        }
+    ]
+}
+```
+
+`name`, `tenantId` and `clientId` are required. The secret is either `clientSecret` inline
+or, preferably, `secretVault` plus `secretName` resolved through
+`Microsoft.PowerShell.SecretManagement` — an inline secret is readable by any process
+running as you, whatever directory it sits in. `assignmentGroupId`, `appOwner` and
+`descriptionsPath` are optional.
+
+Two behaviours worth knowing:
+
+**A value the customer does not define is cleared, not inherited.** If one customer has no
+`assignmentGroupId` and your environment still holds another customer's, the app would
+otherwise be assigned into the wrong tenant's group. The file is authoritative.
+
+**Explicitly passed parameters still win**, so `-Owner` on the command line overrides
+whatever the file says for that run.
+
+The script warns if the file is readable by anyone but its owner. Run `chmod 600` on it and
+add it to `.gitignore` — never commit a filled-in copy.
+
 ## App names and descriptions
 
-`data/IntuneAppDescriptions.json` supplies the description shown in Company Portal, and can
+`IntuneAppDescriptions.json`, next to the script, supplies the description shown in Company
+Portal, and can
 override the app name. Entries are matched against `Application - Name`, ignoring case and
 punctuation, so `7Zip` matches `7-Zip`.
 
@@ -280,6 +335,8 @@ read it before running it against a tenant you care about, and use `-WhatIf` fir
 - **Patch Tuesday is calculated in the server's time zone** but interpreted in the device's,
   which can differ by a day for runs late in the evening under UTC.
 - **One detection rule per app.** Multi-rule detection is not supported.
+- **The customer file is read in clear text** unless you use a secret vault. Treat it as a
+  credential store: local only, `chmod 600`, never committed.
 - **Supersedence relies on the naming convention.** Apps named outside `<base> <version>`
   are not found, and a version that does not parse as a version number is skipped rather
   than guessed at.
