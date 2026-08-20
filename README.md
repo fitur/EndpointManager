@@ -1,5 +1,7 @@
+<img src="../../assets/banner_8dz9ev8dz9ev8dz9.jpg" alt="Fitur Header Banner" width="100%" />
+
 ```
-WEYLAND-YUTANI CORP // NETWORK DIVISION
+FITUR CORP // NETWORK DIVISION
 MU/TH/UR 6000 :: ENDPOINT CONTROL SUBSYSTEM
 REF EM-2179 — CLEARANCE: GENERAL — STATUS: ONLINE
 ```
