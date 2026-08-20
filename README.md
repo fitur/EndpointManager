@@ -1,4 +1,4 @@
-<img src="https://github.com/fitur/fitur/raw/main/assets/banner_8dz9ev8dz9ev8dz9.jpg" alt="Fitur Header Banner" width="100%" />
+<img src="https://github.com/fitur/fitur/raw/main/assets/short_banner_x6i23qx6i23qx6i2.jpg" alt="Fitur Header Banner" width="100%" />
 
 ```
 FITUR CORP // NETWORK DIVISION
