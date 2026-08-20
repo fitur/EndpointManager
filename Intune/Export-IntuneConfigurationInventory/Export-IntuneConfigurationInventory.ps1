@@ -83,13 +83,32 @@
     Secrets: read from environment variables by default. Prefer SecretManagement or a
     certificate credential over a client secret for anything long-lived.
 
-    Version:        1.5.0
+    Version:        1.6.0
     Creation Date:  2026-07-30
-    Last Updated:   2026-08-05
+    Last Updated:   2026-08-20
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.6.0 - 2026-08-20
+            Added multi-customer credential handling via -CustomerConfigPath and
+            -CustomerName. Credentials come from a local JSON file instead of the
+            environment; the customer is picked with a native macOS dialog or a numbered
+            console menu when no name is given. Secrets are read inline or through
+            Microsoft.PowerShell.SecretManagement.
+
+            An optional value the selected customer does not define is CLEARED rather than
+            left at whatever the environment or a previous selection held. TenantName is
+            this script's dangerous one: it names the output folder, so inheriting it would
+            write one customer's complete security configuration into another customer's
+            directory. Cleared, it falls back to the name read from Graph, which is always
+            correct for the tenant actually being exported. The same applies to
+            OutputDirectory and IncludeConditionalAccess; JsonDepth has a working default
+            and is therefore only ever replaced, never cleared.
+
+            The block runs before the credential preflight, which would otherwise throw on
+            the empty environment variables that are expected when a customer file is used.
 
         1.5.0 - 2026-08-05
             Hardening after an external code review, plus optional orchestration.
@@ -161,6 +180,15 @@
     .\Export-IntuneConfigurationInventory.ps1 -CompareWithPrevious -Verbose
 
 .EXAMPLE
+    # Pick a customer from a local credential file - prompts when -CustomerName is omitted
+    .\Export-IntuneConfigurationInventory.ps1 -CustomerConfigPath ~/.intune/customers.json -Verbose
+
+.EXAMPLE
+    # Unattended run against one named customer
+    .\Export-IntuneConfigurationInventory.ps1 -CustomerConfigPath ~/.intune/customers.json `
+        -CustomerName 'Contoso' -CompareWithPrevious
+
+.EXAMPLE
     # Permission check only - decodes the token, reports tenant, roles and affected areas.
     .\Export-IntuneConfigurationInventory.ps1 -TestPermissionOnly -Verbose
 #>
@@ -207,12 +235,172 @@ param(
 
     [switch]$IncludeConditionalAccess,
 
+    # Local JSON file holding per-customer credentials. When supplied, the customer is
+    # selected (prompted for unless -CustomerName is given) and its values are used
+    # instead of the environment variables.
+    [string]$CustomerConfigPath,
+
+    [string]$CustomerName,
+
     # Decode the token, report tenant, roles and affected areas, exit.
     [switch]$TestPermissionOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+#region Customer selection
+
+# Resolves credentials from a local multi-customer JSON file. Self-contained on purpose:
+# the script stays a single file that can be copied to a machine on its own.
+#
+# The credential parameters default to the INTUNE_* environment variables, which are
+# evaluated when the script is invoked, so the values have to be assigned here rather than
+# by setting the environment. This must also run BEFORE the credential preflight below,
+# which throws on an empty TenantId - with a customer file the environment is legitimately
+# empty until this block has populated the variables.
+if ($CustomerConfigPath) {
+
+    if (-not (Test-Path -Path $CustomerConfigPath -PathType Leaf)) {
+        throw "Customer config '$CustomerConfigPath' does not exist or is not a file."
+    }
+    $customerConfigResolved = (Resolve-Path -Path $CustomerConfigPath).Path
+
+    # Warn when the file is readable by more than its owner. UnixMode is not populated on Windows.
+    if (-not $IsWindows) {
+        $configItem = Get-Item -Path $customerConfigResolved
+        if ($configItem.PSObject.Properties.Name -contains "UnixMode" -and
+            $configItem.UnixMode.Substring(4) -match '[rwx]') {
+            Write-Warning "'$customerConfigResolved' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$customerConfigResolved'"
+        }
+    }
+
+    try {
+        $customerConfig = Get-Content -Path $customerConfigResolved -Raw -Encoding UTF8 |
+            ConvertFrom-Json -AsHashtable -ErrorAction Stop
+    }
+    catch {
+        throw "Could not parse '$customerConfigResolved' as JSON: $($PSItem.Exception.Message)"
+    }
+
+    if (-not $customerConfig.ContainsKey("customers")) {
+        throw "'$customerConfigResolved' has no 'customers' array."
+    }
+
+    $customers = @($customerConfig["customers"] | Where-Object { $_ -and $_.ContainsKey("name") -and $_["name"] })
+    if ($customers.Count -eq 0) {
+        throw "'$customerConfigResolved' contains no usable customer entries."
+    }
+
+    $duplicateNames = @($customers | Group-Object { $_["name"] } | Where-Object { $_.Count -gt 1 })
+    if ($duplicateNames.Count -gt 0) {
+        throw "Duplicate customer names in '$customerConfigResolved': $(($duplicateNames.Name) -join ', ')"
+    }
+
+    # Select the customer: by name when given, otherwise ask
+    if ($CustomerName) {
+        $customer = $customers | Where-Object { $_["name"] -eq $CustomerName } | Select-Object -First 1
+        if (-not $customer) {
+            throw "Customer '$CustomerName' not found. Available: $((($customers | ForEach-Object { $_["name"] }) -join ', '))"
+        }
+    }
+    else {
+        $customerNames = $customers | ForEach-Object { $_["name"] }
+        $customer      = $null
+
+        # Native picker on macOS, console menu everywhere else and on cancel/failure
+        if ($IsMacOS) {
+            $quotedNames  = ($customerNames | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ", "
+            $chosenName   = & osascript -e ("choose from list {$quotedNames} with prompt ""Select customer tenant"" with title ""EndpointManager""") 2>$null
+            if ($chosenName -eq "false") { throw "Customer selection cancelled." }
+            if ($LASTEXITCODE -eq 0 -and $chosenName) {
+                $customer = $customers | Where-Object { $_["name"] -eq $chosenName.Trim() } | Select-Object -First 1
+            }
+        }
+
+        if (-not $customer) {
+            Write-Host "`nAvailable customers:" -ForegroundColor Cyan
+            for ($i = 0; $i -lt $customers.Count; $i++) {
+                Write-Host ("  [{0}] {1}" -f ($i + 1), $customers[$i]["name"])
+            }
+            while (-not $customer) {
+                $answer = Read-Host "`nSelect customer (1-$($customers.Count), or Q to quit)"
+                if ($answer -match '^[Qq]') { throw "Customer selection cancelled." }
+                $index = 0
+                if ([int]::TryParse($answer, [ref]$index) -and $index -ge 1 -and $index -le $customers.Count) {
+                    $customer = $customers[$index - 1]
+                }
+                else {
+                    Write-Warning "Enter a number between 1 and $($customers.Count), or Q to quit."
+                }
+            }
+        }
+    }
+
+    foreach ($requiredKey in "tenantId", "clientId") {
+        if (-not ($customer.ContainsKey($requiredKey) -and $customer[$requiredKey])) {
+            throw "Customer '$($customer["name"])' is missing '$requiredKey'."
+        }
+    }
+
+    # Secret comes either inline or from a SecretManagement vault
+    $usesVault = ($customer.ContainsKey("secretVault") -and $customer["secretVault"]) -or
+                 ($customer.ContainsKey("secretName")  -and $customer["secretName"])
+
+    if ($usesVault) {
+        if (-not (($customer.ContainsKey("secretVault") -and $customer["secretVault"]) -and
+                  ($customer.ContainsKey("secretName")  -and $customer["secretName"]))) {
+            throw "Customer '$($customer["name"])' must define both secretVault and secretName, or neither."
+        }
+        if (-not (Get-Module -ListAvailable -Name Microsoft.PowerShell.SecretManagement)) {
+            throw "Customer '$($customer["name"])' uses a secret vault, but Microsoft.PowerShell.SecretManagement is not installed."
+        }
+        Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
+        $ClientSecret = Get-Secret -Vault $customer["secretVault"] -Name $customer["secretName"] -AsPlainText -ErrorAction Stop
+        if (-not $ClientSecret) {
+            throw "Secret '$($customer["secretName"])' in vault '$($customer["secretVault"])' is empty."
+        }
+    }
+    elseif ($customer.ContainsKey("clientSecret") -and $customer["clientSecret"]) {
+        $ClientSecret = [string]$customer["clientSecret"]
+    }
+    else {
+        throw "Customer '$($customer["name"])' has no clientSecret and no secretVault/secretName."
+    }
+
+    $TenantId = [string]$customer["tenantId"]
+    $ClientId = [string]$customer["clientId"]
+
+    # --- script-specific optional values ---
+    # The file is authoritative: a value the customer does not define is cleared rather than
+    # left at whatever the environment held, so a value from a previously selected customer
+    # cannot follow into this run.
+    #
+    # TenantName is the one that matters here, and it is this script's equivalent of the
+    # assignment group in the upload script: it names the output folder. Inheriting customer
+    # A's name would write customer B's complete security configuration into A's folder.
+    # Cleared it falls back to the name read from Graph, which is always correct.
+    if (-not $PSBoundParameters.ContainsKey("TenantName")) {
+        $TenantName = $customer.ContainsKey("tenantName") ? [string]$customer["tenantName"] : $null
+    }
+    if (-not $PSBoundParameters.ContainsKey("OutputDirectory")) {
+        $OutputDirectory = $customer.ContainsKey("outputDirectory") ? [string]$customer["outputDirectory"] : $null
+    }
+    # Conditional Access needs Policy.Read.All, which not every customer grants. Cleared it
+    # returns to $false, so a customer that does not opt in cannot inherit a skipped area.
+    if (-not $PSBoundParameters.ContainsKey("IncludeConditionalAccess")) {
+        $IncludeConditionalAccess = [bool]($customer.ContainsKey("includeConditionalAccess") -and $customer["includeConditionalAccess"])
+    }
+    # Values with a working default are only replaced, never cleared
+    if ($customer.ContainsKey("jsonDepth") -and $customer["jsonDepth"] -and
+        -not $PSBoundParameters.ContainsKey("JsonDepth")) {
+        $JsonDepth = [int]$customer["jsonDepth"]
+    }
+
+    Write-Host "Customer: $($customer["name"])  (tenant $TenantId)" -ForegroundColor Green
+}
+
+#endregion
 
 #region Credential preflight
 

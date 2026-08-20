@@ -102,6 +102,38 @@ All three have matching parameters, but prefer the variables. Passing `-ClientSe
 command line puts it in PSReadLine history and any active transcript, and the script warns
 when you do.
 
+### Several customers
+
+For more than one tenant, `-CustomerConfigPath` reads credentials from a local JSON file
+instead. `-CustomerName` picks one without prompting; leaving it out prompts — a native
+picker on macOS, a numbered console menu elsewhere.
+
+```powershell
+cp customers.sample.json ~/.intune/customers.json
+chmod 600 ~/.intune/customers.json
+
+./Export-IntuneConfigurationInventory.ps1 -CustomerConfigPath ~/.intune/customers.json
+```
+
+Secrets are either inline (`clientSecret`) or resolved through
+`Microsoft.PowerShell.SecretManagement` (`secretVault` + `secretName`). The confirmation line
+prints the customer name and tenant ID only, never the secret, and the script warns if the
+file is readable beyond its owner.
+
+**An optional value the selected customer does not define is cleared, not inherited.** That
+is the rule the whole design hangs on. `tenantName` names the output folder, so a customer
+without one must not pick up the previous customer's — otherwise one tenant's complete
+security configuration lands in another tenant's directory. Cleared, it falls back to the
+name read from Graph, which is always right for the tenant actually being exported.
+`outputDirectory` and `includeConditionalAccess` behave the same way. `jsonDepth` is the
+exception: it has a working default, so it is replaced when defined and never cleared.
+
+Explicitly passed parameters beat the file, checked with `$PSBoundParameters.ContainsKey()`,
+which is true only for parameters the caller actually supplied. Without
+`-CustomerConfigPath`, the environment variables behave exactly as before.
+
+Add the filled-in copy to `.gitignore`.
+
 ## Usage
 
 ```powershell
