@@ -77,9 +77,9 @@
         -BaselineRun '2026-07-31 11-25' -CurrentRun '2026-08-05 12-16'
 
 .NOTES
-    Version:        1.2.0
+    Version:        1.3.0
     Creation Date:  2026-08-03
-    Last Updated:   2026-08-05
+    Last Updated:   2026-08-20
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -88,6 +88,23 @@
     against an older pair of runs, without paying for another full Graph export.
 
     CHANGELOG
+
+        1.3.0 - 2026-08-20
+            Added an Applications category and the platform patterns for app odata types.
+            winGetApp, officeSuiteApp, microsoftStoreForBusinessApp and managedIOSStoreApp
+            match none of the existing platform-prefixed patterns, so they needed their own.
+            All patterns remain anchored: "kiosk" contains the letters i-o-s, so a loose
+            'ios' pattern would misfile windows10KioskConfiguration as iOS.
+
+            AssignmentIntent joins the assignment comparison fields rather than the metadata
+            ones, so an app moving from required to available registers as an assignment
+            change.
+
+            Fixed a bug that meant the field-level JSON diff had never actually run: the
+            Changes parameter of Compare-JsonNode is Mandatory and always receives an empty
+            list, which PowerShell rejects. Every earlier test happened to take the "sidecar
+            missing" branch instead, so the failure never surfaced. Added
+            [AllowEmptyCollection()].
 
         1.2.0 - 2026-08-05
             Accepts either a tenant folder or the root above it, detecting tenant folders by
@@ -205,17 +222,20 @@ $categoryDefinitions = @(
         Areas = @('App Protection Policy (iOS)', 'App Protection Policy (Android)',
                   'App Configuration (Managed Apps)', 'App Configuration (Managed Devices)') }
 
-    [pscustomobject]@{ Order = 6; Key = 'enrollment'; Title = 'Enrollment & Autopilot'
+    [pscustomobject]@{ Order = 6; Key = 'applications'; Title = 'Applications'
+        Areas = @('Application') }
+
+    [pscustomobject]@{ Order = 7; Key = 'enrollment'; Title = 'Enrollment & Autopilot'
         Areas = @('Autopilot Deployment Profile', 'Enrollment Configuration') }
 
-    [pscustomobject]@{ Order = 7; Key = 'updates'; Title = 'Windows Update Rings'
+    [pscustomobject]@{ Order = 8; Key = 'updates'; Title = 'Windows Update Rings'
         Areas = @('Windows Feature Update Profile', 'Windows Quality Update Profile',
                   'Windows Driver Update Profile') }
 
-    [pscustomobject]@{ Order = 8; Key = 'filters'; Title = 'Assignment Filters'
+    [pscustomobject]@{ Order = 9; Key = 'filters'; Title = 'Assignment Filters'
         Areas = @('Assignment Filter') }
 
-    [pscustomobject]@{ Order = 9; Key = 'conditionalaccess'; Title = 'Conditional Access'
+    [pscustomobject]@{ Order = 10; Key = 'conditionalaccess'; Title = 'Conditional Access'
         Areas = @('Conditional Access Policy') }
 )
 
@@ -260,11 +280,20 @@ $platformAliases = @{
 
 # PolicyType carries the Graph odata type for most areas. Anchored patterns first so
 # "macOSGeneralDeviceConfiguration" cannot be caught by a loose windows/ios pattern.
+#
+# App odata types need explicit entries: winGetApp, officeSuiteApp and
+# microsoftStoreForBusinessApp match none of the platform-prefixed patterns, and
+# managedIOSStoreApp does not start with "ios". A loose 'ios' pattern is deliberately NOT
+# added - "kiosk" contains the letters i-o-s, so windows10KioskConfiguration would be
+# misfiled as iOS the moment the ordering changed.
 $typePatterns = @(
     [pscustomobject]@{ Pattern = '^macos'; Platform = 'macOS' }
     [pscustomobject]@{ Pattern = '^(ios|ipad)'; Platform = 'iOS/iPadOS' }
+    [pscustomobject]@{ Pattern = '^managedios'; Platform = 'iOS/iPadOS' }
     [pscustomobject]@{ Pattern = '^(android|aosp)'; Platform = 'Android' }
+    [pscustomobject]@{ Pattern = '^managedandroid'; Platform = 'Android' }
     [pscustomobject]@{ Pattern = '^(windows|win32|defender|sharedpc|editionupgrade)'; Platform = 'Windows' }
+    [pscustomobject]@{ Pattern = '^(winget|officesuite|microsoftstore)'; Platform = 'Windows' }
     [pscustomobject]@{ Pattern = 'macos'; Platform = 'macOS' }
     [pscustomobject]@{ Pattern = 'windows'; Platform = 'Windows' }
     [pscustomobject]@{ Pattern = 'android'; Platform = 'Android' }
@@ -521,7 +550,7 @@ function Compare-JsonNode {
         [AllowNull()]$Reference,
         [AllowNull()]$Difference,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Path,
-        [Parameter(Mandatory)][System.Collections.Generic.List[object]]$Changes,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Changes,
         [Parameter(Mandatory)][int]$MaxValueLength,
         [int]$Depth = 0
     )
@@ -616,6 +645,8 @@ function New-RecordSummary {
         assignedGroups        = [string]$Row.AssignedGroups
         excludedGroups        = [string]$Row.ExcludedGroups
         assignmentFilters     = [string]$Row.AssignmentFilters
+        # Absent from baselines produced before the Application area existed.
+        assignmentIntent      = [string](Get-ObjectProperty -InputObject $Row -Name 'AssignmentIntent')
         lastModifiedDateTime  = [string]$Row.LastModifiedDateTime
         configurationFile     = ('{0}/{1}' -f $RunFolder, ([string]$Row.ConfigurationFile))
     }
@@ -701,7 +732,10 @@ if ($platformCache.Count -gt 0) {
 Write-Verbose ('Platforms resolved for {0} record(s): {1}' -f
     $platformCache.Count, (($platformSpread.Count -gt 0) ? ($platformSpread -join ', ') : '<none>'))
 
-$assignmentFields = @('AssignedGroups', 'ExcludedGroups', 'AssignmentFilters')
+# AssignmentIntent belongs here rather than in metadata: for an app, moving from required
+# to available is an assignment change, and like the group columns it lives outside
+# ConfigurationHash.
+$assignmentFields = @('AssignedGroups', 'ExcludedGroups', 'AssignmentFilters', 'AssignmentIntent')
 $metadataFields = @('DisplayName', 'Description', 'Version', 'TemplateName', 'Platform')
 
 $pages = [System.Collections.Generic.List[object]]::new()
@@ -770,20 +804,28 @@ foreach ($category in $categoryDefinitions) {
                 # living outside ConfigurationHash.
                 $configChanged = ([string]$old.ConfigurationHash -ne [string]$row.ConfigurationHash)
 
+                # Get-ObjectProperty rather than $old.$field: a baseline produced by an
+                # earlier version of the exporter has no AssignmentIntent column, and
+                # StrictMode throws on a missing property. A column absent on one side
+                # simply compares as empty.
                 $assignmentChanges = [System.Collections.Generic.List[object]]::new()
                 foreach ($field in $assignmentFields) {
-                    if ([string]$old.$field -ne [string]$row.$field) {
+                    $oldValue = [string](Get-ObjectProperty -InputObject $old -Name $field)
+                    $newValue = [string](Get-ObjectProperty -InputObject $row -Name $field)
+                    if ($oldValue -ne $newValue) {
                         $assignmentChanges.Add([pscustomobject][ordered]@{
-                            field = $field; oldValue = [string]$old.$field; newValue = [string]$row.$field
+                            field = $field; oldValue = $oldValue; newValue = $newValue
                         })
                     }
                 }
 
                 $metadataChanges = [System.Collections.Generic.List[object]]::new()
                 foreach ($field in $metadataFields) {
-                    if ([string]$old.$field -ne [string]$row.$field) {
+                    $oldValue = [string](Get-ObjectProperty -InputObject $old -Name $field)
+                    $newValue = [string](Get-ObjectProperty -InputObject $row -Name $field)
+                    if ($oldValue -ne $newValue) {
                         $metadataChanges.Add([pscustomobject][ordered]@{
-                            field = $field; oldValue = [string]$old.$field; newValue = [string]$row.$field
+                            field = $field; oldValue = $oldValue; newValue = $newValue
                         })
                     }
                 }

@@ -83,13 +83,44 @@
     Secrets: read from environment variables by default. Prefer SecretManagement or a
     certificate credential over a client secret for anything long-lived.
 
-    Version:        1.6.0
+    Version:        1.7.0
     Creation Date:  2026-07-30
     Last Updated:   2026-08-20
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.7.0 - 2026-08-20
+            Added applications as a nineteenth area: deviceAppManagement/mobileApps with
+            assignments expanded. One area for every app type rather than one per type -
+            PolicyType carries the odata type, so the platform split downstream files Win32,
+            iOS, Android and macOS apps onto their own pages automatically.
+
+            Assignments now also capture intent (required/available/uninstall) in a new
+            AssignmentIntent column. Policies have no intent; for an app it is half the
+            information, and moving one from required to available is a real change that the
+            configuration hash alone would not show.
+
+            The version column falls back from 'version' to 'displayVersion' to
+            'versionNumber' - Win32 apps use the second and store apps the third, so without
+            it the column was empty for exactly the apps that matter most.
+
+            largeIcon is stripped alongside assignments before hashing. It is a base64 PNG
+            worth tens of kilobytes per Win32 app, and a re-encode by Intune would register
+            as a configuration change that never happened.
+
+            Supersedence relationships are fetched only when supersedingAppCount or
+            supersededAppCount is above zero, which is a handful of apps rather than one
+            request per app.
+
+            installSummary is deliberately NOT part of the configuration or the hash:
+            installedDeviceCount changes on every device check-in, so including it would
+            report every app as modified on every run. -IncludeAppInstallStatus writes it to
+            a separate AppInstallStatus CSV that is neither hashed nor diffed.
+
+            NOTE: the new area and the new column both require a fresh baseline. The first
+            comparison after upgrading will report every application as added.
 
         1.6.0 - 2026-08-20
             Added multi-customer credential handling via -CustomerConfigPath and
@@ -232,6 +263,11 @@ param(
 
     # Settings Catalog / Endpoint Security settings need one extra call per policy. Skip for a fast run.
     [switch]$SkipDetailedSettings,
+
+    # Collect per-app installation counts into a separate CSV. Deliberately not part of the
+    # inventory: install counts change every time a device checks in, so folding them into
+    # ConfigurationHash would report every app as changed on every run.
+    [switch]$IncludeAppInstallStatus,
 
     [switch]$IncludeConditionalAccess,
 
@@ -836,11 +872,19 @@ function ConvertTo-AssignmentDetail {
     $included = [System.Collections.Generic.List[string]]::new()
     $excluded = [System.Collections.Generic.List[string]]::new()
     $filters = [System.Collections.Generic.List[string]]::new()
+    $intents = [System.Collections.Generic.List[string]]::new()
     $count = 0
 
     foreach ($item in @($Assignment)) {
         if ($null -eq $item) { continue }
         $count++
+
+        # Only app assignments carry an intent (required/available/uninstall). For an app
+        # this is half the meaning of the assignment, so it gets its own column rather than
+        # being buried in the group string.
+        $intent = [string](Get-ObjectProperty -InputObject $item -Name 'intent')
+        if (-not [string]::IsNullOrWhiteSpace($intent)) { $intents.Add($intent) }
+
         $target = Get-ObjectProperty -InputObject $item -Name 'target'
         if ($null -eq $target) { continue }
 
@@ -871,6 +915,7 @@ function ConvertTo-AssignmentDetail {
         Included = (($included | Sort-Object -Unique) -join ';')
         Excluded = (($excluded | Sort-Object -Unique) -join ';')
         Filters  = (($filters | Sort-Object -Unique) -join ';')
+        Intents  = (($intents | Sort-Object -Unique) -join ';')
         Count    = $count
     }
 }
@@ -905,6 +950,21 @@ function Write-Utf8File {
     )
     # No BOM: JSON consumers expect plain UTF-8, unlike the CSV where Excel needs the BOM.
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Get-PolicyVersion {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][AllowNull()]$Item)
+
+    # Policies use 'version'. Win32 apps expose 'displayVersion', iOS/Android store apps
+    # 'versionNumber' - without the fallback the column is empty for exactly the apps that
+    # matter most when reviewing what is deployed.
+    foreach ($property in @('version', 'displayVersion', 'versionNumber')) {
+        $value = [string](Get-ObjectProperty -InputObject $Item -Name $property)
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+    return ''
 }
 
 function Get-PolicyPlatform {
@@ -1000,6 +1060,11 @@ $policyDefinitions = @(
     New-PolicyDefinition -Area 'App Protection Policy (Android)' -Resource 'deviceAppManagement/androidManagedAppProtections' -RequiredRole $roleApps
     New-PolicyDefinition -Area 'App Configuration (Managed Apps)' -Resource 'deviceAppManagement/targetedManagedAppConfigurations' -RequiredRole $roleApps
     New-PolicyDefinition -Area 'App Configuration (Managed Devices)' -Resource 'deviceAppManagement/mobileAppConfigurations' -RequiredRole $roleApps
+
+    # One area for every app type rather than one per platform: PolicyType carries the Graph
+    # odata type (win32LobApp, iosStoreApp, macOSPkgApp), which the platform resolution in
+    # the comparison script already uses to split them onto per-platform pages.
+    New-PolicyDefinition -Area 'Application' -Resource 'deviceAppManagement/mobileApps' -RequiredRole $roleApps
 )
 
 if ($IncludeConditionalAccess) {
@@ -1090,6 +1155,7 @@ $csvName = 'IntuneConfigurationInventory_{0}_{1}.csv' -f $tenantNamePart, $fileS
 $csvPath = Join-Path -Path $runDirectory -ChildPath $csvName
 
 $inventory = [System.Collections.Generic.List[pscustomobject]]::new()
+$appInstallStatus = [System.Collections.Generic.List[pscustomobject]]::new()
 $areaResults = [System.Collections.Generic.List[pscustomobject]]::new()
 $skipped = [System.Collections.Generic.List[string]]::new()
 
@@ -1168,10 +1234,28 @@ foreach ($definition in $policyDefinitions) {
         $assignmentDetail = ConvertTo-AssignmentDetail -Assignment $assignments
 
         # Build the configuration payload: the object itself minus noise, plus fetched detail.
+        # largeIcon is a base64 PNG on Win32 apps - tens of kilobytes of payload that would
+        # also change the hash if Intune ever re-encodes it, without anything having changed.
         $configuration = [ordered]@{}
         foreach ($property in $item.PSObject.Properties) {
-            if ($property.Name -in @('assignments', '@odata.context', 'assignments@odata.context')) { continue }
+            if ($property.Name -in @('assignments', 'largeIcon', '@odata.context', 'assignments@odata.context')) { continue }
             $configuration[$property.Name] = $property.Value
+        }
+
+        # Supersedence relationships, only for apps that actually have any. The list response
+        # already reports the counts, so this stays a handful of calls rather than one per app.
+        if ($definition.Resource -eq 'deviceAppManagement/mobileApps' -and -not [string]::IsNullOrWhiteSpace($id)) {
+            $supersedingCount = [int](Get-ObjectProperty -InputObject $item -Name 'supersedingAppCount')
+            $supersededCount = [int](Get-ObjectProperty -InputObject $item -Name 'supersededAppCount')
+
+            if (($supersedingCount + $supersededCount) -gt 0) {
+                try {
+                    $configuration['relationships'] = @(Get-GraphCollection -Uri ('{0}/{1}/relationships' -f $baseUri, $id))
+                }
+                catch [System.Exception] {
+                    Write-Warning ('Application "{0}": could not read supersedence relationships - {1}' -f $id, $PSItem.Exception.Message)
+                }
+            }
         }
 
         if (-not $SkipDetailedSettings -and -not [string]::IsNullOrWhiteSpace($definition.DetailResourceFormat) -and -not [string]::IsNullOrWhiteSpace($id)) {
@@ -1217,6 +1301,32 @@ foreach ($definition in $policyDefinitions) {
         $recordKey = '{0}|{1}' -f $definition.Area, $id
         $resourceUri = '{0}/{1}' -f $baseUri, $id
 
+        # Volatile by nature: these counts move every time a device checks in, which is why
+        # they go to their own file and never into the hashed configuration.
+        if ($IncludeAppInstallStatus -and $definition.Resource -eq 'deviceAppManagement/mobileApps' -and
+            -not [string]::IsNullOrWhiteSpace($id)) {
+            try {
+                $summary = Invoke-GraphRequest -Uri ('{0}/{1}/installSummary' -f $baseUri, $id)
+                $appInstallStatus.Add([pscustomobject][ordered]@{
+                    RunTimestamp             = $runStamp
+                    RecordKey                = $recordKey
+                    DisplayName              = $displayName
+                    Id                       = $id
+                    AppType                  = $policyType
+                    InstalledDeviceCount     = [int](Get-ObjectProperty -InputObject $summary -Name 'installedDeviceCount')
+                    FailedDeviceCount        = [int](Get-ObjectProperty -InputObject $summary -Name 'failedDeviceCount')
+                    NotInstalledDeviceCount  = [int](Get-ObjectProperty -InputObject $summary -Name 'notInstalledDeviceCount')
+                    PendingInstallDeviceCount = [int](Get-ObjectProperty -InputObject $summary -Name 'pendingInstallDeviceCount')
+                    NotApplicableDeviceCount = [int](Get-ObjectProperty -InputObject $summary -Name 'notApplicableDeviceCount')
+                    InstalledUserCount       = [int](Get-ObjectProperty -InputObject $summary -Name 'installedUserCount')
+                    FailedUserCount          = [int](Get-ObjectProperty -InputObject $summary -Name 'failedUserCount')
+                })
+            }
+            catch [System.Exception] {
+                Write-Warning ('Application "{0}": could not read installSummary - {1}' -f $displayName, $PSItem.Exception.Message)
+            }
+        }
+
         $inventory.Add([pscustomobject][ordered]@{
             RunTimestamp         = $runStamp
             RecordKey            = $recordKey
@@ -1227,12 +1337,13 @@ foreach ($definition in $policyDefinitions) {
             Description          = [string](Get-ObjectProperty -InputObject $item -Name 'description')
             Platform             = Get-PolicyPlatform -Item $item
             TemplateName         = $templateName
-            Version              = [string](Get-ObjectProperty -InputObject $item -Name 'version')
+            Version              = Get-PolicyVersion -Item $item
             CreatedDateTime      = ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject $item -Name 'createdDateTime')
             LastModifiedDateTime = ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject $item -Name 'lastModifiedDateTime')
             AssignedGroups       = $assignmentDetail.Included
             ExcludedGroups       = $assignmentDetail.Excluded
             AssignmentFilters    = $assignmentDetail.Filters
+            AssignmentIntent     = $assignmentDetail.Intents
             AssignmentCount      = $assignmentDetail.Count
             ConfigurationHash    = Get-StringHash -Value $configurationJson
             ConfigurationFile    = $relativeConfigPath
@@ -1275,6 +1386,18 @@ $manifest = [ordered]@{
 }
 $manifestPath = Join-Path -Path $runDirectory -ChildPath ('_manifest_{0}.json' -f $fileStamp)
 Write-Utf8File -Path $manifestPath -Content (ConvertTo-Json -InputObject $manifest -Depth 6)
+
+# Kept out of the inventory CSV and out of every hash on purpose: install counts are a
+# point-in-time reading, not configuration, and folding them in would make every app look
+# changed on every run.
+$appInstallStatusPath = $null
+if ($IncludeAppInstallStatus -and $appInstallStatus.Count -gt 0) {
+    $appInstallStatusPath = Join-Path -Path $runDirectory -ChildPath ('AppInstallStatus_{0}.csv' -f $fileStamp)
+    $appInstallStatus |
+        Sort-Object -Property DisplayName, Id |
+        Export-Csv -Path $appInstallStatusPath -NoTypeInformation -Delimiter $Delimiter -Encoding utf8BOM
+    Write-Verbose ('Install status for {0} app(s): {1}' -f $appInstallStatus.Count, $appInstallStatusPath)
+}
 
 # Optional handover artefact. Written after the manifest so the archive is complete.
 $zipPath = $null
@@ -1341,14 +1464,15 @@ Write-Verbose ('Exported {0} policies from {1} area(s) in tenant {2}' -f
     $inventory.Count, $manifest.areasExported, $TenantName)
 
 Write-Output ([pscustomobject]@{
-    TenantRoot     = $tenantRoot
-    RunDirectory   = $runDirectory
-    CsvPath        = $csvPath
-    ManifestPath   = $manifestPath
-    ZipPath        = $zipPath
-    ChangeSetPath  = $changeSetPath
-    PolicyCount    = $inventory.Count
-    ExportComplete = $manifest.exportComplete
+    TenantRoot           = $tenantRoot
+    RunDirectory         = $runDirectory
+    CsvPath              = $csvPath
+    ManifestPath         = $manifestPath
+    ZipPath              = $zipPath
+    AppInstallStatusPath = $appInstallStatusPath
+    ChangeSetPath        = $changeSetPath
+    PolicyCount          = $inventory.Count
+    ExportComplete       = $manifest.exportComplete
 })
 
 #endregion Main

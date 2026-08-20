@@ -37,21 +37,21 @@ across all 172 records.
 
 ## What it covers
 
-18 policy areas, all read from `beta` except Conditional Access and group lookups:
+19 policy areas, all read from `beta` except Conditional Access and group lookups:
 
 Settings Catalog · Device Configuration (Templates) · Group Policy Configuration (ADMX) ·
 Endpoint Security (Intents) · Compliance Policies · Remediation Scripts · Platform Scripts
 (Windows) · Shell Scripts (macOS) · Autopilot Deployment Profiles · Enrollment
 Configurations · Windows Feature/Quality/Driver Update Profiles · App Protection (iOS,
 Android) · App Configuration (Managed Apps, Managed Devices) · Assignment Filters ·
-Conditional Access (opt-in)
+Conditional Access (opt-in) · **Applications** (`mobileApps` — Win32, Store, LOB, web link)
 
 Adding an area is one line in `$policyDefinitions` — the pipeline is data-driven and needs
 no new code per type.
 
 Not covered: custom compliance scripts, Intune RBAC roles, terms and conditions,
-notification templates, imported ADMX files, reusable policy settings, the applications
-themselves, and Endpoint Analytics. All are one line each if you want them.
+notification templates, imported ADMX files, reusable policy settings, and Endpoint
+Analytics. All are one line each if you want them.
 
 ## Requirements
 
@@ -181,12 +181,44 @@ One row per policy, fixed column order:
 `RunTimestamp` · `RecordKey` · `PolicyArea` · `PolicyType` · `DisplayName` · `Id` ·
 `Description` · `Platform` · `TemplateName` · `Version` · `CreatedDateTime` ·
 `LastModifiedDateTime` · `AssignedGroups` · `ExcludedGroups` · `AssignmentFilters` ·
-`AssignmentCount` · `ConfigurationHash` · `ConfigurationFile` · `GraphResourceUri`
+`AssignmentIntent` · `AssignmentCount` · `ConfigurationHash` · `ConfigurationFile` · `GraphResourceUri`
 
 The configuration itself lives in a sidecar JSON file, not in the CSV. Inline, single cells
 reached 284 000 characters — past Excel's 32 767 limit per cell and past the default field
 limit of most CSV readers, including Python's. The sidecar files are written indented so a
 per-policy diff is readable line by line.
+
+### Applications
+
+`deviceAppManagement/mobileApps` is read as a single `Application` area covering every app
+type. `PolicyType` carries the Graph odata type — `win32LobApp`, `iosStoreApp`,
+`macOSPkgApp` — so the platform resolution splits them onto per-platform pages the same way
+it does for device configurations.
+
+App assignments carry an **intent** that policy assignments do not, so `AssignmentIntent`
+is its own column and its own change signal. An app moving from *required* to *available*
+is a real change that the configuration hash would never show, since assignments are
+excluded from it.
+
+Three deliberate choices worth knowing:
+
+**`largeIcon` is stripped before hashing**, alongside assignments. It is a base64 PNG worth
+tens of kilobytes per Win32 app, and a re-encode by Intune would register as a configuration
+change that never happened.
+
+**Supersedence relationships are fetched conditionally** — only when `supersedingAppCount`
+or `supersededAppCount` is above zero. That is a handful of apps rather than one request per
+app, and it is what lets you spot "app A is superseded by app B but A is still assigned".
+
+**`installSummary` is not part of the configuration or the hash.** `installedDeviceCount`
+changes on every device check-in, so including it would report every app as modified on
+every run and destroy the whole point of the hash. `-IncludeAppInstallStatus` writes it to a
+separate `AppInstallStatus_<stamp>.csv` that is neither hashed nor diffed — useful before a
+maintenance window, harmless to the change detection.
+
+Per-assignment settings such as Win32 restart grace periods are stored but are not tracked
+as a change signal, since assignments sit outside the hash. A changed restart deadline will
+not appear in the diff.
 
 ### The manifest
 
@@ -290,6 +322,10 @@ before running it against one you care about, and start with `-TestPermissionOnl
 
 ## Known limitations
 
+- **Applications need a fresh baseline.** The `Application` area and the `AssignmentIntent`
+  column were added in export 1.7.0. The first comparison after upgrading reports every
+  application as added — set a new baseline deliberately rather than reading that as someone
+  having published 300 apps overnight.
 - **Beta endpoints throughout.** Required for remediations, shell scripts, driver update
   profiles and intents. Beta can change without notice.
 - **N+1 request patterns** in two places: one call per unique group, and one per policy for
