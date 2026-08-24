@@ -57,7 +57,8 @@ IgorPavlov_7Zip_26.02_Intune.zip
     └── 7Zip.png                     ← optional
 ```
 
-A `__MACOSX` folder, which macOS adds when zipping, is ignored.
+A `__MACOSX` folder, which macOS adds when zipping, is ignored. The files may also sit
+directly in the zip root without a wrapping folder.
 
 ### ApplicationInformation.txt
 
@@ -81,7 +82,8 @@ requirement in Intune, otherwise no requirement is applied. Anything missing is 
 a single error listing every absent field, rather than one at a time.
 
 The file may be UTF-8, UTF-16 (with or without BOM), Mac Roman or Windows-1252. The encoding
-is detected automatically, so `å ä ö` survive regardless of whether the package was built on
+is detected automatically and any byte order mark is stripped, so `å ä ö` survive and the
+first field in the file is read correctly regardless of whether the package was built on
 macOS or Windows.
 
 ### Detection rules
@@ -149,6 +151,7 @@ entirely. See [Working across several customers](#working-across-several-custome
 | `-CustomerConfigPath` | — | Local JSON file with credentials for several customers |
 | `-CustomerName` | — | Selects a customer without prompting |
 | `-TenantID` `-ClientID` `-ClientSecret` | env vars | Avoid on the command line |
+| `-Quiet` | off | Suppresses the per-chunk upload progress |
 | `-WhatIf` | — | Dry run |
 
 ## Usage

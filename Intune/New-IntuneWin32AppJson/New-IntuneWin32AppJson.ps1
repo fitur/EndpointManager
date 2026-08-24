@@ -98,6 +98,10 @@
 .PARAMETER CustomerName
     Selects a customer from the file without prompting. Required for unattended runs.
 
+.PARAMETER Quiet
+    Suppresses the per-chunk upload progress from the IntuneWin32App module, which is
+    otherwise shown. Use it when running the script from a pipeline or scheduled job.
+
 .PARAMETER Supersede
     Finds earlier versions of the same app already in Intune and marks them as superseded
     by this upload. An app qualifies only when its name is exactly "<base> <version>" for
@@ -172,9 +176,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        2.5.0
+    Version:        2.6.0
     Creation Date:  2026-05-07
-    Last Updated:   2026-08-19
+    Last Updated:   2026-08-24
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -183,6 +187,17 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        2.6.0 - 2026-08-24
+            Fixes from an external code review of a colleague's fork. The UTF-16 BOM is
+            now skipped rather than decoded, which previously left a U+FEFF that made the
+            first field in ApplicationInformation.txt unmatchable - reported as "Missing
+            required fields" on a perfectly valid file. The app id is read through
+            PSObject.Properties instead of $_.id, which threw under StrictMode on any
+            object lacking the property and surfaced as a failed upload after the app had
+            already been created. Zips without a wrapping folder are now supported. Return
+            codes are defined once instead of in two places, the app inventory query uses
+            $select, Install-Module pins PSGallery, and -Quiet suppresses upload progress.
 
         2.5.0 - 2026-08-19
             Added -CustomerConfigPath and -CustomerName for working across several
@@ -345,6 +360,11 @@ param (
     [Parameter()]
     [string]$CustomerName,
 
+    # Suppresses the module's per-chunk upload progress. On by default because a large
+    # package uploads in many chunks and the progress is the only sign it is still working.
+    [Parameter()]
+    [switch]$Quiet,
+
     # Marks earlier versions of the same app in Intune as superseded by this upload
     [Parameter()]
     [switch]$Supersede,
@@ -503,6 +523,16 @@ if ($CustomerConfigPath) {
 
 # These mirror the lookup tables inside New-IntuneWin32AppRequirementRule so the generated
 # JSON artifact records the same values that are actually sent to Intune.
+# Return codes written to the JSON artifact and used to correct the module's defaults after
+# upload. Defined once so the two can never drift apart.
+$script:Win32AppReturnCodes = @(
+    [ordered]@{ returnCode = 0;    type = "success" }
+    [ordered]@{ returnCode = 1707; type = "success" }
+    [ordered]@{ returnCode = 3010; type = "softReboot" }
+    [ordered]@{ returnCode = 1641; type = "softReboot" }   # module default is hardReboot
+    [ordered]@{ returnCode = 1618; type = "retry" }
+)
+
 # 1x1 transparent PNG, used when a package ships without an icon
 $script:BlankPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 
@@ -680,11 +710,14 @@ function Read-TextFileSmart {
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
         return [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3)
     }
+    # The two BOM bytes are skipped explicitly. Decoding them instead yields a leading
+    # U+FEFF, which makes the "(?m)^$Label" match in Get-AppInfoValue miss the very first
+    # field in the file - a failure that looks impossible when the file is opened in an editor.
     if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
-        return [System.Text.Encoding]::Unicode.GetString($bytes)           # UTF-16 LE
+        return [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)           # UTF-16 LE
     }
     if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
-        return [System.Text.Encoding]::BigEndianUnicode.GetString($bytes)  # UTF-16 BE
+        return [System.Text.Encoding]::BigEndianUnicode.GetString($bytes, 2, $bytes.Length - 2)  # UTF-16 BE
     }
 
     # UTF-16 without a BOM is technically valid UTF-8 (NUL bytes are legal), so it would pass
@@ -746,7 +779,10 @@ function Get-Win32AppInventory {
     [OutputType([pscustomobject[]])]
     param ()
 
-    $uri  = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$filter=isof('microsoft.graph.win32LobApp')"
+    # $select keeps the payload small: only these two fields are used, and tenants with many
+    # apps otherwise return the full app body for every entry.
+    $uri  = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps" +
+            "?`$filter=isof('microsoft.graph.win32LobApp')&`$select=id,displayName"
     $apps = [System.Collections.Generic.List[pscustomobject]]::new()
 
     while ($uri) {
@@ -1198,6 +1234,9 @@ if ($AssignmentGroupId) {
 
     # Add-IntuneWin32AppAssignmentGroup rejects a future available time unless a deadline is also
     # given; it only emits a warning and skips the assignment, so catch it here instead.
+    # AddDays(-1) is not a typo: it mirrors the module's own check exactly, so the two cannot
+    # disagree about what counts as "future". Using (Get-Date) here would let times through
+    # that the module then silently drops.
     if ($AvailableTime -and -not $DeadlineTime -and $AvailableTime -gt (Get-Date).AddDays(-1)) {
         throw "-AvailableTime is in the future but no -DeadlineTime was supplied. The IntuneWin32App module requires both in this case."
     }
@@ -1238,6 +1277,11 @@ try {
     $unzippedDir   = $candidateDirs |
         Where-Object { Test-Path -Path (Join-Path $_.FullName "ApplicationInformation.txt") } |
         Select-Object -First 1
+
+    # Zips built without a wrapping folder put the files straight in the root
+    if (-not $unzippedDir -and (Test-Path -Path (Join-Path $tempDir "ApplicationInformation.txt"))) {
+        $unzippedDir = Get-Item -Path $tempDir
+    }
 
     $unzippedDir ??= ($candidateDirs | Select-Object -First 1)
     if (-not $unzippedDir) {
@@ -1414,13 +1458,7 @@ try {
             "maxRunTimeInMinutes"   = 60
             "deviceRestartBehavior" = "basedOnReturnCode"
         }
-        "returnCodes" = @(
-            [ordered]@{ "returnCode" = 0;    "type" = "success" }
-            [ordered]@{ "returnCode" = 1707; "type" = "success" }
-            [ordered]@{ "returnCode" = 3010; "type" = "softReboot" }
-            [ordered]@{ "returnCode" = 1641; "type" = "softReboot" }
-            [ordered]@{ "returnCode" = 1618; "type" = "retry" }
-        )
+        "returnCodes" = $script:Win32AppReturnCodes
         "categories"  = @()
         "assignments" = @()
     }
@@ -1456,7 +1494,8 @@ else {
 
         if (-not (Get-Module -ListAvailable @moduleSplat)) {
             Write-Host "Installing IntuneWin32App module$($IntuneWin32AppVersion ? " $IntuneWin32AppVersion" : '')..."
-            Install-Module @moduleSplat -Scope CurrentUser -Force
+            # -Repository PSGallery so a higher-priority registered source cannot supply the module
+            Install-Module @moduleSplat -Repository PSGallery -Scope CurrentUser -Force
         }
         Import-Module @moduleSplat
 
@@ -1510,11 +1549,14 @@ else {
             -DetectionRule        (New-IntuneDetectionRuleObject -ParsedRule $parsed) `
             -RequirementRule      $requirementRule `
             -Icon                 (New-IntuneWin32AppIcon -FilePath $iconPath) `
-            -Verbose
+            -Verbose:(-not $Quiet)
 
         # The module emits several pipeline objects, including status strings;
         # pick the one carrying the app id
-        $appObject = @($win32App) | Where-Object { $_ -isnot [string] -and $null -ne $_.id } | Select-Object -First 1
+        # PSObject.Properties rather than $_.id: StrictMode throws PropertyNotFoundException
+        # on an object without the property, which would surface as an upload failure even
+        # though the app already exists - and a rerun would then create a duplicate.
+        $appObject = @($win32App) | Where-Object { $_ -isnot [string] -and $_.PSObject.Properties["id"] } | Select-Object -First 1
         $appId     = ${appObject}?.id
 
         if (-not $appId) {
@@ -1527,13 +1569,7 @@ else {
             # Replace the full return code set so 1641 becomes softReboot instead of hardReboot
             $patchBody = @{
                 "@odata.type" = "#microsoft.graph.win32LobApp"
-                returnCodes   = @(
-                    @{ returnCode = 0;    type = "success" }
-                    @{ returnCode = 1707; type = "success" }
-                    @{ returnCode = 3010; type = "softReboot" }
-                    @{ returnCode = 1641; type = "softReboot" }
-                    @{ returnCode = 1618; type = "retry" }
-                )
+                returnCodes   = $script:Win32AppReturnCodes
             } | ConvertTo-Json -Depth 5
 
             # Separate try/catch: the app already exists in Intune at this point, so a failed
