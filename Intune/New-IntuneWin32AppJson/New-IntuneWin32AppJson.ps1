@@ -20,8 +20,12 @@
 
     If the PNG icon is missing or unreadable a blank 1x1 pixel PNG is used instead.
 
-    Credentials can be supplied as parameters or via environment variables
-    (INTUNE_TENANT_ID, INTUNE_CLIENT_ID, INTUNE_CLIENT_SECRET). Nothing in the script is
+    Authentication is app-only, using either a certificate or a client secret. A
+    certificate is preferred and takes precedence when both are available.
+
+    Credentials can be supplied as parameters, via environment variables
+    (INTUNE_TENANT_ID, INTUNE_CLIENT_ID, INTUNE_CLIENT_SECRET, INTUNE_CERT_THUMBPRINT,
+    INTUNE_CERT_PATH, INTUNE_CERT_PASSWORD) or per customer through -CustomerConfigPath. Nothing in the script is
     tied to a specific organisation: the app owner comes from -Owner or INTUNE_APP_OWNER.
 
     NOTE: requires PowerShell 7.4+. Uses ternary operators, null-coalescing and
@@ -38,6 +42,19 @@
 
 .PARAMETER ClientSecret
     App registration client secret. Falls back to $env:INTUNE_CLIENT_SECRET.
+    Ignored when a certificate is supplied.
+
+.PARAMETER CertificateThumbprint
+    Thumbprint of a certificate in the CurrentUser store - the login Keychain on macOS,
+    the certificate store on Windows. Preferred over a client secret: the private key
+    stays in the OS keystore. Falls back to $env:INTUNE_CERT_THUMBPRINT.
+
+.PARAMETER CertificatePath
+    Path to a PFX file, for environments without a usable certificate store such as a
+    Linux-based Azure Function. Falls back to $env:INTUNE_CERT_PATH.
+
+.PARAMETER CertificatePassword
+    Password for the PFX file. Falls back to $env:INTUNE_CERT_PASSWORD.
 
 .PARAMETER DescriptionsPath
     Location of IntuneAppDescriptions.json. Accepts an http(s) URL or a local file
@@ -148,6 +165,10 @@
     .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip"
 
 .EXAMPLE
+    # Certificate from the login Keychain / certificate store instead of a secret
+    .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -CertificateThumbprint "A1B2C3..."
+
+.EXAMPLE
     # Pick a customer from the local credential file, prompting for which one
     .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -CustomerConfigPath ~/.config/endpointmanager/customers.json
 
@@ -176,9 +197,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        2.6.0
+    Version:        2.7.0
     Creation Date:  2026-05-07
-    Last Updated:   2026-08-24
+    Last Updated:   2026-08-25
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -187,6 +208,15 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        2.7.0 - 2026-08-25
+            Added certificate authentication as an alternative to the client secret, via
+            -CertificateThumbprint (CurrentUser store, which is the login Keychain on
+            macOS) or -CertificatePath for a PFX. Customers in the credential file can
+            specify certificateThumbprint or certificatePath instead of a secret, and a
+            certificate takes precedence so a leftover secret cannot shadow it. Both
+            sources produce an X509Certificate2 for Connect-MSIntuneGraph -ClientCert,
+            which is also what a later Key Vault source would produce.
 
         2.6.0 - 2026-08-24
             Fixes from an external code review of a colleague's fork. The UTF-16 BOM is
@@ -294,6 +324,19 @@ param (
 
     [Parameter()]
     [string]$ClientSecret = $env:INTUNE_CLIENT_SECRET,
+
+    # Certificate authentication, preferred over a client secret. Thumbprint looks the
+    # certificate up in the current user's store - the login Keychain on macOS, the
+    # certificate store on Windows. Use the path form where no store exists, such as a
+    # Linux-based Azure Function.
+    [Parameter()]
+    [string]$CertificateThumbprint = $env:INTUNE_CERT_THUMBPRINT,
+
+    [Parameter()]
+    [string]$CertificatePath = $env:INTUNE_CERT_PATH,
+
+    [Parameter()]
+    [string]$CertificatePassword = $env:INTUNE_CERT_PASSWORD,
 
     [Parameter()]
     [string]$DescriptionsPath = ($env:INTUNE_DESCRIPTIONS_PATH ??
@@ -473,6 +516,22 @@ if ($CustomerConfigPath) {
         }
     }
 
+    # Certificate takes precedence over a secret when the customer defines one
+    $customerThumbprint = $customer.ContainsKey("certificateThumbprint") ? [string]$customer["certificateThumbprint"] : ""
+    $customerCertPath   = $customer.ContainsKey("certificatePath")       ? [string]$customer["certificatePath"]       : ""
+
+    if ($customerThumbprint -or $customerCertPath) {
+        # Explicit parameters still win, as everywhere else
+        if (-not $PSBoundParameters.ContainsKey("CertificateThumbprint")) { $CertificateThumbprint = $customerThumbprint }
+        if (-not $PSBoundParameters.ContainsKey("CertificatePath"))       { $CertificatePath       = $customerCertPath }
+        if (-not $PSBoundParameters.ContainsKey("CertificatePassword")) {
+            $CertificatePassword = $customer.ContainsKey("certificatePassword") ? [string]$customer["certificatePassword"] : ""
+        }
+        # Make sure a secret left in the environment cannot shadow the certificate
+        $ClientSecret = ""
+    }
+    else {
+
     # Secret comes either inline or from a SecretManagement vault
     $usesVault = ($customer.ContainsKey("secretVault") -and $customer["secretVault"]) -or
                  ($customer.ContainsKey("secretName")  -and $customer["secretName"])
@@ -495,8 +554,10 @@ if ($CustomerConfigPath) {
         $ClientSecret = [string]$customer["clientSecret"]
     }
     else {
-        throw "Customer '$($customer["name"])' has no clientSecret and no secretVault/secretName."
+        throw "Customer '$($customer["name"])' has no certificate, no clientSecret and no secretVault/secretName."
     }
+
+    }   # end of the secret branch
 
     $TenantID = [string]$customer["tenantId"]
     $ClientID = [string]$customer["clientId"]
@@ -763,6 +824,90 @@ function Read-TextFileSmart {
         }
         return $best
     }
+}
+
+function Get-ClientCertificate {
+    <#
+    .SYNOPSIS
+        Resolves the client certificate used for app-only authentication.
+
+    .DESCRIPTION
+        Two sources are supported, in this order:
+
+          Thumbprint : looked up in the CurrentUser\My store. That store is the login
+                       Keychain on macOS and the certificate store on Windows, so the key
+                       never leaves the OS keystore. Preferred for interactive use.
+          Path       : a PFX file, for environments with no usable store such as a
+                       Linux-based Azure Function or a container.
+
+        Returns $null when neither is supplied, which tells the caller to fall back to
+        client secret authentication.
+
+    .NOTES
+        Connect-MSIntuneGraph takes an X509Certificate2 object rather than a thumbprint,
+        so both sources converge on the same object. That is also what makes a later move
+        to Key Vault a one-line addition: fetch the PFX bytes and construct the same object.
+    #>
+    [OutputType([System.Security.Cryptography.X509Certificates.X509Certificate2])]
+    param (
+        [Parameter()][AllowEmptyString()][string]$Thumbprint,
+        [Parameter()][AllowEmptyString()][string]$Path,
+        [Parameter()][AllowEmptyString()][string]$Password
+    )
+
+    if ($Thumbprint -and $Path) {
+        throw "Specify either a certificate thumbprint or a certificate path, not both."
+    }
+
+    if ($Thumbprint) {
+        # Strip spaces and any invisible characters that survive a copy from the portal
+        $normalized = ($Thumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+
+        $store = [System.Security.Cryptography.X509Certificates.X509Store]::new("My", "CurrentUser")
+        try {
+            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+            $found = $store.Certificates | Where-Object { $_.Thumbprint -eq $normalized }
+        }
+        finally {
+            $store.Close()
+        }
+
+        $certificate = @($found) | Select-Object -First 1
+        if (-not $certificate) {
+            throw "No certificate with thumbprint '$normalized' in the CurrentUser store. Import the PFX first, or use -CertificatePath."
+        }
+        if (-not $certificate.HasPrivateKey) {
+            throw "Certificate '$normalized' has no private key. Import the PFX, not just the .cer public part."
+        }
+        return $certificate
+    }
+
+    if ($Path) {
+        if (-not (Test-Path -Path $Path -PathType Leaf)) {
+            throw "Certificate file '$Path' does not exist or is not a file."
+        }
+        $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -Path $Path).Path)
+        $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]
+
+        # EphemeralKeySet keeps the private key out of any on-disk keystore, but it is not
+        # supported on macOS, where it throws. Fall back rather than fail there.
+        try {
+            $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $bytes, $Password, $flags::EphemeralKeySet)
+        }
+        catch [System.PlatformNotSupportedException] {
+            Write-Verbose "EphemeralKeySet unsupported on this platform - loading with the default key set."
+            $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $bytes, $Password, $flags::DefaultKeySet)
+        }
+
+        if (-not $certificate.HasPrivateKey) {
+            throw "Certificate '$Path' has no private key. Export the PFX with the private key included."
+        }
+        return $certificate
+    }
+
+    return $null
 }
 
 function Get-Win32AppInventory {
@@ -1199,9 +1344,12 @@ function New-IntuneDetectionRuleObject {
 
 # Fail before doing any work if credentials are missing
 $missingCredentials = @()
-if (-not $TenantID)     { $missingCredentials += "TenantID (or env:INTUNE_TENANT_ID)" }
-if (-not $ClientID)     { $missingCredentials += "ClientID (or env:INTUNE_CLIENT_ID)" }
-if (-not $ClientSecret) { $missingCredentials += "ClientSecret (or env:INTUNE_CLIENT_SECRET)" }
+if (-not $TenantID) { $missingCredentials += "TenantID (or env:INTUNE_TENANT_ID)" }
+if (-not $ClientID) { $missingCredentials += "ClientID (or env:INTUNE_CLIENT_ID)" }
+# Either a certificate or a secret, not necessarily both
+if (-not $ClientSecret -and -not $CertificateThumbprint -and -not $CertificatePath) {
+    $missingCredentials += "ClientSecret, CertificateThumbprint or CertificatePath"
+}
 
 if ($missingCredentials.Count -gt 0) {
     throw "Missing required authentication credentials: $($missingCredentials -join ', ')"
@@ -1499,8 +1647,18 @@ else {
         }
         Import-Module @moduleSplat
 
-        Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
-        Write-Host "Authenticated to Microsoft Graph"
+        $clientCertificate = Get-ClientCertificate -Thumbprint $CertificateThumbprint `
+                                                   -Path       $CertificatePath `
+                                                   -Password   $CertificatePassword
+
+        if ($clientCertificate) {
+            Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientCert $clientCertificate | Out-Null
+            Write-Host "Authenticated to Microsoft Graph using certificate $($clientCertificate.Thumbprint)"
+        }
+        else {
+            Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
+            Write-Host "Authenticated to Microsoft Graph using client secret"
+        }
     }
     catch {
         throw "Authentication failed: $($PSItem.Exception.Message)"

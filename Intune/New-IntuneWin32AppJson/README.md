@@ -33,7 +33,8 @@ versioning and commit. It is installed automatically on first run if missing. Fo
 production use, pin it with `-IntuneWin32AppVersion` so a new release cannot change
 behaviour unnoticed.
 
-**An Entra ID app registration** with exactly one Graph permission:
+**An Entra ID app registration** authenticating with either a certificate (preferred) or a
+client secret, and exactly one Graph permission:
 
 | Permission | Type | Consent |
 |---|---|---|
@@ -111,10 +112,13 @@ so it is immediately clear what needs fixing in the text file.
 |---|---|---|
 | `INTUNE_TENANT_ID` | Yes | Tenant ID |
 | `INTUNE_CLIENT_ID` | Yes | App registration client ID |
-| `INTUNE_CLIENT_SECRET` | Yes | App registration secret |
+| `INTUNE_CLIENT_SECRET` | Yes* | App registration secret. \*Not needed when a certificate is used |
 | `INTUNE_ASSIGNMENT_GROUP_ID` | No | Entra group object ID. Without it, assignment is skipped entirely |
 | `INTUNE_DESCRIPTIONS_PATH` | No | Path or URL to `IntuneAppDescriptions.json`. Defaults to the copy in this repo |
 | `INTUNE_APP_OWNER` | No | Owner recorded on the app in Intune. Left empty if unset |
+| `INTUNE_CERT_THUMBPRINT` | No | Certificate in the CurrentUser store, used instead of the secret |
+| `INTUNE_CERT_PATH` | No | PFX file, for environments without a certificate store |
+| `INTUNE_CERT_PASSWORD` | No | Password for the PFX file |
 
 ```powershell
 $env:INTUNE_TENANT_ID           = "..."
@@ -150,6 +154,8 @@ entirely. See [Working across several customers](#working-across-several-custome
 | `-SupersedenceType` | `Update` | `Update` installs over the old version, `Replace` uninstalls it first |
 | `-CustomerConfigPath` | — | Local JSON file with credentials for several customers |
 | `-CustomerName` | — | Selects a customer without prompting |
+| `-CertificateThumbprint` | env var | Certificate in the CurrentUser store |
+| `-CertificatePath` `-CertificatePassword` | env vars | PFX file instead of a store lookup |
 | `-TenantID` `-ClientID` `-ClientSecret` | env vars | Avoid on the command line |
 | `-Quiet` | off | Suppresses the per-chunk upload progress |
 | `-WhatIf` | — | Dry run |
@@ -233,6 +239,31 @@ are still recognised.
 
 `Update` installs over the earlier version; `Replace` uninstalls it first.
 
+## Certificate authentication
+
+A certificate is preferred over a client secret: the private key stays in the OS keystore
+and never sits in a file or an environment variable. Upload the public `.cer` under
+**Certificates & secrets → Certificates** on the app registration, import the PFX locally,
+and point the script at its thumbprint.
+
+```powershell
+./New-IntuneWin32AppJson.ps1 -AppPath "./App.zip" -CertificateThumbprint "A1B2C3..."
+```
+
+The thumbprint is looked up in the CurrentUser store, which is the login Keychain on macOS
+and the certificate store on Windows. Where no usable store exists — a Linux-based Azure
+Function, or a container — use a PFX file instead:
+
+```powershell
+./New-IntuneWin32AppJson.ps1 -AppPath "./App.zip" -CertificatePath ./cert.pfx -CertificatePassword $pw
+```
+
+Both forms produce the same certificate object internally, so moving between them, or later
+to a certificate fetched from Key Vault, changes only where the bytes come from.
+
+A certificate takes precedence when both a certificate and a secret are available, so a
+secret left in the environment cannot silently shadow it.
+
 ## Working across several customers
 
 Instead of setting environment variables per tenant, point the script at a local JSON file
@@ -253,7 +284,7 @@ a native picker on macOS, a numbered menu elsewhere.
             "name": "Contoso",
             "tenantId": "...",
             "clientId": "...",
-            "clientSecret": "...",
+            "certificateThumbprint": "A1B2C3...",
             "assignmentGroupId": "...",
             "appOwner": "Contoso IT"
         }
@@ -261,11 +292,16 @@ a native picker on macOS, a numbered menu elsewhere.
 }
 ```
 
-`name`, `tenantId` and `clientId` are required. The secret is either `clientSecret` inline
-or, preferably, `secretVault` plus `secretName` resolved through
-`Microsoft.PowerShell.SecretManagement` — an inline secret is readable by any process
-running as you, whatever directory it sits in. `assignmentGroupId`, `appOwner` and
-`descriptionsPath` are optional.
+`name`, `tenantId` and `clientId` are required. For credentials, in order of preference:
+
+| Keys | Notes |
+|---|---|
+| `certificateThumbprint` | Private key stays in the OS keystore. Best option |
+| `certificatePath` + `certificatePassword` | PFX file, for hosts without a store |
+| `secretVault` + `secretName` | Resolved through `Microsoft.PowerShell.SecretManagement` |
+| `clientSecret` | Inline. Readable by any process running as you, whatever directory it sits in |
+
+`assignmentGroupId`, `appOwner` and `descriptionsPath` are optional.
 
 Two behaviours worth knowing:
 
@@ -338,7 +374,8 @@ read it before running it against a tenant you care about, and use `-WhatIf` fir
 - **Patch Tuesday is calculated in the server's time zone** but interpreted in the device's,
   which can differ by a day for runs late in the evening under UTC.
 - **One detection rule per app.** Multi-rule detection is not supported.
-- **The customer file is read in clear text** unless you use a secret vault. Treat it as a
+- **The customer file is read in clear text** unless you use a certificate or a secret
+  vault. Treat it as a
   credential store: local only, `chmod 600`, never committed.
 - **Supersedence relies on the naming convention.** Apps named outside `<base> <version>`
   are not found, and a version that does not parse as a version number is skipped rather
