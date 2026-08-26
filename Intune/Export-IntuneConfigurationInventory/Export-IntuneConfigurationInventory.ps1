@@ -123,6 +123,14 @@
             on the command line no longer works; use the environment variable, or
             -CertificatePassword (Read-Host -AsSecureString).
 
+            An explicit -CertificatePath or -CertificateThumbprint on the command line now
+            clears the other source when the selected customer's file defines it, instead of
+            leaving both set and tripping the "not both" guard. Previously the only way to
+            override a customer's certificate source from the command line was to also pass
+            the customer's own source explicitly - this is the one change in this release
+            that makes a previously-rejected combination valid rather than just changing an
+            internal detail.
+
             usedLicenseCount and releaseDateTime are now excluded from the configuration and
             therefore from the hash: both were observed to drift on their own on unchanged
             apps in production. NOTE: excluding them changes the hash of every VPP app that
@@ -280,6 +288,9 @@
 #Requires -Version 7.4
 
 [CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidUsingConvertToSecureStringWithPlainText', '',
+    Justification = 'Plaintext originates outside the script; conversion is the containment point.')]
 param(
     [string]$TenantId = $env:INTUNE_TENANT_ID,
 

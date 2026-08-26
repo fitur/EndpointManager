@@ -112,11 +112,30 @@ a secret left in the environment — nothing has to be unset by hand.
 
 **Create and upload the certificate once:**
 
+On Windows:
+
 ```powershell
 $cert = New-SelfSignedCertificate -Subject "CN=Intune Inventory" -CertStoreLocation "Cert:\CurrentUser\My" `
     -KeyExportPolicy Exportable -KeySpec Signature -KeyLength 2048 -NotAfter (Get-Date).AddYears(2)
 Export-Certificate -Cert $cert -FilePath intune-inventory.cer
 ```
+
+`New-SelfSignedCertificate` is Windows-only. On macOS or Linux, `openssl` produces the same
+two artefacts — a `.cer` to upload and a `.pfx` for `-CertificatePath`:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout intune-inventory.key -out intune-inventory.cer \
+    -days 730 -nodes -subj "/CN=Intune Inventory" -outform DER
+
+openssl pkcs12 -export -out intune-inventory.pfx \
+    -inkey intune-inventory.key -in intune-inventory.cer -certfile intune-inventory.cer
+```
+
+The `.cer` from either command is what gets uploaded to Entra ID; the `.pfx` is what
+`-CertificatePath` or `INTUNE_CERT_PATH` points at. `-nodes` above skips a PFX password on the
+private key file itself — add one and keep it if the `.key` file will sit anywhere less
+trusted than a throwaway build step, and note that `openssl pkcs12 -export` will then prompt
+for the PFX's own password interactively unless `-passout` is supplied.
 
 Upload the `.cer` (public part only) to the app registration's **Certificates & secrets**
 blade in Entra ID. The private key never leaves wherever it was generated.
@@ -168,9 +187,15 @@ chmod 600 ~/.intune/customers.json
 ```
 
 Secrets are either inline (`clientSecret`) or resolved through
-`Microsoft.PowerShell.SecretManagement` (`secretVault` + `secretName`). The confirmation line
-prints the customer name and tenant ID only, never the secret, and the script warns if the
-file is readable beyond its owner.
+`Microsoft.PowerShell.SecretManagement` (`secretVault` + `secretName`). A certificate is the
+third option, same as for a single tenant: `certificateThumbprint` for the store, or
+`certificatePath` (+ optional `certificatePassword`) for a PFX. `customers.sample.json` has
+one example of each. Defining a certificate for a customer wins over `clientSecret` or
+`secretVault`/`secretName` for that customer, and the script clears `$ClientSecret` when it
+does, so a secret left over from the environment or a previously selected customer cannot
+shadow it. The confirmation line prints the customer name and tenant ID only, never the
+secret or the certificate password, and the script warns if the file is readable beyond its
+owner.
 
 **An optional value the selected customer does not define is cleared, not inherited.** That
 is the rule the whole design hangs on. `tenantName` names the output folder, so a customer
