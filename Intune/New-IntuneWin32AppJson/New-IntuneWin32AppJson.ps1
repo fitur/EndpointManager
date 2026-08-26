@@ -197,7 +197,7 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        2.7.0
+    Version:        2.7.1
     Creation Date:  2026-05-07
     Last Updated:   2026-08-25
     Author:         Peter Olausson
@@ -208,6 +208,16 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        2.7.1 - 2026-08-25
+            Assignment and supersedence failures are no longer reported as successes. Both
+            module functions report Graph errors and validation failures with Write-Warning
+            and then return normally, so the surrounding try/catch never fired - the script
+            printed "Assigned to group ..." for an assignment Intune had rejected. Both
+            calls now capture warnings and report accordingly. Scheduling combined with
+            -AssignmentIntent available is also rejected up front: Intune does not accept
+            deadline or local time settings on available assignments, and the module always
+            includes useLocalTime when any time is supplied.
 
         2.7.0 - 2026-08-25
             Added certificate authentication as an alternative to the client secret, via
@@ -1369,6 +1379,14 @@ if ($AssignmentGroupId) {
         throw "AssignmentGroupId '$AssignmentGroupId' is not a valid GUID. Use the Entra group's object ID, not its display name."
     }
 
+    # Intune rejects installTimeSettings on an available assignment: "use local time and
+    # deadline time settings are not valid for available intents". The module always includes
+    # useLocalTime whenever any time is supplied, so no scheduling at all works with this
+    # intent. Fail here rather than let the upload succeed and the assignment quietly not.
+    if ($AssignmentIntent -eq "available" -and ($PatchTuesday -or $AvailableTime -or $DeadlineTime)) {
+        throw "Scheduling is not supported for -AssignmentIntent available; Intune rejects deadline and local time settings on available assignments. Use -AssignmentIntent required for a scheduled rollout, or drop -PatchTuesday/-AvailableTime/-DeadlineTime to publish it to Company Portal immediately."
+    }
+
     # -PatchTuesday derives both times, so it cannot be combined with explicit ones
     if ($PatchTuesday) {
         if ($AvailableTime -or $DeadlineTime) {
@@ -1776,8 +1794,17 @@ if ($AssignmentGroupId -and $appId) {
         if ($AvailableTime) { $assignSplat["AvailableTime"] = $AvailableTime }
         if ($DeadlineTime)  { $assignSplat["DeadlineTime"]  = $DeadlineTime }
 
-        Add-IntuneWin32AppAssignmentGroup @assignSplat | Out-Null
-        $assignedGroupId = $AssignmentGroupId
+        # The module reports both validation failures and Graph errors with Write-Warning and
+        # then returns normally, so a try/catch alone would report success on a failed
+        # assignment. Capture the warnings and treat any of them as a failure.
+        Add-IntuneWin32AppAssignmentGroup @assignSplat -WarningVariable assignmentWarnings | Out-Null
+
+        if ($assignmentWarnings) {
+            Write-Warning "App $appId was uploaded, but the group assignment did not complete (see the warning above)."
+            Write-Warning "Assign the app to $AssignmentGroupId manually in the Intune portal."
+        }
+        else {
+            $assignedGroupId = $AssignmentGroupId
 
         $availableText = $AvailableTime ? $AvailableTime.ToString("yyyy-MM-dd HH:mm") : "immediately"
         $deadlineText  = $DeadlineTime  ? $DeadlineTime.ToString("yyyy-MM-dd HH:mm")  : "none"
@@ -1785,8 +1812,9 @@ if ($AssignmentGroupId -and $appId) {
 
         $scheduleSource = $PatchTuesday ? " [-PatchTuesday]" : ""
 
-        Write-Host "Assigned to group $AssignmentGroupId as '$AssignmentIntent'." -ForegroundColor Green
-        Write-Host "  Available: $availableText   Deadline: $deadlineText   ($timeBaseText)$scheduleSource"
+            Write-Host "Assigned to group $AssignmentGroupId as '$AssignmentIntent'." -ForegroundColor Green
+            Write-Host "  Available: $availableText   Deadline: $deadlineText   ($timeBaseText)$scheduleSource"
+        }
     }
     catch {
         # The app is uploaded and patched by now, so this is not a total failure. Throwing here
@@ -1828,11 +1856,18 @@ if ($Supersede -and $appId) {
             $supersedence = foreach ($candidate in $candidates) {
                 New-IntuneWin32AppSupersedence -ID $candidate.Id -SupersedenceType $SupersedenceType
             }
-            Add-IntuneWin32AppSupersedence -ID $appId -Supersedence $supersedence | Out-Null
+            # Warns rather than throws on failure, same as the assignment function
+            Add-IntuneWin32AppSupersedence -ID $appId -Supersedence $supersedence -WarningVariable supersedenceWarnings | Out-Null
 
-            $supersededApps = $candidates
-            Write-Host "Superseded $($candidates.Count) earlier version(s) using '$SupersedenceType':" -ForegroundColor Green
-            foreach ($candidate in $candidates) { Write-Host "  $($candidate.DisplayName)" }
+            if ($supersedenceWarnings) {
+                Write-Warning "App $appId was uploaded, but supersedence was not configured (see the warning above)."
+                Write-Warning "Set supersedence manually in the Intune portal."
+            }
+            else {
+                $supersededApps = $candidates
+                Write-Host "Superseded $($candidates.Count) earlier version(s) using '$SupersedenceType':" -ForegroundColor Green
+                foreach ($candidate in $candidates) { Write-Host "  $($candidate.DisplayName)" }
+            }
         }
     }
     catch {

@@ -198,7 +198,10 @@ generated JSON can be inspected. Worth running first on any new package.
 | `-PatchTuesday` | Available 00:00, deadline 12:00 on the next second Tuesday |
 | `-AvailableTime` + `-DeadlineTime` | Your own window |
 
-`-PatchTuesday` cannot be combined with explicit times. Both times are always set together,
+`-PatchTuesday` cannot be combined with explicit times, and no scheduling works with
+`-AssignmentIntent available` — Intune rejects deadline and local time settings on available
+assignments, so the script stops before uploading rather than leaving the app published
+without its assignment. Both times are always set together,
 because the IntuneWin32App module silently skips an assignment when a future availability
 time has no accompanying deadline — the script catches that combination and fails loudly
 instead.
