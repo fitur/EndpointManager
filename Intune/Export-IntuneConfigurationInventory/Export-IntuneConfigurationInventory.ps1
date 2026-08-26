@@ -85,12 +85,12 @@
 
     Certificate authentication (-CertificateThumbprint or -CertificatePath) is preferred over
     a client secret and takes precedence whenever a certificate is resolved. On macOS, the
-    CurrentUser\My store used for thumbprint lookup is Keychain-backed: signing with a
-    certificate whose private key ACL does not list pwsh can trigger an interactive Keychain
-    password prompt the first time it is used. That prompt is easy to miss in an interactive
-    session but hangs a scheduled run indefinitely, since there is nothing on the other end to
-    answer it. Use -CertificatePath for unattended execution and Azure Functions; reserve
-    thumbprint lookup for interactive use where a prompt, if it appears, can actually be seen.
+    CurrentUser\My store used for thumbprint lookup is Keychain-backed, and signing triggers a
+    Keychain access dialog from Security.framework - not suppressed by pwsh -NonInteractive,
+    reproduced on a production machine. Thumbprint lookup is therefore for interactive use
+    only; -CertificatePath is what unattended runs and Azure Functions need, since neither has
+    a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
+    not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
     Version:        1.8.0
     Creation Date:  2026-07-30
@@ -118,6 +118,17 @@
             The resolved certificate object is intentionally never disposed: the private key
             is needed to re-sign a new assertion for every token renewal over the life of the
             run, not just the first one.
+
+            CertificatePassword is now a SecureString. BREAKING: -CertificatePassword 'text'
+            on the command line no longer works; use the environment variable, or
+            -CertificatePassword (Read-Host -AsSecureString).
+
+            usedLicenseCount and releaseDateTime are now excluded from the configuration and
+            therefore from the hash: both were observed to drift on their own on unchanged
+            apps in production. NOTE: excluding them changes the hash of every VPP app that
+            has either field, so the next run after upgrading reports a one-time wave of
+            "modified" on those apps. The run after that is the one that shows whether the
+            noise is actually gone.
 
         1.7.0 - 2026-08-20
             Added applications as a nineteenth area: deviceAppManagement/mobileApps with
@@ -258,21 +269,17 @@
 
 .EXAMPLE
     # PFX on disk - the form for Azure Functions and other environments with no usable
-    # certificate store.
-    .\Export-IntuneConfigurationInventory.ps1 -CertificatePath '/home/site/wwwroot/intune.pfx' `
-        -CertificatePassword $env:INTUNE_CERT_PASSWORD -CompressOutput
+    # certificate store. CertificatePassword is a SecureString, so it is never passed as a
+    # plain string on the command line: leave it to the INTUNE_CERT_PASSWORD fallback, or
+    # build one with (Read-Host -AsSecureString) if the parameter is needed explicitly.
+    $env:INTUNE_CERT_PATH     = '/home/site/wwwroot/intune.pfx'
+    $env:INTUNE_CERT_PASSWORD = 'your-pfx-password'
+    .\Export-IntuneConfigurationInventory.ps1 -CompressOutput
 #>
 
 #Requires -Version 7.4
 
 [CmdletBinding()]
-[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'CertificatePassword',
-    Justification = 'Plain string by design: it falls back to an environment variable ' +
-        '(INTUNE_CERT_PASSWORD) like every other credential parameter here, and must stay ' +
-        'symmetric with the identical parameter in New-IntuneWin32AppJson.ps1. A SecureString ' +
-        'would break the env-var fallback (there is no safe way to populate one from an ' +
-        'environment variable without briefly holding it in plain text anyway) and diverge ' +
-        'the two scripts'' certificate handling for no real gain.')]
 param(
     [string]$TenantId = $env:INTUNE_TENANT_ID,
 
@@ -288,7 +295,15 @@ param(
 
     [string]$CertificatePath = $env:INTUNE_CERT_PATH,
 
-    [string]$CertificatePassword = $env:INTUNE_CERT_PASSWORD,
+    # SecureString rather than string: X509Certificate2 has a SecureString overload, so the
+    # plaintext never has to be materialised, and PSScriptAnalyzer stops flagging the
+    # parameter. The environment variable is still plaintext - it is converted here rather
+    # than carried any further.
+    [securestring]$CertificatePassword = $(
+        if (-not [string]::IsNullOrEmpty($env:INTUNE_CERT_PASSWORD)) {
+            ConvertTo-SecureString -String $env:INTUNE_CERT_PASSWORD -AsPlainText -Force
+        }
+    ),
 
     # Root under which the per-tenant folder is created. Defaults to the script folder.
     [string]$OutputDirectory,
@@ -446,8 +461,28 @@ if ($CustomerConfigPath) {
     if ($customerThumbprint -or $customerCertPath) {
         if (-not $PSBoundParameters.ContainsKey("CertificateThumbprint")) { $CertificateThumbprint = $customerThumbprint }
         if (-not $PSBoundParameters.ContainsKey("CertificatePath"))       { $CertificatePath       = $customerCertPath }
+
+        # Rule 3 of the credential pattern taken to its conclusion: an explicit parameter
+        # wins, which means it also has to clear the competing source. Without this, a
+        # customer thumbprint plus a command-line -CertificatePath trips the "not both"
+        # guard in preflight.
+        if ($PSBoundParameters.ContainsKey("CertificatePath")) {
+            $CertificateThumbprint = ""
+        }
+        elseif ($PSBoundParameters.ContainsKey("CertificateThumbprint")) {
+            $CertificatePath = ""
+        }
+
         if (-not $PSBoundParameters.ContainsKey("CertificatePassword")) {
-            $CertificatePassword = $customer.ContainsKey("certificatePassword") ? [string]$customer["certificatePassword"] : ""
+            $customerCertPassword = $customer.ContainsKey("certificatePassword") ? [string]$customer["certificatePassword"] : ""
+            # No implicit String -> SecureString conversion exists in PowerShell, so convert
+            # explicitly. An omitted key has to become $null, not an empty SecureString.
+            if ([string]::IsNullOrEmpty($customerCertPassword)) {
+                $CertificatePassword = $null
+            }
+            else {
+                $CertificatePassword = ConvertTo-SecureString -String $customerCertPassword -AsPlainText -Force
+            }
         }
         # Make sure a secret left in the environment cannot shadow the certificate
         $ClientSecret = $null
@@ -828,7 +863,7 @@ function Get-ClientCertificate {
     param(
         [Parameter()][AllowEmptyString()][string]$Thumbprint,
         [Parameter()][AllowEmptyString()][string]$Path,
-        [Parameter()][AllowEmptyString()][string]$Password
+        [Parameter()][securestring]$Password
     )
 
     if ($Thumbprint -and $Path) {
@@ -1524,9 +1559,16 @@ foreach ($definition in $policyDefinitions) {
         # Build the configuration payload: the object itself minus noise, plus fetched detail.
         # largeIcon is a base64 PNG on Win32 apps - tens of kilobytes of payload that would
         # also change the hash if Intune ever re-encodes it, without anything having changed.
+        # usedLicenseCount is VPP licence consumption: it changes whenever a user gains or
+        # loses a licence, and reported six apps as modified in a production run that nobody
+        # had touched. releaseDateTime was observed reset to DateTime.MinValue on eleven apps
+        # by a Microsoft-side metadata sync, all with an unchanged lastModifiedDateTime - same
+        # class of problem as installSummary: a field that drifts on its own turns every run
+        # into a diff. informationUrl and publisher stay in - they are genuine configuration.
         $configuration = [ordered]@{}
         foreach ($property in $item.PSObject.Properties) {
-            if ($property.Name -in @('assignments', 'largeIcon', '@odata.context', 'assignments@odata.context')) { continue }
+            if ($property.Name -in @('assignments', 'largeIcon', '@odata.context', 'assignments@odata.context',
+                    'usedLicenseCount', 'releaseDateTime')) { continue }
             $configuration[$property.Name] = $property.Value
         }
 

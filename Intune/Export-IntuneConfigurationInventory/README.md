@@ -134,15 +134,25 @@ environment variable:**
 $env:INTUNE_CERT_THUMBPRINT = "0123456789ABCDEF0123456789ABCDEF01234567"
 .\Export-IntuneConfigurationInventory.ps1 -Verbose
 
-# Unattended, from a PFX
-.\Export-IntuneConfigurationInventory.ps1 -CertificatePath ./intune.pfx -CertificatePassword $env:INTUNE_CERT_PASSWORD
+# Unattended, from a PFX - CertificatePassword is a SecureString, so it comes from the
+# environment variable rather than being passed as a plain string on the command line
+$env:INTUNE_CERT_PATH     = "./intune.pfx"
+$env:INTUNE_CERT_PASSWORD = "..."
+.\Export-IntuneConfigurationInventory.ps1
 ```
 
-**macOS pitfall:** signing with a certificate whose private key ACL doesn't list `pwsh` can
-trigger an interactive Keychain password prompt on first use. Easy to miss when you're sitting
-at the terminal; fatal for a scheduled run, which hangs with nothing to answer the prompt.
-Use `-CertificatePath` for anything unattended, and reserve thumbprint lookup for interactive
-sessions where a prompt, if it appears, is actually visible.
+`-CertificatePassword` takes a `SecureString`, not a plain string — `-CertificatePassword "text"`
+does not work. Let the `INTUNE_CERT_PASSWORD` environment variable populate it, or build one
+explicitly with `-CertificatePassword (Read-Host -AsSecureString)`.
+
+**macOS:** signing with a certificate whose private key ACL doesn't list `pwsh` triggers a
+Keychain access dialog from Security.framework. That dialog is **not** suppressed by
+`pwsh -NonInteractive` — confirmed on a production machine, not a theoretical risk — so a
+scheduled run hangs with nothing to answer it. Use `-CertificatePath` for anything unattended
+or running in Azure Functions, which has no Keychain to prompt against in the first place;
+reserve thumbprint lookup for interactive sessions. And unlike a thumbprint, a PFX file *is*
+a credential — keep it out of synchronised folders (OneDrive, Dropbox) and out of version
+control, the same as you would a client secret.
 
 ### Several customers
 
