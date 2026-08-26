@@ -83,13 +83,41 @@
     Secrets: read from environment variables by default. Prefer SecretManagement or a
     certificate credential over a client secret for anything long-lived.
 
-    Version:        1.7.0
+    Certificate authentication (-CertificateThumbprint or -CertificatePath) is preferred over
+    a client secret and takes precedence whenever a certificate is resolved. On macOS, the
+    CurrentUser\My store used for thumbprint lookup is Keychain-backed: signing with a
+    certificate whose private key ACL does not list pwsh can trigger an interactive Keychain
+    password prompt the first time it is used. That prompt is easy to miss in an interactive
+    session but hangs a scheduled run indefinitely, since there is nothing on the other end to
+    answer it. Use -CertificatePath for unattended execution and Azure Functions; reserve
+    thumbprint lookup for interactive use where a prompt, if it appears, can actually be seen.
+
+    Version:        1.8.0
     Creation Date:  2026-07-30
-    Last Updated:   2026-08-20
+    Last Updated:   2026-08-26
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.8.0 - 2026-08-26
+            Added certificate authentication as an alternative to a client secret, via
+            -CertificateThumbprint (looked up in the CurrentUser store - the login Keychain
+            on macOS) or -CertificatePath for a PFX file, with fallback to
+            INTUNE_CERT_THUMBPRINT / INTUNE_CERT_PATH / INTUNE_CERT_PASSWORD. A certificate
+            wins over a secret whenever one is resolved, so a secret left in the environment
+            cannot silently shadow it.
+
+            Unlike New-IntuneWin32AppJson.ps1, which hands the certificate to
+            Connect-MSIntuneGraph and lets the module sign the token request, this script has
+            no module and talks to Graph over raw REST, so it builds the client_assertion JWT
+            itself (RS256, x5t = base64url of the certificate's SHA1 hash). Get-ClientCertificate
+            is deliberately identical to the copy in New-IntuneWin32AppJson.ps1 - never change
+            one without the other.
+
+            The resolved certificate object is intentionally never disposed: the private key
+            is needed to re-sign a new assertion for every token renewal over the life of the
+            run, not just the first one.
 
         1.7.0 - 2026-08-20
             Added applications as a nineteenth area: deviceAppManagement/mobileApps with
@@ -222,17 +250,45 @@
 .EXAMPLE
     # Permission check only - decodes the token, reports tenant, roles and affected areas.
     .\Export-IntuneConfigurationInventory.ps1 -TestPermissionOnly -Verbose
+
+.EXAMPLE
+    # Certificate from the CurrentUser store (login Keychain on macOS) - no secret involved.
+    $env:INTUNE_CERT_THUMBPRINT = '0123456789ABCDEF0123456789ABCDEF01234567'
+    .\Export-IntuneConfigurationInventory.ps1 -Verbose
+
+.EXAMPLE
+    # PFX on disk - the form for Azure Functions and other environments with no usable
+    # certificate store.
+    .\Export-IntuneConfigurationInventory.ps1 -CertificatePath '/home/site/wwwroot/intune.pfx' `
+        -CertificatePassword $env:INTUNE_CERT_PASSWORD -CompressOutput
 #>
 
 #Requires -Version 7.4
 
 [CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'CertificatePassword',
+    Justification = 'Plain string by design: it falls back to an environment variable ' +
+        '(INTUNE_CERT_PASSWORD) like every other credential parameter here, and must stay ' +
+        'symmetric with the identical parameter in New-IntuneWin32AppJson.ps1. A SecureString ' +
+        'would break the env-var fallback (there is no safe way to populate one from an ' +
+        'environment variable without briefly holding it in plain text anyway) and diverge ' +
+        'the two scripts'' certificate handling for no real gain.')]
 param(
     [string]$TenantId = $env:INTUNE_TENANT_ID,
 
     [string]$ClientId = $env:INTUNE_CLIENT_ID,
 
     [string]$ClientSecret = $env:INTUNE_CLIENT_SECRET,
+
+    # Certificate authentication, preferred over a client secret. Thumbprint looks the
+    # certificate up in the current user's store - the login Keychain on macOS, the
+    # certificate store on Windows - so the private key never leaves the OS keystore.
+    # Use the path form where no store exists, such as a Linux-based Azure Function.
+    [string]$CertificateThumbprint = $env:INTUNE_CERT_THUMBPRINT,
+
+    [string]$CertificatePath = $env:INTUNE_CERT_PATH,
+
+    [string]$CertificatePassword = $env:INTUNE_CERT_PASSWORD,
 
     # Root under which the per-tenant folder is created. Defaults to the script folder.
     [string]$OutputDirectory,
@@ -383,7 +439,20 @@ if ($CustomerConfigPath) {
     $usesVault = ($customer.ContainsKey("secretVault") -and $customer["secretVault"]) -or
                  ($customer.ContainsKey("secretName")  -and $customer["secretName"])
 
-    if ($usesVault) {
+    # Certificate takes precedence over a secret when the customer defines one
+    $customerThumbprint = $customer.ContainsKey("certificateThumbprint") ? [string]$customer["certificateThumbprint"] : ""
+    $customerCertPath   = $customer.ContainsKey("certificatePath")       ? [string]$customer["certificatePath"]       : ""
+
+    if ($customerThumbprint -or $customerCertPath) {
+        if (-not $PSBoundParameters.ContainsKey("CertificateThumbprint")) { $CertificateThumbprint = $customerThumbprint }
+        if (-not $PSBoundParameters.ContainsKey("CertificatePath"))       { $CertificatePath       = $customerCertPath }
+        if (-not $PSBoundParameters.ContainsKey("CertificatePassword")) {
+            $CertificatePassword = $customer.ContainsKey("certificatePassword") ? [string]$customer["certificatePassword"] : ""
+        }
+        # Make sure a secret left in the environment cannot shadow the certificate
+        $ClientSecret = $null
+    }
+    elseif ($usesVault) {
         if (-not (($customer.ContainsKey("secretVault") -and $customer["secretVault"]) -and
                   ($customer.ContainsKey("secretName")  -and $customer["secretName"]))) {
             throw "Customer '$($customer["name"])' must define both secretVault and secretName, or neither."
@@ -401,7 +470,7 @@ if ($CustomerConfigPath) {
         $ClientSecret = [string]$customer["clientSecret"]
     }
     else {
-        throw "Customer '$($customer["name"])' has no clientSecret and no secretVault/secretName."
+        throw "Customer '$($customer["name"])' has no certificate, no clientSecret and no secretVault/secretName."
     }
 
     $TenantId = [string]$customer["tenantId"]
@@ -446,11 +515,26 @@ if ($CustomerConfigPath) {
 # Checking here turns that into one clear message.
 foreach ($credential in @(
         @{ Name = 'TenantId'; Value = $TenantId; Variable = 'INTUNE_TENANT_ID' }
-        @{ Name = 'ClientId'; Value = $ClientId; Variable = 'INTUNE_CLIENT_ID' }
-        @{ Name = 'ClientSecret'; Value = $ClientSecret; Variable = 'INTUNE_CLIENT_SECRET' })) {
+        @{ Name = 'ClientId'; Value = $ClientId; Variable = 'INTUNE_CLIENT_ID' })) {
     if ([string]::IsNullOrWhiteSpace($credential.Value)) {
         throw ('Missing {0}. Pass -{0} or set $env:{1}.' -f $credential.Name, $credential.Variable)
     }
+}
+
+# Either a certificate or a secret, and a certificate wins when both are present.
+$script:UseCertificate = -not ([string]::IsNullOrWhiteSpace($CertificateThumbprint) -and
+                               [string]::IsNullOrWhiteSpace($CertificatePath))
+
+if ($script:UseCertificate) {
+    if ($CertificateThumbprint -and $CertificatePath) {
+        throw 'Specify either -CertificateThumbprint or -CertificatePath, not both.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ClientSecret)) {
+        Write-Verbose 'A certificate and a client secret are both present - the certificate is used and the secret ignored.'
+    }
+}
+elseif ([string]::IsNullOrWhiteSpace($ClientSecret)) {
+    throw 'No credential supplied. Provide a certificate (-CertificateThumbprint or -CertificatePath, or $env:INTUNE_CERT_THUMBPRINT / $env:INTUNE_CERT_PATH) or a client secret (-ClientSecret or $env:INTUNE_CLIENT_SECRET).'
 }
 
 $guidPattern = '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
@@ -482,7 +566,15 @@ class GraphAuthorizationException : System.Exception {
 
 # Script-scoped state must exist before first read - StrictMode throws on unassigned variables.
 $script:TokenCache = $null
-$script:AuthContext = [pscustomobject]@{ TenantId = $TenantId; ClientId = $ClientId; ClientSecret = $ClientSecret }
+$script:AuthContext = [pscustomobject]@{
+    TenantId     = $TenantId
+    ClientId     = $ClientId
+    ClientSecret = $ClientSecret
+    # Populated in the Main region, once Get-ClientCertificate has been defined. Resolving
+    # it once up front rather than per token request matters because a Keychain lookup can
+    # prompt, and a bad certificate should surface before any Graph work starts.
+    Certificate  = $null
+}
 $script:GroupNameCache = @{}
 $script:FilterNameCache = @{}
 
@@ -709,6 +801,170 @@ function Get-TenantDisplayName {
     return $TenantId
 }
 
+function Get-ClientCertificate {
+    <#
+    .SYNOPSIS
+        Resolves the client certificate used for app-only authentication.
+
+    .DESCRIPTION
+        Two sources are supported, in this order:
+
+          Thumbprint : looked up in the CurrentUser\My store. That store is the login
+                       Keychain on macOS and the certificate store on Windows, so the key
+                       never leaves the OS keystore. Preferred for interactive use.
+          Path       : a PFX file, for environments with no usable store such as a
+                       Linux-based Azure Function or a container.
+
+        Returns $null when neither is supplied, which tells the caller to fall back to
+        client secret authentication.
+
+    .NOTES
+        Kept byte-for-byte in step with the copy in New-IntuneWin32AppJson.ps1 so both
+        scripts resolve certificates identically. A later move to Key Vault is a one-line
+        addition here: fetch the PFX bytes and construct the same object.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Security.Cryptography.X509Certificates.X509Certificate2])]
+    param(
+        [Parameter()][AllowEmptyString()][string]$Thumbprint,
+        [Parameter()][AllowEmptyString()][string]$Path,
+        [Parameter()][AllowEmptyString()][string]$Password
+    )
+
+    if ($Thumbprint -and $Path) {
+        throw 'Specify either a certificate thumbprint or a certificate path, not both.'
+    }
+
+    if ($Thumbprint) {
+        # Strip spaces and any invisible characters that survive a copy from the portal
+        $normalized = ($Thumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+
+        $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'CurrentUser')
+        try {
+            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+            $found = $store.Certificates | Where-Object { $PSItem.Thumbprint -eq $normalized }
+        }
+        finally {
+            $store.Close()
+        }
+
+        $certificate = @($found) | Select-Object -First 1
+        if (-not $certificate) {
+            throw "No certificate with thumbprint '$normalized' in the CurrentUser store. Import the PFX first, or use -CertificatePath."
+        }
+        if (-not $certificate.HasPrivateKey) {
+            throw "Certificate '$normalized' has no private key. Import the PFX, not just the .cer public part."
+        }
+        return $certificate
+    }
+
+    if ($Path) {
+        if (-not (Test-Path -Path $Path -PathType Leaf)) {
+            throw "Certificate file '$Path' does not exist or is not a file."
+        }
+        $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -Path $Path).Path)
+        $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]
+
+        # EphemeralKeySet keeps the private key out of any on-disk keystore, but it is not
+        # supported on macOS, where it throws. Fall back rather than fail there.
+        try {
+            $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $bytes, $Password, $flags::EphemeralKeySet)
+        }
+        catch [System.Exception] {
+            # Broadened from PlatformNotSupportedException: a wrong PFX password throws
+            # CryptographicException on the EphemeralKeySet attempt too, so narrowing the
+            # catch would only delay the same error to the DefaultKeySet retry below, not
+            # prevent it. Trade-off: an unrelated load failure (corrupt PFX) is retried here
+            # as well, and the message the user sees is whatever the retry throws, not
+            # necessarily the original cause.
+            Write-Verbose 'Could not load with EphemeralKeySet - retrying with the default key set.'
+            $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $bytes, $Password, $flags::DefaultKeySet)
+        }
+
+        if (-not $certificate.HasPrivateKey) {
+            throw "Certificate '$Path' has no private key. Export the PFX with the private key included."
+        }
+        return $certificate
+    }
+
+    return $null
+}
+
+function ConvertTo-Base64Url {
+    # JWT uses base64url: '+' and '/' swapped for '-' and '_', padding stripped.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+
+    return [System.Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function New-ClientAssertion {
+    <#
+    .SYNOPSIS
+        Builds a signed JWT for the client_credentials certificate flow.
+
+    .DESCRIPTION
+        The IntuneWin32App module does this internally when handed a certificate; with raw
+        REST there is no module, so the assertion is built here. Entra ID validates:
+
+          x5t   base64url of the certificate's SHA1 hash, which is how it picks the right
+                public key among those registered on the app
+          aud   the exact token endpoint being posted to
+          iss   and sub, both the client ID
+          jti   a unique identifier, to make replay detectable
+          exp   short lived - ten minutes is ample for one token request
+
+        RS256 with PKCS#1 padding is the only algorithm Entra ID accepts here.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
+        [Parameter(Mandatory)][string]$ClientId,
+        [Parameter(Mandatory)][string]$TokenUri
+    )
+
+    $privateKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+    if ($null -eq $privateKey) {
+        throw 'The certificate has no usable RSA private key. ECDSA certificates are not supported by Entra ID for client assertions.'
+    }
+
+    $now = [System.DateTimeOffset]::UtcNow
+    $header = [ordered]@{
+        alg = 'RS256'
+        typ = 'JWT'
+        x5t = ConvertTo-Base64Url -Bytes $Certificate.GetCertHash()
+    }
+    $claims = [ordered]@{
+        aud = $TokenUri
+        iss = $ClientId
+        sub = $ClientId
+        jti = [guid]::NewGuid().ToString()
+        # MSAL sets nbf = iat = now; this assertion has never been accepted by a real Entra
+        # ID STS, so the claim set is kept identical to a client known to work rather than
+        # relying on our own judgment about clock-skew tolerance.
+        nbf = $now.ToUnixTimeSeconds()
+        iat = $now.ToUnixTimeSeconds()
+        exp = $now.AddMinutes(10).ToUnixTimeSeconds()
+    }
+
+    $encodedHeader = ConvertTo-Base64Url -Bytes ([System.Text.Encoding]::UTF8.GetBytes(
+        (ConvertTo-Json -InputObject $header -Compress)))
+    $encodedClaims = ConvertTo-Base64Url -Bytes ([System.Text.Encoding]::UTF8.GetBytes(
+        (ConvertTo-Json -InputObject $claims -Compress)))
+
+    $signingInput = '{0}.{1}' -f $encodedHeader, $encodedClaims
+    $signature = $privateKey.SignData(
+        [System.Text.Encoding]::UTF8.GetBytes($signingInput),
+        [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+        [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+
+    return '{0}.{1}' -f $signingInput, (ConvertTo-Base64Url -Bytes $signature)
+}
+
 function Get-GraphAccessToken {
     [CmdletBinding()]
     [OutputType([string])]
@@ -719,15 +975,26 @@ function Get-GraphAccessToken {
         return $script:TokenCache.AccessToken
     }
 
+    $tokenUri = 'https://login.microsoftonline.com/{0}/oauth2/v2.0/token' -f $script:AuthContext.TenantId
+
     $body = @{
-        client_id     = $script:AuthContext.ClientId
-        client_secret = $script:AuthContext.ClientSecret
-        scope         = 'https://graph.microsoft.com/.default'
-        grant_type    = 'client_credentials'
+        client_id  = $script:AuthContext.ClientId
+        scope      = 'https://graph.microsoft.com/.default'
+        grant_type = 'client_credentials'
+    }
+
+    # A certificate wins whenever one was resolved, so a stale secret left in the
+    # environment cannot quietly shadow it.
+    if ($null -ne $script:AuthContext.Certificate) {
+        $body['client_assertion_type'] = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
+        $body['client_assertion'] = New-ClientAssertion -Certificate $script:AuthContext.Certificate `
+            -ClientId $script:AuthContext.ClientId -TokenUri $tokenUri
+    }
+    else {
+        $body['client_secret'] = $script:AuthContext.ClientSecret
     }
 
     try {
-        $tokenUri = 'https://login.microsoftonline.com/{0}/oauth2/v2.0/token' -f $script:AuthContext.TenantId
         $response = Invoke-RestMethod -Method Post -Uri $tokenUri -Body $body `
             -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop
     }
@@ -1076,6 +1343,27 @@ if ($IncludeConditionalAccess) {
 #endregion Policy definitions
 
 #region Main
+
+# Resolve the certificate before anything else touches Graph, so a missing key or a wrong
+# thumbprint fails here rather than mid-export.
+if ($script:UseCertificate) {
+    $script:AuthContext.Certificate = Get-ClientCertificate -Thumbprint $CertificateThumbprint `
+        -Path $CertificatePath -Password $CertificatePassword
+    Write-Verbose ('Authenticating with certificate {0} (expires {1:yyyy-MM-dd})' -f
+        $script:AuthContext.Certificate.Thumbprint, $script:AuthContext.Certificate.NotAfter)
+
+    # A certificate that expires during a scheduled run fails with an opaque AADSTS error,
+    # so warn while there is still time to rotate.
+    $daysLeft = ($script:AuthContext.Certificate.NotAfter - (Get-Date)).TotalDays
+    if ($daysLeft -lt 0) {
+        throw ('Certificate {0} expired on {1:yyyy-MM-dd}.' -f
+            $script:AuthContext.Certificate.Thumbprint, $script:AuthContext.Certificate.NotAfter)
+    }
+    if ($daysLeft -lt 30) {
+        Write-Warning ('Certificate {0} expires in {1:N0} day(s), on {2:yyyy-MM-dd}.' -f
+            $script:AuthContext.Certificate.Thumbprint, $daysLeft, $script:AuthContext.Certificate.NotAfter)
+    }
+}
 
 # One instant, three representations: UTC for the record, local for the human-facing
 # folder and file names, offset so the two can always be reconciled.

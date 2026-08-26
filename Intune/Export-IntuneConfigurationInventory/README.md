@@ -90,7 +90,10 @@ names every area the token cannot reach — without reading a single policy.
 |---|---|---|
 | `INTUNE_TENANT_ID` | Yes | Tenant ID or verified domain |
 | `INTUNE_CLIENT_ID` | Yes | App registration client ID |
-| `INTUNE_CLIENT_SECRET` | Yes | App registration secret |
+| `INTUNE_CLIENT_SECRET` | One of these three | App registration secret |
+| `INTUNE_CERT_THUMBPRINT` | One of these three | Certificate in the CurrentUser store — alternative to a secret |
+| `INTUNE_CERT_PATH` | One of these three | PFX file on disk — alternative to a secret, for stores that don't exist |
+| `INTUNE_CERT_PASSWORD` | Only with `INTUNE_CERT_PATH` | PFX password, if the file has one |
 
 ```powershell
 $env:INTUNE_TENANT_ID     = "..."
@@ -98,9 +101,48 @@ $env:INTUNE_CLIENT_ID     = "..."
 $env:INTUNE_CLIENT_SECRET = "..."
 ```
 
-All three have matching parameters, but prefer the variables. Passing `-ClientSecret` on the
+All of these have matching parameters, but prefer the variables. Passing `-ClientSecret` on the
 command line puts it in PSReadLine history and any active transcript, and the script warns
 when you do.
+
+## Certificate authentication
+
+A certificate is preferred over a client secret and, when one is resolved, always wins over
+a secret left in the environment — nothing has to be unset by hand.
+
+**Create and upload the certificate once:**
+
+```powershell
+$cert = New-SelfSignedCertificate -Subject "CN=Intune Inventory" -CertStoreLocation "Cert:\CurrentUser\My" `
+    -KeyExportPolicy Exportable -KeySpec Signature -KeyLength 2048 -NotAfter (Get-Date).AddYears(2)
+Export-Certificate -Cert $cert -FilePath intune-inventory.cer
+```
+
+Upload the `.cer` (public part only) to the app registration's **Certificates & secrets**
+blade in Entra ID. The private key never leaves wherever it was generated.
+
+**Two sources, same order of precedence as everything else here — explicit parameter, then
+environment variable:**
+
+| Source | Parameter / variable | When to use |
+|---|---|---|
+| Certificate store | `-CertificateThumbprint` / `INTUNE_CERT_THUMBPRINT` | Interactive use. On macOS the `CurrentUser\My` store is the login Keychain; the private key is looked up there and never touches disk as a file. |
+| PFX file | `-CertificatePath` (+ `-CertificatePassword`) / `INTUNE_CERT_PATH` (+ `INTUNE_CERT_PASSWORD`) | Unattended runs and Azure Functions, or any environment with no usable certificate store. |
+
+```powershell
+# Interactive, from the store
+$env:INTUNE_CERT_THUMBPRINT = "0123456789ABCDEF0123456789ABCDEF01234567"
+.\Export-IntuneConfigurationInventory.ps1 -Verbose
+
+# Unattended, from a PFX
+.\Export-IntuneConfigurationInventory.ps1 -CertificatePath ./intune.pfx -CertificatePassword $env:INTUNE_CERT_PASSWORD
+```
+
+**macOS pitfall:** signing with a certificate whose private key ACL doesn't list `pwsh` can
+trigger an interactive Keychain password prompt on first use. Easy to miss when you're sitting
+at the terminal; fatal for a scheduled run, which hangs with nothing to answer the prompt.
+Use `-CertificatePath` for anything unattended, and reserve thumbprint lookup for interactive
+sessions where a prompt, if it appears, is actually visible.
 
 ### Several customers
 

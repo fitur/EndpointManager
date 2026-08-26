@@ -1,0 +1,60 @@
+{
+    "_comment": [
+        "Copy this file somewhere local and private, then run: chmod 600 <file>",
+        "Do NOT commit a filled-in copy. Add it to .gitignore.",
+        "",
+        "Each customer needs name, tenantId and clientId.",
+        "The secret is supplied one of two ways:",
+        "  clientSecret            inline - simplest, but readable by any process running as you",
+        "  secretVault+secretName  resolved through Microsoft.PowerShell.SecretManagement (preferred)",
+        "",
+        "tenantName, outputDirectory, includeConditionalAccess and jsonDepth are optional.",
+        "A value left out is treated as 'not set for this customer' rather than inherited",
+        "from the environment or from a previously selected customer.",
+        "",
+        "tenantName overrides the folder name that would otherwise be read from Graph.",
+        "Leave it out unless the organisation display name in Entra is unhelpful.",
+        "jsonDepth has a working default of 20 and is only ever replaced, never cleared.",
+        "",
+        "A certificate is an alternative to a secret: certificateThumbprint (CurrentUser",
+        "store) or certificatePath (+ optional certificatePassword) for a PFX file.",
+        "Defining either one wins over clientSecret/secretVault for that customer - the",
+        "script clears $ClientSecret when it does, so a secret left over from the",
+        "environment or a previous customer cannot silently shadow the certificate. That",
+        "clearing is intentional; it is not a bug if you spot it while reading the code."
+    ],
+    "customers": [
+        {
+            "name": "Contoso",
+            "tenantId": "11111111-1111-1111-1111-111111111111",
+            "clientId": "22222222-2222-2222-2222-222222222222",
+            "clientSecret": "REPLACE-ME",
+            "tenantName": "Contoso AB",
+            "outputDirectory": "/Users/you/IntuneInventory/Data"
+        },
+        {
+            "name": "Fabrikam",
+            "tenantId": "44444444-4444-4444-4444-444444444444",
+            "clientId": "55555555-5555-5555-5555-555555555555",
+            "secretVault": "EndpointManager",
+            "secretName": "Fabrikam-Intune",
+            "outputDirectory": "/Users/you/IntuneInventory/Data",
+            "includeConditionalAccess": true
+        },
+        {
+            "name": "Northwind",
+            "tenantId": "66666666-6666-6666-6666-666666666666",
+            "clientId": "77777777-7777-7777-7777-777777777777",
+            "certificateThumbprint": "0123456789ABCDEF0123456789ABCDEF01234567",
+            "outputDirectory": "/Users/you/IntuneInventory/Data"
+        },
+        {
+            "name": "Tailspin",
+            "tenantId": "88888888-8888-8888-8888-888888888888",
+            "clientId": "99999999-9999-9999-9999-999999999999",
+            "certificatePath": "/Users/you/.intune/tailspin.pfx",
+            "certificatePassword": "REPLACE-ME",
+            "outputDirectory": "/Users/you/IntuneInventory/Data"
+        }
+    ]
+}
