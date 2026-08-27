@@ -8,16 +8,13 @@ Written because "what changed in this tenant since March?" is a question nobody 
 without clicking through the portal from memory. The output is deliberately shaped for a
 documentation agent to narrate, but it is perfectly readable on its own.
 
-Two scripts, kept separate on purpose:
+One script, `Export-IntuneConfigurationInventory.ps1`: it reads the tenant and writes a
+timestamped run folder, and with `-CompareWithPrevious` it also diffs that run against the
+one before it and writes a change set.
 
-| Script | What it does | Needs Graph |
-|---|---|---|
-| `Export-IntuneConfigurationInventory.ps1` | Reads the tenant, writes a timestamped run folder | Yes |
-| `Compare-IntuneConfigurationInventory.ps1` | Diffs two runs, writes a change set | No |
-
-The comparison touches nothing but the filesystem, so it can be re-run after a taxonomy
-change, or against an older pair of runs, without paying for another full export. An export
-of ~170 policies takes a few minutes; the comparison takes seconds.
+The comparison is `Invoke-InventoryComparison`, an internal function that touches nothing
+but the filesystem. It was a separate script until 1.9.0; nothing ran it standalone, so it
+was folded in. An export of ~170 policies takes a few minutes; the comparison adds seconds.
 
 ## The hard requirement
 
@@ -222,13 +219,6 @@ Add the filled-in copy to `.gitignore`.
 
 # Fast run without per-policy settings
 ./Export-IntuneConfigurationInventory.ps1 -SkipDetailedSettings
-
-# Diff every tenant under a root - tenant folders are detected automatically
-./Compare-IntuneConfigurationInventory.ps1 -TenantDirectory ./Data
-
-# Diff a specific pair of runs
-./Compare-IntuneConfigurationInventory.ps1 -TenantDirectory ./Data/Contoso `
-    -BaselineRun '2026-07-31 11-25' -CurrentRun '2026-08-05 12-16'
 ```
 
 ## Output
@@ -309,7 +299,7 @@ picture.
 
 ### The change set
 
-Produced by the comparison script, grouped into one entry per documentation page — by
+Produced by the comparison step, grouped into one entry per documentation page — by
 category and platform. Change is detected through three independent signals:
 
 - **`ConfigurationHash`** for the policy body.
@@ -328,7 +318,7 @@ be read.
 ### Platform grouping
 
 Graph exposes no platform at all for remediations, platform scripts, Autopilot profiles,
-update rings or assignment filters. The comparison script resolves it in four steps, first
+update rings or assignment filters. The comparison resolves it in four steps, first
 hit wins: the `Platform` column, then `PolicyType` (which carries the Graph odata type),
 then the area's implicit platform, then a peek inside the sidecar file.
 
@@ -388,7 +378,7 @@ ones worth knowing about:
 - Two runs in the same minute got distinct folders but an identical file stamp, so the second
   silently overwrote the first run's zip.
 - `#Requires` placed *above* the comment-based help block makes PowerShell fail to find the
-  help entirely. `Get-Help` had never worked on either script until this was noticed.
+  help entirely. `Get-Help` had never worked until this was noticed.
 
 An independent AI review at the end found three real issues and several suggestions. Two
 suggestions were rejected with reasoning, and the review missed the zip overwrite above.
