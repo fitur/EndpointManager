@@ -128,14 +128,14 @@ openssl req -x509 -newkey rsa:2048 -keyout intune-inventory.key -out intune-inve
     -days 730 -nodes -subj "/CN=Intune Inventory" -outform DER
 
 openssl pkcs12 -export -out intune-inventory.pfx \
-    -inkey intune-inventory.key -in intune-inventory.cer -certfile intune-inventory.cer
+    -inkey intune-inventory.key -in intune-inventory.cer
 ```
 
 The `.cer` from either command is what gets uploaded to Entra ID; the `.pfx` is what
-`-CertificatePath` or `INTUNE_CERT_PATH` points at. `-nodes` above skips a PFX password on the
-private key file itself — add one and keep it if the `.key` file will sit anywhere less
-trusted than a throwaway build step, and note that `openssl pkcs12 -export` will then prompt
-for the PFX's own password interactively unless `-passout` is supplied.
+`-CertificatePath` or `INTUNE_CERT_PATH` points at. `-nodes` above leaves the `.key` file
+unencrypted — acceptable for a one-time step, but delete the `.key` once the `.pfx` exists
+rather than leaving an unprotected private key on disk. `openssl pkcs12 -export` always
+prompts for the PFX's own password interactively unless `-passout` is supplied.
 
 Upload the `.cer` (public part only) to the app registration's **Certificates & secrets**
 blade in Entra ID. The private key never leaves wherever it was generated.

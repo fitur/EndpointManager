@@ -127,9 +127,7 @@
             clears the other source when the selected customer's file defines it, instead of
             leaving both set and tripping the "not both" guard. Previously the only way to
             override a customer's certificate source from the command line was to also pass
-            the customer's own source explicitly - this is the one change in this release
-            that makes a previously-rejected combination valid rather than just changing an
-            internal detail.
+            the customer's own source explicitly.
 
             usedLicenseCount and releaseDateTime are now excluded from the configuration and
             therefore from the hash: both were observed to drift on their own on unchanged
@@ -989,9 +987,10 @@ function New-ClientAssertion {
         iss = $ClientId
         sub = $ClientId
         jti = [guid]::NewGuid().ToString()
-        # MSAL sets nbf = iat = now; this assertion has never been accepted by a real Entra
-        # ID STS, so the claim set is kept identical to a client known to work rather than
-        # relying on our own judgment about clock-skew tolerance.
+        # MSAL sets nbf = iat = now. The previous value (now - 5 min) was accepted by Entra,
+        # so this is not a fix - it narrows the assertion's validity window from 15 minutes
+        # to 10 and keeps the claim set identical to a reference client, rather than relying
+        # on our own judgment about how much clock skew an STS will tolerate.
         nbf = $now.ToUnixTimeSeconds()
         iat = $now.ToUnixTimeSeconds()
         exp = $now.AddMinutes(10).ToUnixTimeSeconds()
@@ -1579,7 +1578,7 @@ foreach ($definition in $policyDefinitions) {
         $configuration = [ordered]@{}
         foreach ($property in $item.PSObject.Properties) {
             if ($property.Name -in @('assignments', 'largeIcon', '@odata.context', 'assignments@odata.context',
-                    'usedLicenseCount', 'releaseDateTime')) { continue }
+                                     'usedLicenseCount', 'releaseDateTime')) { continue }
             $configuration[$property.Name] = $property.Value
         }
 
