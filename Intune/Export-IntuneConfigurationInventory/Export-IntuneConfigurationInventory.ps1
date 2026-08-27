@@ -13,6 +13,7 @@
                 <yyyy-MM-dd HH-mm>/
                     IntuneConfigurationInventory_<Tenant>_<yyyy-MM-dd_HHmm>.csv
                     _manifest_<yyyy-MM-dd_HHmm>.json
+                    _auditevents_<yyyy-MM-dd_HHmm>.json   (only with -IncludeAuditActor)
                     <Policy-Area>/
                         <Name>_<Id>_<yyyy-MM-dd_HHmm>.json
                 <Tenant>_<yyyy-MM-dd_HHmm>.zip        (only with -CompressOutput)
@@ -92,13 +93,40 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.9.0
+    Version:        1.10.0
     Creation Date:  2026-07-30
     Last Updated:   2026-08-27
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.10.0 - 2026-08-27
+            Added -IncludeAuditActor. With the switch, the export reads Intune audit events
+            for the window since the previous run (deviceManagement/auditEvents, v1.0) and
+            writes a projected _auditevents_<stamp>.json sidecar; the comparison then attaches
+            an auditActors list to every added or modified policy in the change set. Needs no
+            new Entra permission - the audit log sits behind DeviceManagementApps.Read.All,
+            which the app already has. Without the switch no auditEvents call is made.
+
+            What the field does NOT tell you. It answers "a person or an automation", not
+            "which technician". In the 2026-08-27 measurement, of 25 Patch events - "someone
+            edited an existing policy" - exactly one carried a named person; the rest were the
+            tenant's own service principals. Reads (Get, Search) are filtered out, as are
+            events whose resources never match a policy the change set already flagged.
+
+            The actor is modelled as three states, never null: person (a userPrincipalName was
+            present), app (only an applicationDisplayName), unknown (no actor at all). The
+            field is a list, not a LastModifiedBy - several events can hit one policy in a
+            window, and assignment changes ride along on the parent policy's resource.
+
+            Privacy: actor.ipAddress, actor.userId, actor.userPermissions and
+            resources[].modifiedProperties are dropped before anything is written to disk.
+
+            The change set and the audit log are two signals, not one truth with an
+            explanation: service-side drift (the excluded usedLicenseCount / releaseDateTime)
+            leaves no audit trail, and an audit event can exist with no hash change. A 30-day
+            window is not necessarily representative of a month with real portal edits.
 
         1.9.0 - 2026-08-27
             Merged Compare-IntuneConfigurationInventory.ps1 into this script as the
@@ -365,6 +393,13 @@ param(
     # inventory: install counts change every time a device checks in, so folding them into
     # ConfigurationHash would report every app as changed on every run.
     [switch]$IncludeAppInstallStatus,
+
+    # Fetch Intune audit events for the window since the previous run and attach the actor
+    # (person or automation) to added/modified policies in the change set. Without the switch
+    # no auditEvents call is made at all - not "fetch and filter out". Needs no new Entra
+    # permission: the audit log sits behind DeviceManagementApps.Read.All, which the app
+    # already has. actor.ipAddress / userId / userPermissions are never written to disk.
+    [switch]$IncludeAuditActor,
 
     [switch]$IncludeConditionalAccess,
 
@@ -1345,6 +1380,98 @@ function New-PolicyDefinition {
     }
 }
 
+function Get-AuditEventWindow {
+    <#
+        Intune audit events since $Since, projected down to (who, when, what, which resource)
+        as each page is read. The raw events never leave this function - in particular
+        actor.ipAddress, actor.userId, actor.userPermissions and resources[].modifiedProperties
+        are dropped here and never reach disk. Only writes are kept; Get/Search are reads.
+        A 403 (or any other failure) is treated like a skipped area: warn, return nothing,
+        let the export finish. Returns a flat list, comma-guarded like Get-GraphCollection.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][datetime]$Since,
+        [int]$MaxPages = 20
+    )
+
+    $projected = [System.Collections.Generic.List[object]]::new()
+
+    # activityOperationType values that represent a change. Get and Search are reads - Search
+    # alone was 30 of 177 events in the 2026-08-27 measurement, all from a monitoring app.
+    $writeOperations = @('Create', 'Patch', 'Delete', 'Action', 'SetReference', 'RemoveReference')
+
+    $sinceIso = $Since.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss'Z'")
+    $filter = [uri]::EscapeDataString(('activityDateTime gt {0}' -f $sinceIso))
+    $orderBy = [uri]::EscapeDataString('activityDateTime desc')
+    $uri = 'https://graph.microsoft.com/v1.0/deviceManagement/auditEvents?$filter={0}&$orderby={1}&$top=200' -f $filter, $orderBy
+
+    $page = 0
+    while (-not [string]::IsNullOrWhiteSpace($uri) -and $page -lt $MaxPages) {
+        $page++
+        try {
+            $response = Invoke-GraphRequest -Uri $uri
+        }
+        catch [System.Exception] {
+            # 403 = the app cannot read the audit log; anything else = a transient or bad
+            # request already retried by Invoke-GraphRequest. Either way the export stands.
+            Write-Warning ('Audit events skipped - {0}' -f $PSItem.Exception.Message)
+            return , ([System.Collections.Generic.List[object]]::new())
+        }
+
+        foreach ($auditEvent in @(Get-ObjectProperty -InputObject $response -Name 'value')) {
+            if ($null -eq $auditEvent) { continue }
+
+            $operation = [string](Get-ObjectProperty -InputObject $auditEvent -Name 'activityOperationType')
+            if ($operation -notin $writeOperations) { continue }
+
+            $actor = Get-ObjectProperty -InputObject $auditEvent -Name 'actor'
+            $upn = [string](Get-ObjectProperty -InputObject $actor -Name 'userPrincipalName')
+            $appName = [string](Get-ObjectProperty -InputObject $actor -Name 'applicationDisplayName')
+            if (-not [string]::IsNullOrWhiteSpace($upn)) { $actorMode = 'person' }
+            elseif (-not [string]::IsNullOrWhiteSpace($appName)) { $actorMode = 'app' }
+            else { $actorMode = 'unknown' }
+
+            $resources = [System.Collections.Generic.List[object]]::new()
+            foreach ($resource in @(Get-ObjectProperty -InputObject $auditEvent -Name 'resources')) {
+                if ($null -eq $resource) { continue }
+
+                # auditResourceType arrives bare (Win32LobApp) or fully qualified
+                # (Microsoft.Management.Services.Api.DeviceManagementScript). Keep the last segment.
+                $rawType = [string](Get-ObjectProperty -InputObject $resource -Name 'auditResourceType')
+                $resourceType = [string]($rawType -split '\.')[-1]
+
+                $resources.Add([ordered]@{
+                    resourceId   = [string](Get-ObjectProperty -InputObject $resource -Name 'resourceId')
+                    displayName  = [string](Get-ObjectProperty -InputObject $resource -Name 'displayName')
+                    resourceType = $resourceType
+                })
+            }
+
+            $projected.Add([ordered]@{
+                activityDateTime      = [string](Get-ObjectProperty -InputObject $auditEvent -Name 'activityDateTime')
+                activityType          = [string](Get-ObjectProperty -InputObject $auditEvent -Name 'activityType')
+                activityOperationType = $operation
+                activityResult        = [string](Get-ObjectProperty -InputObject $auditEvent -Name 'activityResult')
+                actor                 = [ordered]@{
+                    mode                   = $actorMode
+                    userPrincipalName      = $upn
+                    applicationDisplayName = $appName
+                }
+                resources             = @($resources)
+            })
+        }
+
+        $uri = [string](Get-ObjectProperty -InputObject $response -Name '@odata.nextLink')
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($uri)) {
+        Write-Warning ('Audit events truncated at {0} page(s); older events in the window were not read.' -f $MaxPages)
+    }
+
+    return , $projected
+}
+
 #endregion Helpers
 
 #region Comparison
@@ -1787,6 +1914,27 @@ function New-RecordSummary {
     }
 }
 
+function Get-PolicyAuditActor {
+    <#
+        The audit events from the run's _auditevents_ sidecar whose resources include this
+        policy's id, newest first. $Index is $null when the export did not fetch audit events
+        (no -IncludeAuditActor); the caller then omits the field entirely rather than
+        emitting an empty list, so "no field" and "field is []" stay distinguishable.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$Index,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PolicyId
+    )
+
+    if ($null -eq $Index) { return , @() }
+    $key = $PolicyId.ToLowerInvariant()
+    if (-not $Index.ContainsKey($key)) { return , @() }
+
+    return , @($Index[$key] |
+        Sort-Object -Property @{ Expression = { [string]$PSItem.activityDateTime }; Descending = $true })
+}
+
 function Invoke-InventoryComparison {
     # The old comparison script's Main, verbatim bar three points: -CurrentRun is dropped
     # (the current run is always the one just produced), the taxonomy reads are
@@ -1835,6 +1983,47 @@ function Invoke-InventoryComparison {
     if ($unreliableAreas.Count -gt 0) {
         Write-Warning ('{0} area(s) were skipped in one or both runs - removals there are reported as uncertain: {1}' -f
             $unreliableAreas.Count, ($unreliableAreas -join '; '))
+    }
+
+    # Audit actors, if the export wrote the sidecar. Still pure local file processing - the
+    # comparison never calls Graph. Index is policy id (lowercase) -> list of projected
+    # events; an event is filed under every GUID-shaped resourceId it carries, so an
+    # assignment change reaches its parent policy through the parent resource in the same
+    # event. $auditByPolicy stays $null when the file is absent, which the field emit checks.
+    $auditByPolicy = $null
+    $auditFile = @(Get-ChildItem -Path $current.Path -Filter '_auditevents_*.json' -File |
+        Sort-Object -Property Name) | Select-Object -Last 1
+    if ($null -ne $auditFile) {
+        try {
+            $auditByPolicy = @{}
+            $guidPattern = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+            $auditDoc = Get-Content -Path $auditFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
+            $auditEvents = @(Get-ObjectProperty -InputObject $auditDoc -Name 'events' | Where-Object { $null -ne $PSItem })
+            foreach ($auditEvent in $auditEvents) {
+                $eventKeys = [System.Collections.Generic.List[string]]::new()
+                foreach ($resource in @(Get-ObjectProperty -InputObject $auditEvent -Name 'resources')) {
+                    $rid = [string](Get-ObjectProperty -InputObject $resource -Name 'resourceId')
+                    # Assignment resources carry non-GUID, non-unique ids - only the parent
+                    # policy resource has a GUID, and that is the one worth matching on.
+                    if ($rid -match $guidPattern) { $eventKeys.Add($rid.ToLowerInvariant()) }
+                }
+                foreach ($eventKey in ($eventKeys | Sort-Object -Unique)) {
+                    if (-not $auditByPolicy.ContainsKey($eventKey)) {
+                        $auditByPolicy[$eventKey] = [System.Collections.Generic.List[object]]::new()
+                    }
+                    $auditByPolicy[$eventKey].Add($auditEvent)
+                }
+            }
+            Write-Verbose ('Audit sidecar: {0} event(s) across {1} policy id(s)' -f
+                $auditEvents.Count, $auditByPolicy.Count)
+        }
+        catch [System.Exception] {
+            # The audit field is additive - a broken sidecar must not sink the whole change
+            # set. Drop back to "not fetched" and carry on.
+            Write-Warning ('Audit sidecar "{0}" could not be read ({1}); the change set is produced without actor data.' -f
+                $auditFile.Name, $PSItem.Exception.Message)
+            $auditByPolicy = $null
+        }
     }
 
     # Platform is resolved once per record and cached on RecordKey. The current run wins when
@@ -1938,7 +2127,11 @@ function Invoke-InventoryComparison {
                     $platforms = $platformCache[$row.RecordKey]
 
                     if (-not $baseline.Records.ContainsKey($row.RecordKey)) {
-                        $added.Add((New-RecordSummary -Row $row -RunFolder $currentFolder -Platforms $platforms))
+                        $addedEntry = New-RecordSummary -Row $row -RunFolder $currentFolder -Platforms $platforms
+                        if ($null -ne $auditByPolicy) {
+                            $addedEntry['auditActors'] = Get-PolicyAuditActor -Index $auditByPolicy -PolicyId ([string]$row.Id)
+                        }
+                        $added.Add($addedEntry)
                         continue
                     }
 
@@ -2002,6 +2195,9 @@ function Invoke-InventoryComparison {
                     $entry['metadataChanges'] = @($metadataChanges)
                     $entry['fieldChanges'] = @($fieldChanges)
                     $entry['fieldChangeCount'] = $fieldChanges.Count
+                    if ($null -ne $auditByPolicy) {
+                        $entry['auditActors'] = Get-PolicyAuditActor -Index $auditByPolicy -PolicyId ([string]$row.Id)
+                    }
                     $modified.Add($entry)
                 }
 
@@ -2259,6 +2455,30 @@ if (Test-Path -Path $runDirectory) {
     $runDirectory = Join-Path -Path $tenantRoot -ChildPath $folderStamp
     Write-Warning ('A run folder for this minute already exists - using "{0}" instead.' -f $folderStamp)
 }
+
+# Audit-event window start: the previous run's UTC timestamp. Resolved here, before the new
+# run folder exists, so Get-RunContext does not read the folder we are about to create as the
+# current run. No previous run, or an unreadable one - fall back to 30 days.
+$auditSince = $null
+if ($IncludeAuditActor) {
+    $auditSince = (Get-Date).ToUniversalTime().AddDays(-30)
+    $priorRun = @(Get-ChildItem -Path $tenantRoot -Directory -ErrorAction SilentlyContinue |
+        Sort-Object -Property Name) | Select-Object -Last 1
+    if ($null -ne $priorRun) {
+        try {
+            $priorStamp = [string](Get-ObjectProperty -InputObject (Get-RunContext -Path $priorRun.FullName).Manifest -Name 'runTimestampUtc')
+            if (-not [string]::IsNullOrWhiteSpace($priorStamp)) {
+                $auditSince = [datetimeoffset]::Parse($priorStamp, [cultureinfo]::InvariantCulture,
+                    [System.Globalization.DateTimeStyles]::RoundtripKind).UtcDateTime
+            }
+        }
+        catch [System.Exception] {
+            Write-Warning ('Could not read the previous run''s timestamp ({0}); auditing the last 30 days instead.' -f $PSItem.Exception.Message)
+        }
+    }
+    Write-Verbose ('Audit-event window starts {0:o}' -f $auditSince)
+}
+
 New-Item -Path $runDirectory -ItemType Directory -Force | Out-Null
 
 $csvName = 'IntuneConfigurationInventory_{0}_{1}.csv' -f $tenantNamePart, $fileStamp
@@ -2516,6 +2736,32 @@ if ($IncludeAppInstallStatus -and $appInstallStatus.Count -gt 0) {
     Write-Verbose ('Install status for {0} app(s): {1}' -f $appInstallStatus.Count, $appInstallStatusPath)
 }
 
+# Audit events for the window since the previous run. The projection in Get-AuditEventWindow
+# has already dropped every raw field; only (who, when, what, which resource) is left. The
+# comparison reads this file from disk and correlates it - it never calls Graph itself. The
+# file is written even when empty: its absence means "not fetched", not "no changes". A 403
+# or any other failure here must not fail the export - the inventory on disk is already done.
+$auditEventsPath = $null
+if ($IncludeAuditActor) {
+    try {
+        $auditProjection = Get-AuditEventWindow -Since $auditSince
+        $auditEventsPath = Join-Path -Path $runDirectory -ChildPath ('_auditevents_{0}.json' -f $fileStamp)
+        $auditDocument = [ordered]@{
+            schemaVersion  = 1
+            generatedUtc   = (Get-Date).ToUniversalTime().ToString('o')
+            windowStartUtc = $auditSince.ToString('o')
+            eventCount     = $auditProjection.Count
+            events         = @($auditProjection)
+        }
+        Write-Utf8File -Path $auditEventsPath -Content (ConvertTo-Json -InputObject $auditDocument -Depth 8)
+        Write-Verbose ('Audit events in window: {0} -> {1}' -f $auditProjection.Count, $auditEventsPath)
+    }
+    catch [System.Exception] {
+        Write-Warning ('Audit events not written, export unaffected: {0}' -f $PSItem.Exception.Message)
+        $auditEventsPath = $null
+    }
+}
+
 # Optional handover artefact. Written after the manifest so the archive is complete.
 $zipPath = $null
 if ($CompressOutput) {
@@ -2576,6 +2822,7 @@ Write-Output ([pscustomobject]@{
     ManifestPath         = $manifestPath
     ZipPath              = $zipPath
     AppInstallStatusPath = $appInstallStatusPath
+    AuditEventsPath      = $auditEventsPath
     ChangeSetPath        = $changeSetPath
     PolicyCount          = $inventory.Count
     ExportComplete       = $manifest.exportComplete

@@ -65,7 +65,7 @@ version to pin, and no typed deserialisation layer between the response and the 
 |---|---|
 | `DeviceManagementConfiguration.Read.All` | Settings Catalog, templates, ADMX, compliance, intents, update profiles |
 | `DeviceManagementScripts.Read.All` | Remediations, platform scripts, shell scripts |
-| `DeviceManagementApps.Read.All` | App protection and app configuration |
+| `DeviceManagementApps.Read.All` | App protection and app configuration; also the audit log (`-IncludeAuditActor`) |
 | `DeviceManagementServiceConfig.Read.All` | Autopilot, enrollment, assignment filters |
 | `Group.Read.All` | Resolving group IDs to names |
 | `Organization.Read.All` | Optional — tenant name in the folder name |
@@ -219,6 +219,9 @@ Add the filled-in copy to `.gitignore`.
 
 # Fast run without per-policy settings
 ./Export-IntuneConfigurationInventory.ps1 -SkipDetailedSettings
+
+# Diff against the previous run and record who changed each policy (person vs automation)
+./Export-IntuneConfigurationInventory.ps1 -CompareWithPrevious -IncludeAuditActor -Verbose
 ```
 
 ## Output
@@ -314,6 +317,29 @@ exists so a reordered array does not read as "everything changed".
 Policies missing from an area that was **skipped** in either run are reported as
 `uncertain`, never as removed. Absence is not evidence of deletion when the area could not
 be read.
+
+### Audit actors
+
+`-IncludeAuditActor` adds one more thing to the change set: for every **added** or
+**modified** policy, an `auditActors` list of the Intune audit events in the window since
+the previous run whose resources point at that policy.
+
+- **No new Entra permission.** The audit log sits behind `DeviceManagementApps.Read.All`,
+  which the app already needs for app protection and app configuration policies.
+- **It answers "a person or an automation", not "which technician".** Most writes in a
+  tenant are made by its own service principals. In one 30-day measurement, of the events
+  that were "someone edited an existing policy", roughly one in twenty-five named a person;
+  the rest were apps. The actor is reported as `person`, `app`, or `unknown` — never as a
+  `LastModifiedBy`, because that would overclaim.
+- **It is a second signal, not the answer.** Service-side drift leaves no audit trail, and
+  an audit event can exist with no configuration change. Read the change set and the audit
+  list together, not one as an explanation of the other.
+- **Privacy.** `actor.ipAddress`, `actor.userId`, `actor.userPermissions` and the audit
+  log's own `modifiedProperties` are dropped before anything is written to disk. The
+  projected events land in `_auditevents_<stamp>.json` in the run folder; its absence means
+  "not fetched", an empty list means "fetched, nothing matched".
+
+Without the switch, no `auditEvents` call is made at all.
 
 ### Platform grouping
 
