@@ -987,10 +987,11 @@ function New-ClientAssertion {
         iss = $ClientId
         sub = $ClientId
         jti = [guid]::NewGuid().ToString()
-        # MSAL sets nbf = iat = now. The previous value (now - 5 min) was accepted by Entra,
-        # so this is not a fix - it narrows the assertion's validity window from 15 minutes
-        # to 10 and keeps the claim set identical to a reference client, rather than relying
-        # on our own judgment about how much clock skew an STS will tolerate.
+        # MSAL sets nbf = iat = now, verified against a live tenant from both a store
+        # thumbprint and a PFX. The previous value (now - 5 min) was accepted too, so this
+        # was not a fix - it narrows the assertion's validity window from 15 minutes to 10
+        # and keeps the claim set identical to a reference client, rather than relying on
+        # our own judgment about how much clock skew an STS will tolerate.
         nbf = $now.ToUnixTimeSeconds()
         iat = $now.ToUnixTimeSeconds()
         exp = $now.AddMinutes(10).ToUnixTimeSeconds()

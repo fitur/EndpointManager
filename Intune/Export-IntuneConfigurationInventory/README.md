@@ -125,7 +125,7 @@ two artefacts — a `.cer` to upload and a `.pfx` for `-CertificatePath`:
 
 ```bash
 openssl req -x509 -newkey rsa:2048 -keyout intune-inventory.key -out intune-inventory.cer \
-    -days 730 -nodes -subj "/CN=Intune Inventory" -outform DER
+    -days 730 -nodes -subj "/CN=Intune Inventory"
 
 openssl pkcs12 -export -out intune-inventory.pfx \
     -inkey intune-inventory.key -in intune-inventory.cer
