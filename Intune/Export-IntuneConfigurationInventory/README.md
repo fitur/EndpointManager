@@ -280,11 +280,19 @@ change that never happened.
 or `supersededAppCount` is above zero. That is a handful of apps rather than one request per
 app, and it is what lets you spot "app A is superseded by app B but A is still assigned".
 
-**`installSummary` is not part of the configuration or the hash.** `installedDeviceCount`
+**Install counts are not part of the configuration or the hash.** `installedDeviceCount`
 changes on every device check-in, so including it would report every app as modified on
-every run and destroy the whole point of the hash. `-IncludeAppInstallStatus` writes it to a
-separate `AppInstallStatus_<stamp>.csv` that is neither hashed nor diffed — useful before a
+every run and destroy the whole point of the hash. `-IncludeAppInstallStatus` writes them to
+a separate `AppInstallStatus_<stamp>.csv` that is neither hashed nor diffed — useful before a
 maintenance window, harmless to the change detection.
+
+The numbers come from `deviceManagement/reports/getAppsInstallSummaryReport` — **one call per
+run**, not one per app (the old `mobileApps/{id}/installSummary` route was retired by Graph).
+They are a cached aggregation whose age Intune does not report (the report's `LastUpdatedTime`
+comes back null), so treat `RunTimestamp` as when the figures were fetched, not when they were
+computed. An app the report has no row for is left out of the CSV rather than written as
+zeros. `appInstallStatusRequested` / `appInstallStatusRows` in the manifest make a
+requested-but-empty result visible without reading the run's warnings.
 
 Per-assignment settings such as Win32 restart grace periods are stored but are not tracked
 as a change signal, since assignments sit outside the hash. A changed restart deadline will

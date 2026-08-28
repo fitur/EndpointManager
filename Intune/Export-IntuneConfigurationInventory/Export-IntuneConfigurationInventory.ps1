@@ -13,6 +13,7 @@
                 <yyyy-MM-dd HH-mm>/
                     IntuneConfigurationInventory_<Tenant>_<yyyy-MM-dd_HHmm>.csv
                     _manifest_<yyyy-MM-dd_HHmm>.json
+                    AppInstallStatus_<yyyy-MM-dd_HHmm>.csv   (only with -IncludeAppInstallStatus)
                     _auditevents_<yyyy-MM-dd_HHmm>.json   (only with -IncludeAuditActor)
                     <Policy-Area>/
                         <Name>_<Id>_<yyyy-MM-dd_HHmm>.json
@@ -93,13 +94,32 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.10.0
+    Version:        1.10.1
     Creation Date:  2026-07-30
-    Last Updated:   2026-08-27
+    Last Updated:   2026-08-28
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.10.1 - 2026-08-28
+            Fixed -IncludeAppInstallStatus, which had stopped producing anything: Graph
+            retired the mobileApps/{id}/installSummary navigation property and now answers
+            400 "Resource not found for the segment 'installSummary'" on beta and v1.0 alike.
+            Replaced with a single POST to
+            deviceManagement/reports/getAppsInstallSummaryReport, which returns every app in
+            one call instead of one call per app.
+
+            SEMANTIC CHANGE: the numbers are now a cached aggregation, not a live per-app
+            lookup. How old the aggregation is cannot be recovered - Graph returns the
+            report's LastUpdatedTime as null, and RunTimestamp on each row is when the export
+            fetched the report, not when Intune computed it. Apps the report has no row for
+            are left out of the CSV rather than written as zeros - "no data" and "zero
+            installs" are different, and the run warns once with the count.
+
+            The manifest gains appInstallStatusRequested and appInstallStatusRows so a
+            requested-but-empty result is visible to a scheduled consumer, the same way
+            areasSkipped already is. As before, a failure here never fails the export.
 
         1.10.0 - 2026-08-27
             Added -IncludeAuditActor. With the switch, the export reads Intune audit events
@@ -391,7 +411,8 @@ param(
 
     # Collect per-app installation counts into a separate CSV. Deliberately not part of the
     # inventory: install counts change every time a device checks in, so folding them into
-    # ConfigurationHash would report every app as changed on every run.
+    # ConfigurationHash would report every app as changed on every run. One reports call now,
+    # not one per app; the counts are a cached aggregation whose age Intune does not report.
     [switch]$IncludeAppInstallStatus,
 
     # Fetch Intune audit events for the window since the previous run and attach the actor
@@ -1116,6 +1137,10 @@ function Invoke-GraphRequest {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Uri,
+        # Additive: every existing call omits these and keeps GET with no body. Only the
+        # reports endpoint (getAppsInstallSummaryReport) needs POST.
+        [ValidateSet('Get', 'Post')][string]$Method = 'Get',
+        [string]$Body,
         [ValidateRange(1, 10)][int]$MaxAttempt = 5
     )
 
@@ -1126,8 +1151,17 @@ function Invoke-GraphRequest {
         $attempt++
         try {
             $token = Get-GraphAccessToken
-            return Invoke-RestMethod -Uri $Uri -Method Get -ErrorAction Stop `
-                -Headers @{ Authorization = "Bearer $token"; Accept = 'application/json' }
+            $requestArgs = @{
+                Uri         = $Uri
+                Method      = $Method
+                ErrorAction = 'Stop'
+                Headers     = @{ Authorization = "Bearer $token"; Accept = 'application/json' }
+            }
+            if ($Method -ne 'Get' -and -not [string]::IsNullOrEmpty($Body)) {
+                $requestArgs['Body'] = $Body
+                $requestArgs['ContentType'] = 'application/json'
+            }
+            return Invoke-RestMethod @requestArgs
         }
         catch [System.Exception] {
             $statusCode = 0
@@ -1203,6 +1237,102 @@ function Get-GraphCollection {
     }
 
     return , $results
+}
+
+function Get-AppInstallSummaryReport {
+    <#
+        deviceManagement/reports/getAppsInstallSummaryReport in one POST (plus pagination on
+        skip). Replaces the per-app mobileApps/{id}/installSummary navigation, which Graph
+        retired - it now answers 400 "Resource not found for the segment 'installSummary'".
+
+        The response is column-oriented: Values is a list of arrays ordered by Schema. Reading
+        a cell by name would break silently the day Microsoft adds a column, so every value is
+        read through a name -> index map rebuilt from Schema once per response.
+
+        Returns @{ Rows = @{ <applicationId lowercased> = [ordered]@{ <counter> = <int> } } }.
+        The numbers are a cached aggregation, not a live per-app read - see the note by the
+        response parse about why their age is not recoverable.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([int]$PageSize = 200, [int]$MaxPages = 20)
+
+    $endpoint = 'https://graph.microsoft.com/beta/deviceManagement/reports/getAppsInstallSummaryReport'
+
+    # Only the counters the CSV writes. Nothing platform-related: Platform_loc is localised and
+    # would make the output non-deterministic, and FailedDevicePercentage is a SqlDecimal that
+    # a Swedish locale renders with a comma - into a CSV whose delimiter can be a comma.
+    $wantedColumns = @(
+        'InstalledDeviceCount', 'FailedDeviceCount', 'NotInstalledDeviceCount',
+        'PendingInstallDeviceCount', 'NotApplicableDeviceCount',
+        'InstalledUserCount', 'FailedUserCount'
+    )
+
+    $rows = @{}
+    $sessionId = $null
+    $rowsRead = 0
+    $totalRowCount = [int]::MaxValue
+    $page = 0
+
+    while ($rowsRead -lt $totalRowCount -and $page -lt $MaxPages) {
+        $page++
+        $bodyMap = [ordered]@{ skip = $rowsRead; top = $PageSize }
+        if (-not [string]::IsNullOrWhiteSpace($sessionId)) { $bodyMap['sessionId'] = $sessionId }
+
+        $response = Invoke-GraphRequest -Uri $endpoint -Method 'Post' `
+            -Body (ConvertTo-Json -InputObject $bodyMap -Compress)
+
+        if ([string]::IsNullOrWhiteSpace($sessionId)) {
+            $sessionId = [string](Get-ObjectProperty -InputObject $response -Name 'SessionId')
+        }
+
+        # The reports envelope carries a LastUpdatedTime, but Graph returns it null for this
+        # report - verified 2026-08-28 against a live tenant, with and without an Accept header.
+        # There is therefore no way to tell how old the aggregation is; RunTimestamp on each row
+        # is when we fetched it, not when Intune computed it.
+        $reportedTotal = Get-ObjectProperty -InputObject $response -Name 'TotalRowCount'
+        if ($null -ne $reportedTotal) { $totalRowCount = [int]$reportedTotal }
+
+        # Column name -> position, rebuilt per response so a reordered page cannot misread.
+        $columnIndex = @{}
+        $schema = @(Get-ObjectProperty -InputObject $response -Name 'Schema' | Where-Object { $null -ne $PSItem })
+        for ($i = 0; $i -lt $schema.Count; $i++) {
+            $columnName = [string](Get-ObjectProperty -InputObject $schema[$i] -Name 'Column')
+            if (-not [string]::IsNullOrWhiteSpace($columnName)) { $columnIndex[$columnName] = $i }
+        }
+        $appIdIndex = $columnIndex['ApplicationId']
+
+        $values = @(Get-ObjectProperty -InputObject $response -Name 'Values' | Where-Object { $null -ne $PSItem })
+        if ($values.Count -eq 0) { break }
+
+        foreach ($valueRow in $values) {
+            $cells = @($valueRow)
+            $rowsRead++
+            if ($null -eq $appIdIndex -or $appIdIndex -ge $cells.Count) { continue }
+
+            $appId = [string]$cells[$appIdIndex]
+            if ([string]::IsNullOrWhiteSpace($appId)) { continue }
+
+            $counters = [ordered]@{}
+            foreach ($column in $wantedColumns) {
+                $idx = $columnIndex[$column]
+                if ($null -ne $idx -and $idx -lt $cells.Count) {
+                    $counters[$column] = ($cells[$idx] -as [int]) ?? 0
+                }
+                else {
+                    $counters[$column] = 0
+                }
+            }
+            $rows[$appId.ToLowerInvariant()] = $counters
+        }
+    }
+
+    if ($rowsRead -lt $totalRowCount -and $totalRowCount -ne [int]::MaxValue) {
+        Write-Warning ('App install summary report truncated at {0} page(s): {1} of {2} row(s) read.' -f
+            $MaxPages, $rowsRead, $totalRowCount)
+    }
+
+    return @{ Rows = $rows }
 }
 
 function Resolve-GroupDisplayName {
@@ -2638,32 +2768,6 @@ foreach ($definition in $policyDefinitions) {
         $recordKey = '{0}|{1}' -f $definition.Area, $id
         $resourceUri = '{0}/{1}' -f $baseUri, $id
 
-        # Volatile by nature: these counts move every time a device checks in, which is why
-        # they go to their own file and never into the hashed configuration.
-        if ($IncludeAppInstallStatus -and $definition.Resource -eq 'deviceAppManagement/mobileApps' -and
-            -not [string]::IsNullOrWhiteSpace($id)) {
-            try {
-                $summary = Invoke-GraphRequest -Uri ('{0}/{1}/installSummary' -f $baseUri, $id)
-                $appInstallStatus.Add([pscustomobject][ordered]@{
-                    RunTimestamp             = $runStamp
-                    RecordKey                = $recordKey
-                    DisplayName              = $displayName
-                    Id                       = $id
-                    AppType                  = $policyType
-                    InstalledDeviceCount     = [int](Get-ObjectProperty -InputObject $summary -Name 'installedDeviceCount')
-                    FailedDeviceCount        = [int](Get-ObjectProperty -InputObject $summary -Name 'failedDeviceCount')
-                    NotInstalledDeviceCount  = [int](Get-ObjectProperty -InputObject $summary -Name 'notInstalledDeviceCount')
-                    PendingInstallDeviceCount = [int](Get-ObjectProperty -InputObject $summary -Name 'pendingInstallDeviceCount')
-                    NotApplicableDeviceCount = [int](Get-ObjectProperty -InputObject $summary -Name 'notApplicableDeviceCount')
-                    InstalledUserCount       = [int](Get-ObjectProperty -InputObject $summary -Name 'installedUserCount')
-                    FailedUserCount          = [int](Get-ObjectProperty -InputObject $summary -Name 'failedUserCount')
-                })
-            }
-            catch [System.Exception] {
-                Write-Warning ('Application "{0}": could not read installSummary - {1}' -f $displayName, $PSItem.Exception.Message)
-            }
-        }
-
         $inventory.Add([pscustomobject][ordered]@{
             RunTimestamp         = $runStamp
             RecordKey            = $recordKey
@@ -2696,6 +2800,62 @@ if ($inventory.Count -eq 0) {
     throw 'No policies were exported - run with -TestPermissionOnly to inspect the token.'
 }
 
+# App install status is no longer a per-app navigation - Graph retired
+# mobileApps/{id}/installSummary. One reports call covers every app, so it runs once here
+# rather than inside the object loop, and only when the Application area was actually read:
+# a 403 there leaves nothing to join the report rows against. A failure never fails the
+# export - the inventory on disk is complete regardless, same rule as the comparison.
+$appInstallStatusRequested = $IncludeAppInstallStatus.IsPresent
+if ($appInstallStatusRequested) {
+    $applicationExported = @($areaResults | Where-Object {
+            $PSItem.area -eq 'Application' -and $PSItem.status -eq 'exported' }).Count -gt 0
+
+    if (-not $applicationExported) {
+        Write-Warning 'App install status requested, but the Application area was not exported - nothing to correlate against.'
+    }
+    else {
+        try {
+            $report = Get-AppInstallSummaryReport
+            $reportRows = $report.Rows
+            $missingFromReport = 0
+
+            foreach ($appRow in ($inventory | Where-Object { [string]$PSItem.PolicyArea -eq 'Application' })) {
+                $appKey = ([string]$appRow.Id).ToLowerInvariant()
+                if (-not $reportRows.ContainsKey($appKey)) {
+                    # A missing row is not zero installs. Skipping is honest; zeros would not be.
+                    $missingFromReport++
+                    continue
+                }
+                $counts = $reportRows[$appKey]
+                $appInstallStatus.Add([pscustomobject][ordered]@{
+                    RunTimestamp              = [string]$appRow.RunTimestamp
+                    RecordKey                 = [string]$appRow.RecordKey
+                    DisplayName               = [string]$appRow.DisplayName
+                    Id                        = [string]$appRow.Id
+                    AppType                   = [string]$appRow.PolicyType
+                    InstalledDeviceCount      = $counts['InstalledDeviceCount']
+                    FailedDeviceCount         = $counts['FailedDeviceCount']
+                    NotInstalledDeviceCount   = $counts['NotInstalledDeviceCount']
+                    PendingInstallDeviceCount = $counts['PendingInstallDeviceCount']
+                    NotApplicableDeviceCount  = $counts['NotApplicableDeviceCount']
+                    InstalledUserCount        = $counts['InstalledUserCount']
+                    FailedUserCount           = $counts['FailedUserCount']
+                })
+            }
+
+            if ($missingFromReport -gt 0) {
+                Write-Warning ('{0} exported app(s) had no row in the install summary report and were left out of the CSV.' -f $missingFromReport)
+            }
+            Write-Verbose ('App install status: {0} row(s) from one report call, {1} app(s) not in it.' -f
+                $appInstallStatus.Count, $missingFromReport)
+        }
+        catch [System.Exception] {
+            Write-Warning ('App install status could not be read, export unaffected - {0}' -f
+                (Get-GraphErrorDetail -ErrorRecord $PSItem))
+        }
+    }
+}
+
 # Deterministic row order - required for a meaningful line-by-line diff between runs.
 $inventory |
     Sort-Object -Property PolicyArea, DisplayName, Id |
@@ -2719,6 +2879,10 @@ $manifest = [ordered]@{
     areasExported            = @($areaResults | Where-Object { $PSItem.status -eq 'exported' }).Count
     areasSkipped             = @($areaResults | Where-Object { $PSItem.status -eq 'skipped' }).Count
     exportComplete           = ($skipped.Count -eq 0)
+    # Requested-but-zero-rows is a real state (report unreachable, or the report knows none of
+    # the apps) and must be visible without reading the warning stream, like areasSkipped.
+    appInstallStatusRequested = $appInstallStatusRequested
+    appInstallStatusRows      = $appInstallStatus.Count
     areas                    = @($areaResults)
 }
 $manifestPath = Join-Path -Path $runDirectory -ChildPath ('_manifest_{0}.json' -f $fileStamp)
