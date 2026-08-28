@@ -349,6 +349,34 @@ the previous run whose resources point at that policy.
 
 Without the switch, no `auditEvents` call is made at all.
 
+### Setting definitions
+
+`-IncludeSettingDefinitions` fetches Settings Catalog detail with
+`$expand=settingDefinitions` and writes one run-wide `_settingdefinitions_<stamp>.json`,
+deduplicated on definition id across every policy. Each definition is projected to `id`,
+`displayName`, `description`, and `options` (`itemId` + `displayName`) — enough for a
+consumer to turn a `settingDefinitionId`, or a choice value like
+`device_vendor_msft_policy_config_privacy_letappsaccesslocation_1`, into readable text.
+
+The expanded definitions are lifted out and **recursively stripped** from each policy's
+configuration before it is hashed, so the switch never moves a `ConfigurationHash`. Intents
+do not support the same expand, so their settings stay opaque. The file's absence means
+"not requested"; an empty `definitions` array means "requested, none found".
+
+### For a documentation run
+
+The three enrichment switches are independent and none of them touches a hash or the change
+set schema, so a run meant to feed a documentation agent should pass all three:
+
+```powershell
+./Export-IntuneConfigurationInventory.ps1 -CompareWithPrevious `
+    -IncludeAppInstallStatus -IncludeAuditActor -IncludeSettingDefinitions -Verbose
+```
+
+The agent reads the change set as before, then resolves each `settingDefinitionId` it meets
+against `_settingdefinitions_<stamp>.json` and cross-references `auditActors` and
+`AppInstallStatus_<stamp>.csv` from the same run folder.
+
 ### Platform grouping
 
 Graph exposes no platform at all for remediations, platform scripts, Autopilot profiles,

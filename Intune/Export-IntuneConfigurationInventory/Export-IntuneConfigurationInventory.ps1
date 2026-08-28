@@ -15,6 +15,7 @@
                     _manifest_<yyyy-MM-dd_HHmm>.json
                     AppInstallStatus_<yyyy-MM-dd_HHmm>.csv   (only with -IncludeAppInstallStatus)
                     _auditevents_<yyyy-MM-dd_HHmm>.json   (only with -IncludeAuditActor)
+                    _settingdefinitions_<yyyy-MM-dd_HHmm>.json   (only with -IncludeSettingDefinitions)
                     <Policy-Area>/
                         <Name>_<Id>_<yyyy-MM-dd_HHmm>.json
                 <Tenant>_<yyyy-MM-dd_HHmm>.zip        (only with -CompressOutput)
@@ -94,13 +95,41 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.10.1
+    Version:        1.11.0
     Creation Date:  2026-07-30
     Last Updated:   2026-08-28
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.11.0 - 2026-08-28
+            Fixed a double-wrapping in the sidecar: 'relationships' on Win32 apps and the
+            detail-settings key on Settings Catalog, ADMX and intents were assigned as
+            @(Get-GraphCollection ...), which nested the already-comma-guarded list inside
+            another array and serialised as [[...]]. Removed the @() on both.
+
+            ONE-TIME WAVE: that changes the serialisation, so the ConfigurationHash of every
+            policy with detail settings (Settings Catalog, ADMX, intents) and every Win32 app
+            with supersedence relationships moves once. The first run after upgrading reports
+            those as modified; the run after that is clean.
+
+            Added -IncludeSettingDefinitions. With the switch, Settings Catalog detail is
+            fetched with $expand=settingDefinitions and a run-wide
+            _settingdefinitions_<stamp>.json is written (schemaVersion / generatedUtc /
+            definitionCount / definitions), deduplicated on definition id across all policies,
+            each projected to id / displayName / description / options[itemId, displayName].
+            A consumer uses it to turn a settingDefinitionId - and a choice value such as
+            ..._letappsaccesslocation_1 - into readable text.
+
+            The switch does NOT move any ConfigurationHash: the expanded settingDefinitions
+            are lifted out and stripped from each policy's configuration - recursively, since
+            the Settings Catalog tree nests settingInstance under choiceSettingValue.children
+            arbitrarily deep - before the configuration is canonicalised and hashed. Intents
+            do not support the same expand, so their definitions stay opaque.
+
+            The manifest gains settingDefinitionsCount; the result object gains
+            SettingDefinitionsPath.
 
         1.10.1 - 2026-08-28
             Fixed -IncludeAppInstallStatus, which had stopped producing anything: Graph
@@ -421,6 +450,13 @@ param(
     # permission: the audit log sits behind DeviceManagementApps.Read.All, which the app
     # already has. actor.ipAddress / userId / userPermissions are never written to disk.
     [switch]$IncludeAuditActor,
+
+    # Fetch Settings Catalog detail with $expand=settingDefinitions and write a run-wide
+    # _settingdefinitions_<stamp>.json so a consumer can turn a settingDefinitionId (and a
+    # choice value like ..._letappsaccesslocation_1) into readable text. The definitions are
+    # stripped back out of each policy's configuration before hashing, so the switch never
+    # moves a ConfigurationHash. Without it, no $expand and no file.
+    [switch]$IncludeSettingDefinitions,
 
     [switch]$IncludeConditionalAccess,
 
@@ -1333,6 +1369,66 @@ function Get-AppInstallSummaryReport {
     }
 
     return @{ Rows = $rows }
+}
+
+function Split-SettingDefinition {
+    <#
+        Walks a Settings Catalog settings tree, moves every $expand=settingDefinitions payload
+        into $Catalog (keyed on definition id, projected to id/displayName/description and the
+        options needed to translate a choice value), and removes the key from the node.
+
+        Recursive on purpose. Settings Catalog nests settingInstance ->
+        choiceSettingValue.children[] -> settingInstance arbitrarily deep, and Graph attaches
+        the expanded definitions at more than the top level. A top-level-only strip leaves
+        residue, which diverges the ConfigurationHash - the one thing this switch must not do.
+
+        $Catalog is mutated in place; the return value is not used.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$Node,
+        [Parameter(Mandatory)][hashtable]$Catalog
+    )
+
+    if ($null -eq $Node) { return }
+
+    if ($Node -isnot [string] -and $Node -is [System.Collections.IEnumerable]) {
+        foreach ($element in $Node) { Split-SettingDefinition -Node $element -Catalog $Catalog }
+        return
+    }
+
+    if ($Node -isnot [System.Management.Automation.PSCustomObject]) { return }
+
+    # Snapshot the names: the loop removes properties from the live collection.
+    foreach ($propertyName in @($Node.PSObject.Properties.Name)) {
+        if ($propertyName -eq 'settingDefinitions' -or $propertyName -like 'settingDefinitions@*') {
+            foreach ($definition in @($Node.PSObject.Properties[$propertyName].Value)) {
+                if ($null -eq $definition) { continue }
+                $definitionId = [string](Get-ObjectProperty -InputObject $definition -Name 'id')
+                if ([string]::IsNullOrWhiteSpace($definitionId) -or $Catalog.ContainsKey($definitionId)) { continue }
+
+                $options = [System.Collections.Generic.List[object]]::new()
+                foreach ($option in @(Get-ObjectProperty -InputObject $definition -Name 'options')) {
+                    if ($null -eq $option) { continue }
+                    $options.Add([ordered]@{
+                        itemId      = [string](Get-ObjectProperty -InputObject $option -Name 'itemId')
+                        displayName = [string](Get-ObjectProperty -InputObject $option -Name 'displayName')
+                    })
+                }
+
+                $Catalog[$definitionId] = [ordered]@{
+                    id          = $definitionId
+                    displayName = [string](Get-ObjectProperty -InputObject $definition -Name 'displayName')
+                    description = [string](Get-ObjectProperty -InputObject $definition -Name 'description')
+                    options     = @($options)
+                }
+            }
+            $Node.PSObject.Properties.Remove($propertyName)
+            continue
+        }
+
+        Split-SettingDefinition -Node $Node.PSObject.Properties[$propertyName].Value -Catalog $Catalog
+    }
 }
 
 function Resolve-GroupDisplayName {
@@ -2443,11 +2539,17 @@ $roleService = 'DeviceManagementServiceConfig.Read.All'
 # assignments in every other area, and the loop populates the filter-name cache from
 # this area's own result rather than fetching the same collection a second time.
 # Moving it later leaves filters in earlier areas showing as raw GUIDs.
+
+# The settingDefinitions expand is only worth its ~9x payload when the definitions are
+# actually being collected. Built once here rather than repeating the format string.
+$settingsCatalogDetail = 'deviceManagement/configurationPolicies/{0}/settings'
+if ($IncludeSettingDefinitions) { $settingsCatalogDetail += '?$expand=settingDefinitions' }
+
 $policyDefinitions = @(
     New-PolicyDefinition -Area 'Assignment Filter' -Resource 'deviceManagement/assignmentFilters' -RequiredRole $roleService -ExpandAssignments $false
 
     New-PolicyDefinition -Area 'Settings Catalog' -Resource 'deviceManagement/configurationPolicies' -RequiredRole $roleConfig `
-        -NameProperty 'name' -DetailResourceFormat 'deviceManagement/configurationPolicies/{0}/settings' -DetailKey 'settings'
+        -NameProperty 'name' -DetailResourceFormat $settingsCatalogDetail -DetailKey 'settings'
 
     New-PolicyDefinition -Area 'Device Configuration (Templates)' -Resource 'deviceManagement/deviceConfigurations' -RequiredRole $roleConfig
 
@@ -2618,6 +2720,8 @@ $inventory = [System.Collections.Generic.List[pscustomobject]]::new()
 $appInstallStatus = [System.Collections.Generic.List[pscustomobject]]::new()
 $areaResults = [System.Collections.Generic.List[pscustomobject]]::new()
 $skipped = [System.Collections.Generic.List[string]]::new()
+# Run-wide, deduplicated on definition id across every policy - see -IncludeSettingDefinitions.
+$settingDefinitions = @{}
 
 foreach ($definition in $policyDefinitions) {
     $baseUri = 'https://graph.microsoft.com/{0}/{1}' -f $definition.ApiVersion, $definition.Resource
@@ -2717,7 +2821,11 @@ foreach ($definition in $policyDefinitions) {
 
             if (($supersedingCount + $supersededCount) -gt 0) {
                 try {
-                    $configuration['relationships'] = @(Get-GraphCollection -Uri ('{0}/{1}/relationships' -f $baseUri, $id))
+                    # No @() around the call: Get-GraphCollection already returns ', $results'
+                    # so an empty collection survives as [], not $null. Wrapping it in @()
+                    # nests the list inside a one-element array and the sidecar serialises as
+                    # [[...]] - which then diverges the hash the day someone "cleans it up".
+                    $configuration['relationships'] = Get-GraphCollection -Uri ('{0}/{1}/relationships' -f $baseUri, $id)
                 }
                 catch [System.Exception] {
                     Write-Warning ('Application "{0}": could not read supersedence relationships - {1}' -f $id, $PSItem.Exception.Message)
@@ -2728,7 +2836,17 @@ foreach ($definition in $policyDefinitions) {
         if (-not $SkipDetailedSettings -and -not [string]::IsNullOrWhiteSpace($definition.DetailResourceFormat) -and -not [string]::IsNullOrWhiteSpace($id)) {
             try {
                 $detailUri = 'https://graph.microsoft.com/{0}/{1}' -f $definition.ApiVersion, ($definition.DetailResourceFormat -f $id)
-                $configuration[$definition.DetailKey] = @(Get-GraphCollection -Uri $detailUri)
+                # No @() - see the relationships call above. Get-GraphCollection's ', $results'
+                # already keeps an empty collection as []; @() would nest it and serialise [[...]].
+                $configuration[$definition.DetailKey] = Get-GraphCollection -Uri $detailUri
+
+                # With -IncludeSettingDefinitions the Settings Catalog detail is fetched with
+                # $expand=settingDefinitions. Lift those definitions into the run-wide catalog
+                # and strip the key back out, recursively, so $configuration stays byte-for-byte
+                # what it would have been without the switch and the hash is untouched.
+                if ($IncludeSettingDefinitions -and $definition.Resource -eq 'deviceManagement/configurationPolicies') {
+                    Split-SettingDefinition -Node $configuration[$definition.DetailKey] -Catalog $settingDefinitions
+                }
             }
             catch [System.Exception] {
                 Write-Warning ('{0} "{1}": could not read detail settings - {2}' -f $definition.Area, $id, $PSItem.Exception.Message)
@@ -2883,10 +3001,28 @@ $manifest = [ordered]@{
     # the apps) and must be visible without reading the warning stream, like areasSkipped.
     appInstallStatusRequested = $appInstallStatusRequested
     appInstallStatusRows      = $appInstallStatus.Count
+    settingDefinitionsCount   = $settingDefinitions.Count
     areas                    = @($areaResults)
 }
 $manifestPath = Join-Path -Path $runDirectory -ChildPath ('_manifest_{0}.json' -f $fileStamp)
 Write-Utf8File -Path $manifestPath -Content (ConvertTo-Json -InputObject $manifest -Depth 6)
+
+# Run-wide Settings Catalog definitions, collected and deduplicated during the area loop and
+# already stripped out of every policy's configuration. Written even when empty, like
+# _auditevents_: its absence means "not requested", not "no definitions".
+$settingDefinitionsPath = $null
+if ($IncludeSettingDefinitions) {
+    $settingDefinitionsPath = Join-Path -Path $runDirectory -ChildPath ('_settingdefinitions_{0}.json' -f $fileStamp)
+    $definitionList = @($settingDefinitions.Values | Sort-Object -Property { [string]$PSItem.id })
+    $settingDefinitionsDocument = [ordered]@{
+        schemaVersion   = 1
+        generatedUtc    = (Get-Date).ToUniversalTime().ToString('o')
+        definitionCount = $definitionList.Count
+        definitions     = $definitionList
+    }
+    Write-Utf8File -Path $settingDefinitionsPath -Content (ConvertTo-Json -InputObject $settingDefinitionsDocument -Depth 8)
+    Write-Verbose ('Setting definitions: {0} -> {1}' -f $definitionList.Count, $settingDefinitionsPath)
+}
 
 # Kept out of the inventory CSV and out of every hash on purpose: install counts are a
 # point-in-time reading, not configuration, and folding them in would make every app look
@@ -2980,16 +3116,17 @@ Write-Verbose ('Exported {0} policies from {1} area(s) in tenant {2}' -f
     $inventory.Count, $manifest.areasExported, $TenantName)
 
 Write-Output ([pscustomobject]@{
-    TenantRoot           = $tenantRoot
-    RunDirectory         = $runDirectory
-    CsvPath              = $csvPath
-    ManifestPath         = $manifestPath
-    ZipPath              = $zipPath
-    AppInstallStatusPath = $appInstallStatusPath
-    AuditEventsPath      = $auditEventsPath
-    ChangeSetPath        = $changeSetPath
-    PolicyCount          = $inventory.Count
-    ExportComplete       = $manifest.exportComplete
+    TenantRoot             = $tenantRoot
+    RunDirectory           = $runDirectory
+    CsvPath                = $csvPath
+    ManifestPath           = $manifestPath
+    ZipPath                = $zipPath
+    AppInstallStatusPath   = $appInstallStatusPath
+    AuditEventsPath        = $auditEventsPath
+    SettingDefinitionsPath = $settingDefinitionsPath
+    ChangeSetPath          = $changeSetPath
+    PolicyCount            = $inventory.Count
+    ExportComplete         = $manifest.exportComplete
 })
 
 #endregion Main
