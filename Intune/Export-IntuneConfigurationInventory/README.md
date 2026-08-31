@@ -16,6 +16,62 @@ The comparison is `Invoke-InventoryComparison`, an internal function that touche
 but the filesystem. It was a separate script until 1.9.0; nothing ran it standalone, so it
 was folded in. An export of ~170 policies takes a few minutes; the comparison adds seconds.
 
+## Quick start
+
+Six steps from nothing to a change set. Every step has a fuller section further down.
+
+**1. Check PowerShell.** 7.4 or later.
+
+```powershell
+$PSVersionTable.PSVersion
+```
+
+**2. Create an Entra ID app registration** and grant admin consent for these *Application*
+permissions — Application, not Delegated:
+
+`DeviceManagementConfiguration.Read.All`, `DeviceManagementScripts.Read.All`,
+`DeviceManagementApps.Read.All`, `DeviceManagementServiceConfig.Read.All`,
+`Group.Read.All`, `Organization.Read.All`
+
+**3. Give the script a credential.** A client secret is the quickest way to try it; a
+certificate is what you want for anything scheduled.
+
+```powershell
+$env:INTUNE_TENANT_ID     = '<tenant-guid>'
+$env:INTUNE_CLIENT_ID     = '<app-guid>'
+$env:INTUNE_CLIENT_SECRET = '<secret>'
+```
+
+**4. Check the token before reading anything.**
+
+```powershell
+./Export-IntuneConfigurationInventory.ps1 -TestPermissionOnly -Verbose
+```
+
+Expect `AllAreasReady : True`. Anything under `BlockedAreas` is a permission that was not
+granted or not consented.
+
+**5. Run the first export.** It has nothing to compare against yet — this run is the baseline.
+
+```powershell
+./Export-IntuneConfigurationInventory.ps1 -OutputDirectory ./Data
+```
+
+**6. Run it again whenever you want to know what changed.**
+
+```powershell
+./Export-IntuneConfigurationInventory.ps1 -OutputDirectory ./Data -CompareWithPrevious
+```
+
+The answer is `_changeset_vs_<previous run>.json` in the new run folder. Two runs against an
+unchanged tenant produce an empty change set — that is the point.
+
+**More than one tenant?** Skip step 3 and put the credentials in a file instead — see
+[Several customers](#several-customers).
+
+**Feeding a documentation agent?** There are three optional switches that cost extra calls and
+extra payload — see [For a documentation run](#for-a-documentation-run).
+
 ## The hard requirement
 
 **Two runs against an unchanged tenant must produce byte-identical output.** Without that,
