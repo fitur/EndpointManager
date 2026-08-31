@@ -99,13 +99,20 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.12.0
+    Version:        1.12.1
     Creation Date:  2026-07-30
     Last Updated:   2026-08-31
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.12.1 - 2026-08-31
+            Documentation only, no behaviour change. Changelog entries 1.9.0 and older are
+            compressed to one line each; the full text is in git history. The "certificate
+            object is never disposed" rationale moved from the 1.8.0 entry to a comment on
+            $script:AuthContext.Certificate, and Invoke-InventoryComparison's param block now
+            explains why four of its six parameters are never set by the in-script caller.
 
         1.12.0 - 2026-08-31
             The per-area sidecar folders are now packed into one archive per run,
@@ -205,163 +212,28 @@
             leaves no audit trail, and an audit event can exist with no hash change. A 30-day
             window is not necessarily representative of a month with real portal edits.
 
-        1.9.0 - 2026-08-27
-            Merged Compare-IntuneConfigurationInventory.ps1 into this script as the
-            Comparison region: the change-set taxonomy, its nine helpers and its main
-            routine, the last now Invoke-InventoryComparison. -CompareWithPrevious calls
-            the function directly instead of shelling out to a neighbouring file, and
-            -ComparePath is gone.
+        Earlier releases, one line each. Full entries are in git history.
 
-            The comparison was kept separate on the expectation that it would be re-run
-            standalone - after a taxonomy change, or against an older pair of runs - without
-            paying for another Graph export. That did not happen: nothing invokes it
-            standalone, and the documentation agent consumes the change-set JSON rather than
-            the script. -CompareWithPrevious was the only entry point, so the second file
-            only ever cost a path resolution that could fail after a finished export.
-
-            Lost in the merge: pointing the comparison at a root above the per-customer
-            folders to diff every customer in one pass. If that is needed again, the right
-            shape is a thin wrapper that calls this script per customer, not a return of the
-            multi-tenant block. The old script remains in git history.
-
-        1.8.0 - 2026-08-26
-            Added certificate authentication as an alternative to a client secret, via
-            -CertificateThumbprint (looked up in the CurrentUser store - the login Keychain
-            on macOS) or -CertificatePath for a PFX file, with fallback to
-            INTUNE_CERT_THUMBPRINT / INTUNE_CERT_PATH / INTUNE_CERT_PASSWORD. A certificate
-            wins over a secret whenever one is resolved, so a secret left in the environment
-            cannot silently shadow it.
-
-            Unlike New-IntuneWin32AppJson.ps1, which hands the certificate to
-            Connect-MSIntuneGraph and lets the module sign the token request, this script has
-            no module and talks to Graph over raw REST, so it builds the client_assertion JWT
-            itself (RS256, x5t = base64url of the certificate's SHA1 hash). Get-ClientCertificate
-            is deliberately identical to the copy in New-IntuneWin32AppJson.ps1 - never change
-            one without the other.
-
-            The resolved certificate object is intentionally never disposed: the private key
-            is needed to re-sign a new assertion for every token renewal over the life of the
-            run, not just the first one.
-
-            CertificatePassword is now a SecureString. BREAKING: -CertificatePassword 'text'
-            on the command line no longer works; use the environment variable, or
-            -CertificatePassword (Read-Host -AsSecureString).
-
-            An explicit -CertificatePath or -CertificateThumbprint on the command line now
-            clears the other source when the selected customer's file defines it, instead of
-            leaving both set and tripping the "not both" guard. Previously the only way to
-            override a customer's certificate source from the command line was to also pass
-            the customer's own source explicitly.
-
-            usedLicenseCount and releaseDateTime are now excluded from the configuration and
-            therefore from the hash: both were observed to drift on their own on unchanged
-            apps in production. NOTE: excluding them changes the hash of every VPP app that
-            has either field, so the next run after upgrading reports a one-time wave of
-            "modified" on those apps. The run after that is the one that shows whether the
-            noise is actually gone.
-
-        1.7.0 - 2026-08-20
-            Added applications as a nineteenth area: deviceAppManagement/mobileApps with
-            assignments expanded. One area for every app type rather than one per type -
-            PolicyType carries the odata type, so the platform split downstream files Win32,
-            iOS, Android and macOS apps onto their own pages automatically.
-
-            Assignments now also capture intent (required/available/uninstall) in a new
-            AssignmentIntent column. Policies have no intent; for an app it is half the
-            information, and moving one from required to available is a real change that the
-            configuration hash alone would not show.
-
-            The version column falls back from 'version' to 'displayVersion' to
-            'versionNumber' - Win32 apps use the second and store apps the third, so without
-            it the column was empty for exactly the apps that matter most.
-
-            largeIcon is stripped alongside assignments before hashing. It is a base64 PNG
-            worth tens of kilobytes per Win32 app, and a re-encode by Intune would register
-            as a configuration change that never happened.
-
-            Supersedence relationships are fetched only when supersedingAppCount or
-            supersededAppCount is above zero, which is a handful of apps rather than one
-            request per app.
-
-            installSummary is deliberately NOT part of the configuration or the hash:
-            installedDeviceCount changes on every device check-in, so including it would
-            report every app as modified on every run. -IncludeAppInstallStatus writes it to
-            a separate AppInstallStatus CSV that is neither hashed nor diffed.
-
-            NOTE: the new area and the new column both require a fresh baseline. The first
-            comparison after upgrading will report every application as added.
-
-        1.6.0 - 2026-08-20
-            Added multi-customer credential handling via -CustomerConfigPath and
-            -CustomerName. Credentials come from a local JSON file instead of the
-            environment; the customer is picked with a native macOS dialog or a numbered
-            console menu when no name is given. Secrets are read inline or through
-            Microsoft.PowerShell.SecretManagement.
-
-            An optional value the selected customer does not define is CLEARED rather than
-            left at whatever the environment or a previous selection held. TenantName is
-            this script's dangerous one: it names the output folder, so inheriting it would
-            write one customer's complete security configuration into another customer's
-            directory. Cleared, it falls back to the name read from Graph, which is always
-            correct for the tenant actually being exported. The same applies to
-            OutputDirectory and IncludeConditionalAccess; JsonDepth has a working default
-            and is therefore only ever replaced, never cleared.
-
-            The block runs before the credential preflight, which would otherwise throw on
-            the empty environment variables that are expected when a customer file is used.
-
-        1.5.0 - 2026-08-05
-            Hardening after an external code review, plus optional orchestration.
-            Credentials are now validated in an explicit preflight: [ValidateNotNullOrEmpty()]
-            never runs on default values, so an unset INTUNE_* variable used to surface as a
-            request against "login.microsoftonline.com//oauth2/...". ClientId is checked
-            against a GUID pattern and TenantId against GUID or domain. Passing -ClientSecret
-            on the command line now warns about history and transcripts. Assignment filters
-            are no longer fetched twice - the area is first in the definition list and doubles
-            as the filter-name cache. A literal "value": null from Graph no longer produces a
-            phantom row. Fixed a latent collision where two runs in the same minute got
-            separate folders but an identical file stamp, silently overwriting the first run's
-            zip; seconds are now appended to both stamps. Added -CompareWithPrevious, which
-            runs the comparison script after a successful export without merging the two.
-
-        1.4.0 - 2026-07-31
-            Added -CompressOutput, producing a zip of the run folder for handover. The folder
-            remains the source of truth: diffing two runs from archives would mean unpacking
-            both first. Uses [System.IO.Compression.ZipFile] rather than Compress-Archive,
-            which is markedly faster on many small files.
-
-        1.3.0 - 2026-07-31
-            Restructured the output into <Tenant>/<yyyy-MM-dd HH-mm>/ so a run is easy to
-            identify while browsing. File names are now reduced to ASCII: macOS stores names
-            decomposed (NFD) while Linux compares byte-exact, so a Swedish character in a path
-            made every entry in the CSV unresolvable as soon as the folder was copied to
-            another platform. Tenant display name is read from Graph when Organization.Read.All
-            is granted, otherwise the tenant GUID is used.
-
-        1.2.0 - 2026-07-30
-            Configuration moved out of the CSV into one JSON file per policy, with a manifest
-            recording every area's status and object count. Inline JSON had produced single
-            cells of 284 000 characters - past Excel's 32 767 limit and past the default field
-            limit of most CSV readers. The manifest is what lets a diffing consumer tell "this
-            area was empty" from "we could not read this area", the difference between no
-            change and an apparent mass deletion.
-
-        1.1.0 - 2026-07-30
-            Correctness work driven by real runs rather than code reading. Object keys are now
-            canonicalised with ordinal sorting before serialisation: Graph guarantees no
-            property order, and 172 of 175 records had unsorted keys, so every run looked like
-            a change. JSON depth raised from 10 to 20 after measuring Settings Catalog trees at
-            depth 12 - 24 records were being truncated silently. 401 and 403 are now separate
-            exception types: 401 is global and aborts, 403 is scoped to one area and skips it,
-            where previously a single missing scope discarded an otherwise complete export.
-            An empty Graph "value" array no longer unrolls to $null and inserts the raw
-            response envelope as a phantom row.
-
-        1.0.0 - 2026-07-30
-            First working version: 18 policy areas read over Graph REST with client
-            credentials, no SDK. Pagination via @odata.nextLink, 429 handling that respects
-            Retry-After with exponential backoff, group and assignment-filter name resolution,
-            and a CSV with fixed column order and deterministic row order.
+        1.9.0 - 2026-08-27  Merged Compare-IntuneConfigurationInventory.ps1 in as the Comparison
+                            region and Invoke-InventoryComparison; -ComparePath removed.
+        1.8.0 - 2026-08-26  Certificate authentication (-CertificateThumbprint / -CertificatePath)
+                            as an alternative to a client secret, preferred when both resolve;
+                            -CertificatePassword became a SecureString; usedLicenseCount and
+                            releaseDateTime dropped from the configuration and the hash.
+        1.7.0 - 2026-08-20  Applications added as their own area, with an AssignmentIntent column;
+                            largeIcon and per-device install counts kept out of the hash.
+        1.6.0 - 2026-08-20  Multi-customer credentials via -CustomerConfigPath / -CustomerName; an
+                            optional value the customer does not define is cleared, not inherited.
+        1.5.0 - 2026-08-05  Explicit credential preflight, split 401/403 handling, phantom-row
+                            fix, per-second file stamps, and -CompareWithPrevious.
+        1.4.0 - 2026-07-31  Added -CompressOutput, a run-folder zip for handover (removed in 1.12.0).
+        1.3.0 - 2026-07-31  Output restructured into <Tenant>/<timestamp>/ with ASCII-only names.
+        1.2.0 - 2026-07-30  Configuration moved from the CSV into one JSON sidecar per policy, with
+                            a manifest recording each area's status and count.
+        1.1.0 - 2026-07-30  Ordinal key canonicalisation before hashing, JSON depth 10 to 20, split
+                            401/403 exceptions, empty-value-array phantom-row fix.
+        1.0.0 - 2026-07-30  First working version: 18 policy areas over Graph REST, no SDK; nextLink
+                            pagination, Retry-After backoff, deterministic CSV row and column order.
 
 .EXAMPLE
     $env:INTUNE_TENANT_ID     = '00000000-0000-0000-0000-000000000000'
@@ -745,7 +617,9 @@ $script:AuthContext = [pscustomobject]@{
     ClientSecret = $ClientSecret
     # Populated in the Main region, once Get-ClientCertificate has been defined. Resolving
     # it once up front rather than per token request matters because a Keychain lookup can
-    # prompt, and a bad certificate should surface before any Graph work starts.
+    # prompt, and a bad certificate should surface before any Graph work starts. The resolved
+    # object is deliberately never disposed: New-ClientAssertion needs its private key to
+    # re-sign an assertion on every token renewal, not just the first, for the life of the run.
     Certificate  = $null
 }
 $script:GroupNameCache = @{}
@@ -2245,6 +2119,14 @@ function Invoke-InventoryComparison {
     # The old comparison script's Main, verbatim bar three points: -CurrentRun is dropped
     # (the current run is always the one just produced), the taxonomy reads are
     # $script:-qualified, and the trailing Write-Output stays as the return path.
+    #
+    # Only -TenantDirectory and -SidecarArchiveName are ever set by the in-script caller; the
+    # other four are not dead. -BaselineRun and -OutputPath are the seam that let the 1.9.0
+    # merge be proven byte-identical against the old standalone script - run the comparison
+    # over a chosen pair of runs and write the change set outside the run folder, the only way
+    # to verify a change to this function without writing into a customer's data. -NoPlatformSplit
+    # and -MaxValueLength keep parity with the standalone parameter set, and -MaxValueLength is
+    # the knob the open Format-DiffValue depth question will need.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$TenantDirectory,
