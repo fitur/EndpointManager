@@ -13,12 +13,12 @@
                 <yyyy-MM-dd HH-mm>/
                     IntuneConfigurationInventory_<Tenant>_<yyyy-MM-dd_HHmm>.csv
                     _manifest_<yyyy-MM-dd_HHmm>.json
+                    <Tenant>_<yyyy-MM-dd_HHmm>_sidecars.zip
+                        <Policy-Area>/<Name>_<Id>_<yyyy-MM-dd_HHmm>.json   (one archive entry per policy)
+                    _changeset_<...>.json   (only with -CompareWithPrevious)
                     AppInstallStatus_<yyyy-MM-dd_HHmm>.csv   (only with -IncludeAppInstallStatus)
                     _auditevents_<yyyy-MM-dd_HHmm>.json   (only with -IncludeAuditActor)
                     _settingdefinitions_<yyyy-MM-dd_HHmm>.json   (only with -IncludeSettingDefinitions)
-                    <Policy-Area>/
-                        <Name>_<Id>_<yyyy-MM-dd_HHmm>.json
-                <Tenant>_<yyyy-MM-dd_HHmm>.zip        (only with -CompressOutput)
 
     Folder and file names use LOCAL time so a run is easy to identify while browsing.
     The manifest records the same instant in UTC, in local time and with the UTC offset,
@@ -29,7 +29,9 @@
     configuration and the path to its JSON file, relative to the run folder. The
     configuration itself lives in the sidecar file: embedding it inline produced single
     cells of 284 000 characters, far past Excel's 32 767 limit and past the default field
-    limit of most CSV readers.
+    limit of most CSV readers. The per-area sidecar folders are packed into
+    <Tenant>_<stamp>_sidecars.zip at the end of the run, so ConfigurationFile in the CSV
+    (and in the change set) is the name of an entry in that archive, not a loose path.
 
     Both the JSON files and the hash are built from a canonicalised object (keys sorted
     with ordinal comparison, array order preserved). Graph does not guarantee property
@@ -44,8 +46,10 @@
     compares byte-exact, so a Swedish character in a path would make every entry in the
     CSV unresolvable once the folder is copied to another platform.
 
-    -CompressOutput adds a zip of the run folder for handover. The folder itself remains
-    the source of truth: diffing two runs from zips would mean unpacking both first.
+    The sidecar archive is written after the comparison, so a run being diffed still reads
+    its own sidecars as loose files and only earlier runs are read out of their archive.
+    A consumer that resolves ConfigurationFile opens <run>/<Tenant>_<stamp>_sidecars.zip
+    and reads the named entry; the manifest carries the archive name and entry count.
 
 .NOTES
     REQUIRED MICROSOFT GRAPH *APPLICATION* PERMISSIONS (admin consent required):
@@ -95,13 +99,37 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.11.0
+    Version:        1.12.0
     Creation Date:  2026-07-30
-    Last Updated:   2026-08-28
+    Last Updated:   2026-08-31
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.12.0 - 2026-08-31
+            The per-area sidecar folders are now packed into one archive per run,
+            <Tenant>_<stamp>_sidecars.zip, in the run folder. Measured: 16 area folders and
+            229 files collapse to a single archive. The area folders are deleted only after
+            the archive is verified to hold every file that went in; a mismatch or a failure
+            keeps them and warns, and never fails the export. Loose in the run root, as
+            before: the inventory CSV, AppInstallStatus_*.csv and the _manifest_ /
+            _changeset_ / _auditevents_ / _settingdefinitions_ JSON files.
+
+            BREAKING for a consumer that opened ConfigurationFile (and
+            previousConfigurationFile in the change set) as a plain path: it is now the name
+            of an entry inside <run>/<Tenant>_<stamp>_sidecars.zip. Each run folder holds its
+            own archive; the change set's new top-level sidecarArchive field names the
+            current run's, and the manifest gains sidecarArchive and sidecarCount. The
+            comparison reads sidecars through the archive (loose file first, archive second),
+            so diffing an already-archived previous run produces the same fieldChanges as
+            before. The archive is written after the comparison, so the run being diffed
+            still reads its own sidecars loose.
+
+            -CompressOutput is removed. Archiving the run is no longer opt-in, and the old
+            switch zipped the whole folder - CSV, manifest and all - which is not what a
+            consumer of the sidecars wants. The result object's ZipPath is replaced by
+            SidecarArchivePath.
 
         1.11.0 - 2026-08-28
             Fixed a double-wrapping in the sidecar: 'relationships' on Win32 apps and the
@@ -342,10 +370,6 @@
     .\Export-IntuneConfigurationInventory.ps1 -Verbose
 
 .EXAMPLE
-    # Folder plus a single zip to hand over to a downstream agent.
-    .\Export-IntuneConfigurationInventory.ps1 -CompressOutput -Verbose
-
-.EXAMPLE
     # Export and diff against the previous run in one command. The change set lands in the
     # new run folder as _changeset_vs_<previous>.json, or _changeset_baseline.json on a
     # first run.
@@ -376,7 +400,7 @@
     # build one with (Read-Host -AsSecureString) if the parameter is needed explicitly.
     $env:INTUNE_CERT_PATH     = '/home/site/wwwroot/intune.pfx'
     $env:INTUNE_CERT_PASSWORD = 'your-pfx-password'
-    .\Export-IntuneConfigurationInventory.ps1 -CompressOutput
+    .\Export-IntuneConfigurationInventory.ps1 -Verbose
 #>
 
 #Requires -Version 7.4
@@ -425,10 +449,6 @@ param(
     # and ConvertTo-Json truncates silently past the limit.
     [ValidateRange(2, 100)]
     [int]$JsonDepth = 20,
-
-    # Also produce a single .zip of the run folder - one artefact to hand over instead of
-    # 174 loose files. The folder remains the source of truth for diffing.
-    [switch]$CompressOutput,
 
     # Produce a change set against the previous run once the export finishes, in the same
     # command. Runs Invoke-InventoryComparison over this tenant's run folders; a failure
@@ -1698,6 +1718,63 @@ function Get-AuditEventWindow {
     return , $projected
 }
 
+# Opened <run>_sidecars.zip handles, keyed by run folder path. Populated lazily by
+# Get-SidecarContent and disposed by the -CompareWithPrevious caller once the comparison
+# returns - at most two are ever live at once, the baseline run and the current one.
+$script:sidecarArchiveCache = @{}
+
+function Get-SidecarContent {
+    <#
+        Returns a sidecar's raw JSON text, or '' when it cannot be found.
+
+        Loose file first, the run's _sidecars.zip second. A run that has just finished still
+        has its area folders on disk - the archive is written last, after the comparison - so
+        the current run is always read loose, while any earlier run has only the archive.
+        Routing both comparison readers (the platform peek and the field-level diff) through
+        here makes a fresh run and an already-archived one behave identically.
+
+        Archive entry names are written with '/' on every platform, the same convention
+        ConfigurationFile uses (see the note at $relativeConfigPath), so $RelativeFile matches
+        an entry verbatim - no separator conversion. The archive is opened once per run path,
+        not once per lookup: the field diff calls this once per changed policy and the
+        platform peek once per row in three areas.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$RunPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$RelativeFile
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RelativeFile)) { return '' }
+
+    $loosePath = Join-Path -Path $RunPath -ChildPath $RelativeFile
+    if (Test-Path -Path $loosePath -PathType Leaf) {
+        return [string](Get-Content -Path $loosePath -Raw -Encoding utf8)
+    }
+
+    if (-not $script:sidecarArchiveCache.ContainsKey($RunPath)) {
+        $archiveFile = @(Get-ChildItem -Path $RunPath -Filter '*_sidecars.zip' -File) | Select-Object -First 1
+        if ($null -eq $archiveFile) {
+            $script:sidecarArchiveCache[$RunPath] = $null
+        }
+        else {
+            $script:sidecarArchiveCache[$RunPath] = [System.IO.Compression.ZipFile]::OpenRead($archiveFile.FullName)
+        }
+    }
+
+    $archive = $script:sidecarArchiveCache[$RunPath]
+    if ($null -eq $archive) { return '' }
+
+    $entry = $archive.GetEntry($RelativeFile)
+    if ($null -eq $entry) { return '' }
+
+    # Write-Utf8File writes without a BOM, so read the entry the same way.
+    $reader = [System.IO.StreamReader]::new($entry.Open(), [System.Text.UTF8Encoding]::new($false))
+    try { return $reader.ReadToEnd() }
+    finally { $reader.Dispose() }
+}
+
 #endregion Helpers
 
 #region Comparison
@@ -1887,11 +1964,14 @@ function Get-SidecarPlatform {
     # result arrives as $null and a single value as a bare string - and .Count on either
     # throws under StrictMode.
     if ([string]::IsNullOrWhiteSpace($RelativeFile)) { return , [string[]]@() }
-    $fullPath = Join-Path -Path $RunPath -ChildPath $RelativeFile
-    if (-not (Test-Path -Path $fullPath)) { return , [string[]]@() }
+
+    # Loose file first, then the run's _sidecars.zip - see Get-SidecarContent. An earlier run
+    # has only the archive, so a bare Test-Path here would lose the peek after archiving.
+    $raw = Get-SidecarContent -RunPath $RunPath -RelativeFile $RelativeFile
+    if ([string]::IsNullOrWhiteSpace($raw)) { return , [string[]]@() }
 
     try {
-        $json = Get-Content -Path $fullPath -Raw -Encoding utf8 | ConvertFrom-Json
+        $json = $raw | ConvertFrom-Json
     }
     catch [System.Exception] {
         Write-Verbose ('Could not read {0} for platform detection: {1}' -f $RelativeFile, $PSItem.Exception.Message)
@@ -2170,6 +2250,10 @@ function Invoke-InventoryComparison {
         [Parameter(Mandatory)][string]$TenantDirectory,
         [string]$BaselineRun,
         [string]$OutputPath,
+        # Filename of the current run's sidecar archive, echoed into the change set so a
+        # consumer knows configurationFile now points inside a zip. Discovered from the
+        # current run folder when not supplied.
+        [string]$SidecarArchiveName,
         [switch]$NoPlatformSplit,
         [ValidateRange(50, 10000)][int]$MaxValueLength = 300
     )
@@ -2199,6 +2283,14 @@ function Invoke-InventoryComparison {
     }
     else {
         Write-Verbose ('Comparing "{0}" -> "{1}"' -f $baselineFolder, $currentFolder)
+    }
+
+    # A standalone caller (not the -CompareWithPrevious path) runs after the current run was
+    # already archived, so the name can be read off disk. The wired caller passes it because
+    # the archive does not exist yet when the comparison runs.
+    if ([string]::IsNullOrWhiteSpace($SidecarArchiveName)) {
+        $discoveredArchive = @(Get-ChildItem -Path $current.Path -Filter '*_sidecars.zip' -File) | Select-Object -First 1
+        if ($null -ne $discoveredArchive) { $SidecarArchiveName = $discoveredArchive.Name }
     }
 
     # Union of areas skipped in either run. Deletions cannot be asserted for these.
@@ -2400,12 +2492,15 @@ function Invoke-InventoryComparison {
 
                     $fieldChanges = [System.Collections.Generic.List[object]]::new()
                     if ($configChanged) {
-                        $oldFile = Join-Path -Path $baseline.Path -ChildPath ([string]$old.ConfigurationFile)
-                        $newFile = Join-Path -Path $current.Path -ChildPath ([string]$row.ConfigurationFile)
+                        # Loose file first, then the run's _sidecars.zip - see Get-SidecarContent.
+                        # The baseline has been archived by its own run; the current run is
+                        # still loose because the archive is written after this comparison.
+                        $oldRaw = Get-SidecarContent -RunPath $baseline.Path -RelativeFile ([string]$old.ConfigurationFile)
+                        $newRaw = Get-SidecarContent -RunPath $current.Path -RelativeFile ([string]$row.ConfigurationFile)
 
-                        if ((Test-Path -Path $oldFile) -and (Test-Path -Path $newFile)) {
-                            $oldJson = Get-Content -Path $oldFile -Raw -Encoding utf8 | ConvertFrom-Json
-                            $newJson = Get-Content -Path $newFile -Raw -Encoding utf8 | ConvertFrom-Json
+                        if (-not [string]::IsNullOrWhiteSpace($oldRaw) -and -not [string]::IsNullOrWhiteSpace($newRaw)) {
+                            $oldJson = $oldRaw | ConvertFrom-Json
+                            $newJson = $newRaw | ConvertFrom-Json
                             Compare-JsonNode -Reference $oldJson -Difference $newJson -Path '' `
                                 -Changes $fieldChanges -MaxValueLength $MaxValueLength
                         }
@@ -2486,6 +2581,10 @@ function Invoke-InventoryComparison {
         tenantDirectory = $TenantDirectory
         baselineRun     = $baselineFolder
         currentRun      = $currentFolder
+        # configurationFile / previousConfigurationFile now point inside a per-run archive of
+        # this name, one in each run folder; a consumer opens <run>/<sidecarArchive> and reads
+        # the entry rather than the loose path. Empty only when the archive step did not run.
+        sidecarArchive  = [string]$SidecarArchiveName
         baselineRunUtc  = $isBaselineMode ? $null : [string](Get-ObjectProperty -InputObject $baseline.Manifest -Name 'runTimestampUtc')
         currentRunUtc   = [string](Get-ObjectProperty -InputObject $current.Manifest -Name 'runTimestampUtc')
         platformSplit   = (-not $NoPlatformSplit.IsPresent)
@@ -2979,6 +3078,14 @@ $inventory |
     Sort-Object -Property PolicyArea, DisplayName, Id |
     Export-Csv -Path $csvPath -NoTypeInformation -Delimiter $Delimiter -Encoding utf8BOM
 
+# The per-area sidecar folders are packed into one archive at the end of the run - after the
+# comparison, so the current run is still diffed loose (see the archive block below). The
+# name is fixed and every sidecar file exists by now, so the count and the name go into the
+# single manifest write here rather than forcing a second one.
+$sidecarAreaFolders = @(Get-ChildItem -Path $runDirectory -Directory)
+$sidecarFiles = @($sidecarAreaFolders | ForEach-Object { Get-ChildItem -Path $PSItem.FullName -File -Recurse })
+$sidecarArchiveName = '{0}_{1}_sidecars.zip' -f $tenantNamePart, $fileStamp
+
 # The manifest is what lets a diffing agent tell an empty area from an unreadable one.
 $manifest = [ordered]@{
     schemaVersion            = 2
@@ -3002,6 +3109,11 @@ $manifest = [ordered]@{
     appInstallStatusRequested = $appInstallStatusRequested
     appInstallStatusRows      = $appInstallStatus.Count
     settingDefinitionsCount   = $settingDefinitions.Count
+    # Area folders are archived into this file at the end of the run; count is the number of
+    # sidecar files that go in. Both loose in the run root: the CSV, AppInstallStatus_*.csv
+    # and the four _*.json files.
+    sidecarArchive            = $sidecarArchiveName
+    sidecarCount              = $sidecarFiles.Count
     areas                    = @($areaResults)
 }
 $manifestPath = Join-Path -Path $runDirectory -ChildPath ('_manifest_{0}.json' -f $fileStamp)
@@ -3062,31 +3174,6 @@ if ($IncludeAuditActor) {
     }
 }
 
-# Optional handover artefact. Written after the manifest so the archive is complete.
-$zipPath = $null
-if ($CompressOutput) {
-    $zipPath = Join-Path -Path $tenantRoot -ChildPath ('{0}_{1}.zip' -f $tenantNamePart, $fileStamp)
-
-    # Unreachable in practice now that $fileStamp gains seconds on a folder collision;
-    # kept as a guard so a manually re-created archive cannot fail the run.
-    if (Test-Path -Path $zipPath) {
-        Write-Warning ('Overwriting existing archive {0}.' -f $zipPath)
-        Remove-Item -Path $zipPath -Force
-    }
-
-    # ZipFile rather than Compress-Archive: markedly faster on many small files and free of
-    # the cmdlet's wildcard and empty-folder quirks. NOTE: PS7 resolves the type without
-    # Add-Type; on 5.1 you would need Add-Type -AssemblyName System.IO.Compression.FileSystem.
-    # includeBaseDirectory = $true so unpacking yields a folder, not loose files.
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $runDirectory,
-        $zipPath,
-        [System.IO.Compression.CompressionLevel]::Optimal,
-        $true)
-
-    Write-Verbose ('Compressed to {0} ({1:N2} MB)' -f $zipPath, ((Get-Item -Path $zipPath).Length / 1MB))
-}
-
 # Optional downstream step. The comparison was a separate script until 1.9.0; it is now
 # Invoke-InventoryComparison in the region above. What the merge gave up: pointing the
 # comparison at a root above the per-customer folders to sweep every customer in one pass.
@@ -3095,7 +3182,9 @@ if ($CompressOutput) {
 $changeSetPath = $null
 if ($CompareWithPrevious) {
     try {
-        $comparison = @(Invoke-InventoryComparison -TenantDirectory $tenantRoot)
+        # -SidecarArchiveName: the current run is not archived yet, so the name is passed in
+        # rather than discovered, for the change set's sidecarArchive field.
+        $comparison = @(Invoke-InventoryComparison -TenantDirectory $tenantRoot -SidecarArchiveName $sidecarArchiveName)
         if ($comparison.Count -gt 0) {
             $changeSetPath = $comparison[-1].ChangeSetPath
             Write-Verbose ('Change set: {0}' -f $changeSetPath)
@@ -3104,6 +3193,72 @@ if ($CompareWithPrevious) {
     catch [System.Exception] {
         Write-Warning ('Comparison failed, export unaffected: {0}' -f $PSItem.Exception.Message)
     }
+    finally {
+        # Release any earlier-run archives Get-SidecarContent opened during the diff.
+        foreach ($openArchive in $script:sidecarArchiveCache.Values) {
+            if ($null -ne $openArchive) { $openArchive.Dispose() }
+        }
+        $script:sidecarArchiveCache = @{}
+    }
+}
+
+# Pack the per-area sidecar folders into one archive in the run folder. Standard now, not
+# opt-in. Written after the comparison so the current run is diffed from loose files and only
+# earlier runs are read through their archive (see Get-SidecarContent). The loose CSV,
+# AppInstallStatus_*.csv and _*.json files in the run root stay where they are.
+#
+# A failure here does not fail the export - the inventory on disk is complete, same rule as
+# the comparison and the audit fetch. The area folders are removed only once the archive has
+# been verified to hold every file that went in; on a mismatch both are kept for inspection.
+$sidecarArchivePath = $null
+try {
+    if ($sidecarFiles.Count -gt 0) {
+        $sidecarArchivePath = Join-Path -Path $runDirectory -ChildPath $sidecarArchiveName
+
+        # Unreachable now that $fileStamp gains seconds on a folder collision; a guard so a
+        # manually re-created archive cannot fail the run.
+        if (Test-Path -Path $sidecarArchivePath) {
+            Write-Warning ('Overwriting existing archive {0}.' -f $sidecarArchivePath)
+            Remove-Item -Path $sidecarArchivePath -Force
+        }
+
+        # ZipFile::Open + CreateEntryFromFile, not CreateFromDirectory: the latter would
+        # sweep in the CSV, the manifest and every _*.json in the run root. Entry names are
+        # the path relative to the run folder with '/' separators, matching ConfigurationFile
+        # in the CSV and the change set. PS7 resolves the type without Add-Type.
+        $archive = [System.IO.Compression.ZipFile]::Open(
+            $sidecarArchivePath, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($file in $sidecarFiles) {
+                $entryName = [System.IO.Path]::GetRelativePath($runDirectory, $file.FullName).Replace(
+                    [System.IO.Path]::DirectorySeparatorChar, '/')
+                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                    $archive, $file.FullName, $entryName) | Out-Null
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+
+        # Count the entries back out of the finished archive before deleting 229 source files
+        # on trust.
+        $verifyArchive = [System.IO.Compression.ZipFile]::OpenRead($sidecarArchivePath)
+        try { $archivedEntryCount = $verifyArchive.Entries.Count }
+        finally { $verifyArchive.Dispose() }
+
+        if ($archivedEntryCount -eq $sidecarFiles.Count) {
+            $sidecarAreaFolders | Remove-Item -Recurse -Force
+            Write-Verbose ('Sidecars archived: {0} file(s) -> {1}' -f $archivedEntryCount, $sidecarArchivePath)
+        }
+        else {
+            Write-Warning ('Sidecar archive {0} holds {1} entr(ies) but {2} file(s) were packed - the area folders are left in place.' -f
+                $sidecarArchivePath, $archivedEntryCount, $sidecarFiles.Count)
+        }
+    }
+}
+catch [System.Exception] {
+    Write-Warning ('Sidecar archive not created, export unaffected: {0}' -f $PSItem.Exception.Message)
+    $sidecarArchivePath = $null
 }
 
 # Incomplete exports must be obvious - a diffing agent would otherwise read a skipped
@@ -3120,7 +3275,7 @@ Write-Output ([pscustomobject]@{
     RunDirectory           = $runDirectory
     CsvPath                = $csvPath
     ManifestPath           = $manifestPath
-    ZipPath                = $zipPath
+    SidecarArchivePath     = $sidecarArchivePath
     AppInstallStatusPath   = $appInstallStatusPath
     AuditEventsPath        = $auditEventsPath
     SettingDefinitionsPath = $settingDefinitionsPath

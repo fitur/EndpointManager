@@ -27,7 +27,7 @@ from this one constraint:
   workstation than on a build agent elsewhere.
 - Rows are sorted deterministically, and column order is fixed.
 - `ConfigurationHash` is a SHA256 over exactly the bytes written to the sidecar file, so it
-  can be re-verified with `Get-FileHash`.
+  can be re-verified with `Get-FileHash` once the entry is extracted from the run's archive.
 
 Verified over four consecutive runs against a production tenant: zero hash differences
 across all 172 records.
@@ -211,8 +211,8 @@ Add the filled-in copy to `.gitignore`.
 ## Usage
 
 ```powershell
-# Export, diff against the previous run, and produce a handover zip
-./Export-IntuneConfigurationInventory.ps1 -CompareWithPrevious -CompressOutput -Verbose
+# Export and diff against the previous run
+./Export-IntuneConfigurationInventory.ps1 -CompareWithPrevious -Verbose
 
 # Permission check only
 ./Export-IntuneConfigurationInventory.ps1 -TestPermissionOnly -Verbose
@@ -232,17 +232,32 @@ Data/
     2026-08-05 12-16/
       IntuneConfigurationInventory_Contoso-AB_2026-08-05_1216.csv
       _manifest_2026-08-05_1216.json
-      _changeset_vs_2026-07-31-11-25.json
-      Settings-Catalog/
-        WIN-C-ES-SB-Windows-11_<id>_2026-08-05_1216.json
-      Compliance-Policy/
-        ...
-    Contoso-AB_2026-08-05_1216.zip          ← only with -CompressOutput
+      _changeset_vs_2026-07-31-11-25.json          ← only with -CompareWithPrevious
+      Contoso-AB_2026-08-05_1216_sidecars.zip
+        Settings-Catalog/WIN-C-ES-SB-Windows-11_<id>_2026-08-05_1216.json
+        Compliance-Policy/...
 ```
 
 Folder and file names use **local** time so a run is easy to identify while browsing; the
 manifest records the same instant in UTC, in local time, and with the offset, so nothing is
 ambiguous. A scheduled run on a UTC host will name its folder in UTC.
+
+### The sidecar archive
+
+Every run packs its per-area sidecar folders into a single `<Tenant>_<stamp>_sidecars.zip`
+in the run folder — one measured run went from 16 area folders and 229 files to one archive.
+`ConfigurationFile` in the CSV, and `configurationFile` / `previousConfigurationFile` in the
+change set, are therefore **entry names inside that zip**, not loose paths: a consumer opens
+`<run>/<Tenant>_<stamp>_sidecars.zip` and reads the named entry. The change set's top-level
+`sidecarArchive` field names the current run's archive; each run folder holds its own, so
+`previousConfigurationFile` resolves against the baseline run's archive. The manifest carries
+`sidecarArchive` and `sidecarCount`.
+
+The archive is written **after** the comparison, so the run being diffed still reads its own
+sidecars as loose files and only earlier runs are read out of a zip. The area folders are
+deleted only once the archive is verified to contain every file that went in; a mismatch or a
+packing failure keeps the folders and warns, and never fails the export. The loose CSV,
+`AppInstallStatus_*.csv` and the `_*.json` files in the run root are not archived.
 
 ### The CSV
 
