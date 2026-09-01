@@ -363,15 +363,24 @@ Response status code does not indicate success: 400 (Bad Request). |
 BadRequest: Property platforms has an invalid value notAPlatform.
 ```
 
+The `configurationPolicies` endpoint is less tidy about it: it packs an entire JSON document,
+`\n`-escaped, into `error.message`. `Get-GraphErrorDetail` returns that verbatim, which is the
+right behaviour — the function is shared word-for-word with the export script and is not going
+to be forked to unpack an Intune-internal blob.
+
 ## Data sensitivity
 
 The source folder holds the tenant's complete security configuration, including script bodies
 and security baselines. Nothing here protects it.
 
-The **import report** is its own item: it names the target tenant's ID and every policy name
-that was created. That is the same sensitivity class as the export's output. It lands in the
-source folder by default; use `-ReportDirectory` to put it somewhere else if the source folder
-is synchronised to OneDrive or Dropbox.
+The **import report** is its own item, and it crosses a customer boundary: it describes the
+*target* tenant — its tenant ID and every policy name created there — but by default it is
+written into the *source* customer's folder. Import Contoso's export into Fabrikam's tenant and
+you end up with Fabrikam's tenant ID and policy names sitting in Contoso's directory, which for
+a synchronised source folder means in Contoso's OneDrive.
+
+That is the same sensitivity class as the export's own output. Use `-ReportDirectory` to send
+the report somewhere that belongs to the target customer, or somewhere that belongs to neither.
 
 ## On the code itself
 
@@ -412,6 +421,18 @@ against a tenant you care about, and start with `-TestPermissionOnly` and `-What
   | `Enrollment-Configuration` | Largely tenant singletons that can be edited but not created |
   | `App-Configuration-Managed-Devices` | References app IDs that do not exist in the target tenant |
   | `Application` | Needs content upload, not a JSON body |
+
+- **Template-bound Settings Catalog policies may not be portable.** A policy whose
+  `templateReference.templateFamily` is anything other than `none` — security baselines, and
+  Endpoint Security in the newer `configurationPolicies` model — is validated against the
+  *target* tenant's revision of that template. Every setting carries a
+  `settingInstanceTemplateReference`, and one the target does not recognise fails the whole
+  POST, not just that setting. Measured: a Windows 11 baseline of 326 settings rejected on a
+  single reference, `deviceguard_machineidentityisolation`. This is the same problem that makes
+  `Endpoint-Security-Intent` unimportable, except it arrives in an area folder that looks
+  ordinary. Stripping the template references would create the policy as a plain configuration
+  profile instead of a baseline — a different object in a different part of the portal — so the
+  script does not do it silently. The script warns before the POST when it sees one.
 
 - **The three script areas are not importable yet, and that is the export's gap.** The
   collection GET returns an empty `scriptContent` / `detectionScriptContent`, and those areas

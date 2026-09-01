@@ -40,7 +40,7 @@
       Application                         needs content upload, not a JSON body
 
 .NOTES
-    Version:        1.1.0
+    Version:        1.1.1
     Creation Date:  2026-09-01
     Last Updated:   2026-09-01
     Author:         Peter Olausson
@@ -67,6 +67,38 @@
     This writes to a customer tenant. Run it with -WhatIf first, every time.
 
     CHANGELOG
+
+        1.1.1 - 2026-09-01
+            Fixes from the first real run. No new parameter, no changed parameter.
+
+            A compliance policy could not be created. Graph annotates every $expand'd
+            navigation property with '<name>@odata.context', the annotation travels into the
+            sidecar, and a request body may carry only one annotation on a navigation link -
+            '@odata.bind'. Anything else fails model validation before the payload is even
+            looked at, so the policy's own settings were never the problem. Two of these sat
+            in the sidecar: one at the top level and one inside each scheduledActionsForRule
+            entry, where $script:CommonRemove could never have reached it.
+            ConvertTo-AnnotationFreeObject now walks the whole structure and drops every
+            '@odata.' key except '@odata.type', which has to survive - it selects the derived
+            type and sits in four areas' Require list.
+
+            The same sidecar carried the source tenant's ids on the scheduled action rule and
+            on each action configuration. Those are stripped too, for compliance policies
+            only - Settings Catalog settings legitimately carry id "0", "1", ... and importing
+            them works.
+
+            The banner now counts what will actually be attempted. Run with
+            -Area 'Compliance-Policy' it said "7 folder(s), 20 file(s)" and then processed one
+            file; it applies -Area, the unsupported list and unknown folder names, and reports
+            "N of M folder(s) selected". The loop still walks every folder, because it has to
+            report the unsupported and unknown-area rows.
+
+            A Settings Catalog policy whose templateReference.templateFamily is not 'none' -
+            a security baseline - now warns before the POST. Such a policy is validated
+            against the target tenant's revision of that template and one unrecognised
+            setting reference rejects the whole thing. Not fixed, and deliberately not:
+            stripping the template references would create it as a plain configuration
+            profile instead of a baseline. See README.md, "Known limitations".
 
         1.1.0 - 2026-09-01
             Brought in line with Export-IntuneConfigurationInventory.ps1. Additive - no
@@ -743,11 +775,60 @@ function Invoke-GraphRequest {
     }
 }
 
+function ConvertTo-AnnotationFreeObject {
+    <#
+        Graph annotates every $expand'd navigation property with '<name>@odata.context' - a
+        receipt describing where the response came from. The annotation travels into the
+        sidecar, and posting one back is rejected outright: in a request body OData allows
+        exactly one annotation on a navigation link, '@odata.bind', so anything else fails
+        model validation before the payload itself is looked at.
+
+        $script:CommonRemove could not catch these. It holds two hard-coded top-level
+        spellings, and the drop loop only ever compares it against top-level keys - while the
+        copy that broke the compliance import sat one level down, inside each
+        scheduledActionsForRule entry.
+
+        Measured over one 20-file export: 1227 '@odata.type' keys, which MUST survive (they
+        select the derived type and sit in four areas' Require list) and exactly two
+        '@odata.context' keys, which must not. Hence keep-the-type, drop-the-rest rather than
+        a list of known annotation names - a list would miss the next $expand the same way.
+    #>
+    [CmdletBinding()]
+    # All three, or PSUseOutputTypeCorrectly flags the comma-guarded array return: the
+    # dictionary branch gives a Hashtable, the collection branch an Object[], and a scalar
+    # comes back as whatever it already was.
+    [OutputType([hashtable], [object[]], [object])]
+    param([Parameter(Mandatory)][AllowNull()]$InputObject)
+
+    if ($null -eq $InputObject) { return $null }
+    # Strings are IEnumerable - must be handled before the collection branch.
+    if ($InputObject -is [string]) { return $InputObject }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $clean = @{}
+        foreach ($key in $InputObject.Keys) {
+            if ($key -like '*@odata.*' -and $key -notlike '*@odata.type') { continue }
+            $clean[$key] = ConvertTo-AnnotationFreeObject -InputObject $InputObject[$key]
+        }
+        return $clean
+    }
+
+    if ($InputObject -is [System.Collections.IEnumerable]) {
+        $list = @(foreach ($element in $InputObject) { ConvertTo-AnnotationFreeObject -InputObject $element })
+        # Comma guard, same reason as Get-ExistingName: a one-element array returned bare comes
+        # back as the element itself, and a settings array of one would stop being an array.
+        return , $list
+    }
+
+    return $InputObject
+}
+
 function ConvertTo-CreationBody {
     <#
-        Turns a sidecar into something Graph will accept: strips the service-owned
-        properties, flattens the legacy double-wrapped settings array, and injects the
-        compliance scheduled action Graph insists on.
+        Turns a sidecar into something Graph will accept: drops the OData annotations that
+        a request body may not carry, strips the service-owned properties, flattens the
+        legacy double-wrapped settings array, and either injects the compliance scheduled
+        action Graph insists on or clears the source tenant's ids off the one already there.
     #>
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -756,6 +837,10 @@ function ConvertTo-CreationBody {
         [Parameter(Mandatory)][hashtable]$Definition,
         [Parameter(Mandatory)][string]$AreaName
     )
+
+    # Annotations first: they are meaningless in a request body and one of them is a hard
+    # rejection. See ConvertTo-AnnotationFreeObject.
+    $Sidecar = ConvertTo-AnnotationFreeObject -InputObject $Sidecar
 
     $body = @{}
     $drop = @($script:CommonRemove) + @($Definition.Remove)
@@ -794,6 +879,36 @@ function ConvertTo-CreationBody {
                 )
             }
         )
+    }
+
+    # Template-bound policies are validated against the TARGET tenant's revision of the
+    # template, and one setting reference it does not recognise fails the whole POST. Say so
+    # before the request rather than leaving it as a 400 afterwards. $body is a hashtable here,
+    # not a Graph object, so this is ContainsKey - Get-ObjectProperty is for PSCustomObject.
+    if ($Definition.Resource -eq 'deviceManagement/configurationPolicies' -and
+        $body.ContainsKey('templateReference') -and
+        $body['templateReference'] -is [System.Collections.IDictionary] -and
+        $body['templateReference'].ContainsKey('templateFamily') -and
+        [string]$body['templateReference']['templateFamily'] -ne 'none') {
+        Write-Warning ('Settings Catalog policy "{0}" is bound to template family "{1}" - the target tenant validates every setting against its own revision of that template, and one unrecognised reference rejects the whole policy. See "Known limitations" in README.md.' -f
+            $body['name'], [string]$body['templateReference']['templateFamily'])
+    }
+
+    # The other half of the same problem: a current sidecar HAS scheduledActionsForRule, and it
+    # carries the source tenant's rule id - identical to the source policy id - plus one id per
+    # action configuration. Stripped here rather than in $script:CommonRemove, which is
+    # top-level only, and deliberately NOT recursively for every area: Settings Catalog
+    # settings legitimately carry id "0", "1", ... and those imports work today.
+    if ($Definition.Resource -eq 'deviceManagement/deviceCompliancePolicies' -and
+        $body.ContainsKey('scheduledActionsForRule')) {
+        foreach ($rule in @($body['scheduledActionsForRule'])) {
+            if ($rule -isnot [System.Collections.IDictionary]) { continue }
+            $rule.Remove('id')
+            if (-not $rule.ContainsKey('scheduledActionConfigurations')) { continue }
+            foreach ($action in @($rule['scheduledActionConfigurations'])) {
+                if ($action -is [System.Collections.IDictionary]) { $action.Remove('id') }
+            }
+        }
     }
 
     return $body
@@ -994,6 +1109,10 @@ $script:UnsupportedAreas = [ordered]@{
 }
 
 # Properties the service owns on every resource type.
+# The two '@odata.context' entries are redundant since ConvertTo-AnnotationFreeObject took
+# over annotation removal generally - they are left in place because they cost nothing and
+# this list is what someone reads when looking for service-owned properties. The general
+# rule lives in that function, not here: this list is compared against top-level keys only.
 $script:CommonRemove = @(
     'id', 'createdDateTime', 'lastModifiedDateTime', 'version', 'assignments',
     '@odata.context', 'assignments@odata.context', 'roleScopeTagIds'
@@ -1100,7 +1219,15 @@ if ($sourceManifest.Count -gt 0) {
     }
 }
 
-$sourceFileCount = @($folders | ForEach-Object { Get-ChildItem -Path $PSItem.FullName -File -Filter '*.json' }).Count
+# The banner is what the operator reads before typing YES, so it describes what will actually
+# be attempted: -Area, the unsupported list and unknown folder names all applied. The loop
+# below still walks every folder - it has to, to report 'unsupported' and 'unknown-area' rows.
+$selectedFolders = @($folders | Where-Object {
+    ($Area.Count -eq 0 -or $PSItem.Name -in $Area) -and
+    -not $script:UnsupportedAreas.Contains($PSItem.Name) -and
+    $script:AreaMap.Contains($PSItem.Name)
+})
+$selectedFileCount = @($selectedFolders | ForEach-Object { Get-ChildItem -Path $PSItem.FullName -File -Filter '*.json' }).Count
 $sourceLabel = 'no export manifest'
 if ($script:SourceTenantId -or $script:SourceRun) {
     $sourceLabel = 'export {0}, {1} / {2}' -f $script:SourceRun, $script:SourceTenantName, $script:SourceTenantId
@@ -1115,7 +1242,7 @@ Write-Host ('Source : {0}' -f $sourceDirectoryResolved) -ForegroundColor Cyan
 Write-Host ('         ({0})' -f $sourceLabel)
 Write-Host ('Target : {0}' -f $targetLabel) -ForegroundColor Yellow -NoNewline
 Write-Host ($WhatIfPreference ? '   DRY RUN' : '   WRITE') -ForegroundColor ($WhatIfPreference ? 'Green' : 'Red')
-Write-Host ('Areas  : {0} folder(s), {1} file(s)' -f $folders.Count, $sourceFileCount)
+Write-Host ('Areas  : {0} of {1} folder(s) selected, {2} file(s)' -f $selectedFolders.Count, $folders.Count, $selectedFileCount)
 Write-Host ''
 
 # One gate for the whole run, not ConfirmImpact = 'High' - that asks once per object, and an
@@ -1318,7 +1445,7 @@ finally {
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
         timeZone           = [System.TimeZoneInfo]::Local.Id
-        scriptVersion      = '1.1.0'
+        scriptVersion      = '1.1.1'
         whatIf             = [bool]$WhatIfPreference
         targetTenantId     = $tokenTenantId
         targetCustomerName = $script:TargetCustomerName
