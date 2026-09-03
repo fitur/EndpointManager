@@ -1,30 +1,31 @@
 <#
 .SYNOPSIS
-    Proposes and applies Intune policy names that follow the naming standard
-    OS-SCOPE-TARGET-TYP-KAT-Name, via Microsoft Graph REST.
+    Exports Intune policy names to a CSV and applies an edited copy of that CSV back to the
+    tenant, via Microsoft Graph REST.
 
 .DESCRIPTION
-    Two modes, and they are deliberately separate steps.
+    Two modes, run as two separate commands. There is no combined path.
 
-    MODE 1 - Propose (default):
-        Reads policies from Graph, derives a standard-compliant name for each and writes
-        the proposal to a CSV. Nothing in the tenant is touched. The CSV is the review
-        artefact and, after a run, the only record of what the old names were.
+    MODE 1 - Export (default):
+        Reads policies from Graph and writes one CSV row per policy:
+
+            Id, GraphType, CurrentName, NewName
+
+        NewName is pre-filled with CurrentName so the file can be edited in place. Nothing in
+        the tenant is touched.
 
     MODE 2 - Rename (-ImportCsv <path>):
-        Reads a reviewed CSV and applies its NewName column with PATCH. One confirmation
-        gate for the whole run, a run report written whatever happens, and no rollback.
+        Reads the edited CSV and applies every row whose NewName differs from its CurrentName,
+        one PATCH each. One confirmation gate for the whole run, a run report written whenever
+        the run reaches the rename loop, and no rollback.
 
-    Each proposed row carries a Confidence level, which is what the reviewer reads first:
+    The script has no opinion about what a name should be. It does not parse names, does not
+    derive names and does not know about any naming convention. What you type in NewName is
+    what the policy is called afterwards.
 
-        Compliant   the current name already follows the standard; skipped, never rewritten
-        Derived     read from a Graph field or from an explicit word in the current name
-        Assumed     an endpoint default that holds for the majority but was not read
-        Unresolved  no basis at all; NewName is left empty and the row is refused
-                    unless -AllowUnresolved is passed
-
-    Names already following the standard are detected before any interpretation happens, so
-    running the tool twice cannot damage the result of the first run.
+    The one thing it does refuse: two policies of the same type ending up with the same name.
+    Intune requires names to be unique per policy type, so that run would fail halfway and
+    leave the tenant half-renamed.
 
     Only displayName / name is written. Assignments, descriptions and settings are never
     touched.
@@ -59,13 +60,13 @@
     the following scopes: ..."). A 401 with a generic Forbidden and no scope name is not a
     permission problem - check that the tenant has an active Intune licence.
 
-    DATA SENSITIVITY: the proposal CSV and the run report list every policy name in the
+    DATA SENSITIVITY: the exported CSV and the run report list every policy name in the
     tenant together with its object ID. That is a map of the customer's security
     configuration. Both files are unencrypted and inherit the permissions of the folder
     they are written to. Do not leave them in a synchronised folder (OneDrive, Dropbox)
     unless that is a deliberate decision.
 
-    THERE IS NO ROLLBACK. The proposal CSV and the run report are the only record of the
+    THERE IS NO ROLLBACK. The exported CSV and the run report are the only record of the
     previous names. To undo a run, swap the CurrentName and NewName columns of
     _renamereport_<stamp>.csv and run mode 2 against the result.
 
@@ -88,7 +89,7 @@
     another copy over these. Change the copy you are working on and record it in the
     changelog below.
 
-    Version:        1.0.0
+    Version:        2.0.0
     Creation Date:  2026-07-31
     Last Updated:   2026-09-01
     Author:         Peter Olausson
@@ -96,58 +97,54 @@
 
     CHANGELOG
 
+        2.0.0 - 2026-09-01
+            The naming standard is gone. The script no longer derives names, and a CSV
+            produced by 1.0.0 is not valid input to this version.
+
+            1.0.0 read each policy's name, tried to work out what it should be called under
+            the OS-SCOPE-TARGET-TYP-KAT-Name convention, and graded every guess with a
+            Confidence column the reviewer had to audit row by row. That was the wrong
+            division of labour: the script cannot know whether a policy is Base or Custom,
+            or whether it targets users or devices, so a large share of every run came out
+            Assumed or Unresolved and had to be corrected by hand anyway.
+
+            What replaces it is what the review step was actually for. Mode 1 exports
+            Id, GraphType, CurrentName and NewName, with NewName pre-filled from
+            CurrentName. You edit the names. Mode 2 applies them. Nothing is inferred.
+
+            Removed: Get-StandardName, Test-StandardName, ConvertTo-OsToken, the standard's
+            OS / SCOPE / TARGET / TYP / KAT tables, the redundant-word cleanup, the
+            Confidence and Reason columns, and the -DefaultScope and -AllowUnresolved
+            parameters.
+
+            Kept from 1.0.0, because none of it depended on the convention: the two-mode
+            split, the client-credentials authentication with certificate support, the
+            collision check, the one YES gate, the run report written from a finally block,
+            and the per-endpoint Update scopes.
+
+            Mode 2 gained a duplicate-Id check and trims leading and trailing whitespace
+            from NewName, warning when it had to. Both are Excel damage that is invisible
+            in the spreadsheet and permanent in the tenant.
+
+            Fixed before this version was ever committed, found in review: a 403 reading a
+            type's existing names left $existingByType[$type] empty, which the collision
+            check read as "no collisions" rather than "unverifiable" - two rows could be
+            PATCHed to the same name with no warning and without -Force. Rows of a type
+            whose names could not be read are now pulled out before the collision check and
+            recorded as blocked instead. Also: a CSV with a Confidence column (one from
+            1.0.0) is now rejected rather than silently accepted, which is what the
+            paragraph above already claimed. Get-ExistingPolicyName now carries
+            @odata.type, removing the extra per-policy GET in Set-PolicyName for the common
+            case; it stays as a fallback.
+
         1.0.0 - 2026-09-01
-            Rework of the pre-1.0 script. The naming logic, the authentication and the
-            two-mode split all changed; a CSV produced by an older version is not valid
-            input to this one.
-
-            Naming is now idempotent. A name that already follows the standard is detected
-            by consuming OS/SCOPE/TARGET/TYP/KAT positionally from a bare-hyphen split and
-            is returned unchanged. Before this, the split only broke on hyphens with
-            surrounding whitespace, so a compliant name was one single segment: the whole
-            old name became the descriptive tail and a second run turned
-            WIN-B-DEV-ES-BTL-BitLocker Configuration into
-            WIN-C-ES-BTL-WIN-B-DEV-ES-BTL-BitLocker Configuration.
-
-            The TARGET segment (DEV/USR) is new. Names produced before this release have
-            five segments and are not compliant under the standard.
-
-            Mode 1 no longer renames. It wrote the CSV and then continued straight into the
-            PATCH loop, gated only by one Confirm prompt per policy; -ExportCsv is gone
-            because the CSV is the whole point of the mode.
-
-            Every row now carries Confidence and Reason. Rows with no basis for a decision
-            come out Unresolved with an empty NewName rather than a guess, and mode 2
-            refuses them without -AllowUnresolved.
-
-            Authentication is the export script's: client credentials over raw REST with
-            certificate support, a token cache, Retry-After handling and typed
-            authentication/authorization exceptions. Connect-MgGraph and the
-            Microsoft.Graph fallback are gone - the module was never required for the app
-            flow, only for the interactive one that has been removed.
-
-            Multi-customer credential file support (-CustomerConfigPath / -CustomerName),
-            same file and field names as the export and import scripts. The customer
-            selected is the tenant that gets written to.
-
-            ConfirmImpact = 'High' replaced by one YES gate for the whole run plus -Force
-            for scheduled runs. SupportsShouldProcess and -WhatIf are kept.
-
-            Collision detection runs in both modes and aborts before the first PATCH, both
-            within the run and against names already in the tenant.
-
-            Four endpoints added: Windows feature/quality/driver update profiles and
-            Autopilot deployment profiles.
-
-            Antivirus and VPN profiles no longer get a category. AV was not in the
-            standard's ES list and VPN was being mapped to WFI; both now resolve as far as
-            TYP and stop.
-
-            A run report, _renamereport_<stamp>.csv and .json, is written from a finally
-            block so an aborted run still leaves a record.
+            First versioned release. Reworked the pre-1.0 script onto the export script's
+            authentication, added the two-mode split, the collision check, the run report
+            and four endpoints (Windows feature/quality/driver update profiles, Autopilot).
+            Its name-derivation logic is the part 2.0.0 removed.
 
 .EXAMPLE
-    # Mode 1 - propose. Writes a CSV, changes nothing in the tenant.
+    # Mode 1 - export the current names. Writes a CSV, changes nothing in the tenant.
     $env:INTUNE_CLIENT_SECRET = '<secret>'
     .\Rename-IntunePolicies.ps1 -TenantId '<guid>' -ClientId '<guid>' -Verbose
 
@@ -155,16 +152,16 @@
     # Mode 1 against one customer from a credential file, limited to two policy types.
     .\Rename-IntunePolicies.ps1 -CustomerConfigPath ~/.intune/customers.json `
         -CustomerName 'Contoso' -PolicyType Configuration, SettingsCatalog `
-        -CsvPath ~/Desktop/contoso-rename.csv
+        -CsvPath ~/Desktop/contoso-names.csv
 
 .EXAMPLE
     # Mode 2 - dry run first, every time. Writes the run report, PATCHes nothing.
-    .\Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/contoso-rename.csv `
+    .\Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/contoso-names.csv `
         -CustomerConfigPath ~/.intune/customers.json -CustomerName 'Contoso' -WhatIf
 
 .EXAMPLE
     # Mode 2 for real. One YES gate, then the renames.
-    .\Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/contoso-rename.csv `
+    .\Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/contoso-names.csv `
         -CustomerConfigPath ~/.intune/customers.json -CustomerName 'Contoso'
 
 .EXAMPLE
@@ -174,7 +171,7 @@
 
 #Requires -Version 7.4
 
-[CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Propose')]
+[CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Export')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
     'PSAvoidUsingConvertToSecureStringWithPlainText', '',
     Justification = 'Plaintext originates outside the script; conversion is the containment point.')]
@@ -182,22 +179,22 @@
     'PSAvoidUsingWriteHost', '',
     Justification = 'The customer picker and the target banner are console UI. Write-Output would put them in the pipeline this script returns its results on, and Write-Verbose would hide the very prompt the operator has to answer.')]
 param(
-    # Mode 1 only. Restricts the run to policies whose current name starts with this value,
+    # Mode 1 only. Restricts the export to policies whose current name starts with this value,
     # for example "Windows - ". Empty means every policy of the selected types.
-    [Parameter(ParameterSetName = 'Propose')]
+    [Parameter(ParameterSetName = 'Export')]
     [string]$Prefix = '',
 
     # Mode 1 only. Keys from $script:EndpointMap; 'All' is every one of them.
-    [Parameter(ParameterSetName = 'Propose')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidateSet('Configuration', 'SettingsCatalog', 'Compliance', 'Remediation', 'PlatformScript',
         'Filter', 'WindowsFeatureUpdate', 'WindowsQualityUpdate', 'WindowsDriverUpdate', 'Autopilot', 'All')]
     [string[]]$PolicyType = @('All'),
 
-    # Mode 1: where the proposal CSV is written. Defaults to the script folder.
-    [Parameter(ParameterSetName = 'Propose')]
+    # Mode 1: where the CSV is written. Defaults to the script folder.
+    [Parameter(ParameterSetName = 'Export')]
     [string]$CsvPath = '',
 
-    # Mode 2: the reviewed CSV to apply. Its presence is what selects the mode.
+    # Mode 2: the edited CSV to apply. Its presence is what selects the mode.
     [Parameter(ParameterSetName = 'Rename', Mandatory)]
     [string]$ImportCsv,
 
@@ -249,16 +246,7 @@ param(
     # this; interactive ones should not use it. It does not skip collision detection.
     [switch]$Force,
 
-    # Mode 2: apply rows whose Confidence is Unresolved. Without it they are refused, which
-    # is the point of the level.
-    [switch]$AllowUnresolved,
-
-    # SCOPE has no Graph source - Base/Custom is an internal classification - so a name with
-    # no Base/Custom token falls back to this, marked Assumed.
-    [ValidateSet('B', 'C')]
-    [string]$DefaultScope = 'C',
-
-    # Where the run report is written. Empty means next to the CSV being read or written.
+    # Where the run report is written. Empty means next to the CSV being read.
     [ValidateScript({ Test-Path -Path $PSItem -PathType Container })]
     [string]$ReportDirectory
 )
@@ -269,6 +257,7 @@ $ErrorActionPreference = 'Stop'
 # Set before the customer region so StrictMode has something to read when no customer file
 # is in play; the run report and the target banner both print it.
 $script:TargetCustomerName = ''
+
 
 #region Customer selection
 
@@ -510,6 +499,7 @@ $script:AuthContext = [pscustomobject]@{
     # re-sign an assertion on every token renewal, not just the first, for the life of the run.
     Certificate  = $null
 }
+
 
 #region Helpers
 
@@ -960,460 +950,7 @@ function Get-TenantDisplayName {
 
 #endregion Helpers
 
-#region Naming rules
-
-# The naming standard, as data. Nothing below invents a value that is not in these tables:
-# where the standard has no category for something, the row comes out Unresolved rather
-# than being pushed into a neighbouring category.
-$script:ValidOs     = @('WIN', 'IOS', 'MAC', 'AND', 'LNX', 'ALL')
-$script:ValidScope  = @('B', 'C')
-$script:ValidTarget = @('DEV', 'USR')
-
-# KAT per TYP. A TYP with an empty list has no KAT position in the name.
-$script:KatByTyp = @{
-    ES  = @('BTL', 'ASR', 'SB', 'AP', 'FW', 'EDR')
-    CP  = @('SC', 'OMA', 'CRT', 'WFI', 'WHM')
-    WU  = @('FU', 'QU', 'APC')
-    RM  = @('APP', 'EXP')
-    SC  = @('PS', 'SH')
-    FI  = @('DEV', 'USR')
-    SYS = @('DCR')
-    CO  = @()
-    MAM = @()
-    AP  = @()
-    ESP = @()
-}
-
-# Which TYP values each endpoint can legitimately carry. Used to spot a name that has the
-# right shape but the wrong type - a deviceCompliancePolicies row called '...-CP-...' is
-# misnamed, not compliant.
-$script:TypByGraphType = @{
-    Configuration        = @('ES', 'CP', 'WU')
-    SettingsCatalog      = @('ES', 'CP', 'WU')
-    Compliance           = @('CO')
-    Remediation          = @('RM')
-    PlatformScript       = @('SC')
-    Filter               = @('FI')
-    WindowsFeatureUpdate = @('WU')
-    WindowsQualityUpdate = @('WU')
-    WindowsDriverUpdate  = @('WU')
-    Autopilot            = @('AP')
-}
-
-# Words already expressed by the chosen KAT, so they are not repeated in the descriptive
-# tail. Looked up by the KAT that was actually selected rather than applied as one flat
-# list: a flat list cannot know that 'Feature Update' is redundant under FU but meaningful
-# under, say, CP-SC.
-$script:RedundantByKat = @{
-    BTL = @('BitLocker', 'FileVault')
-    ASR = @('ASR', 'Attack Surface Reduction')
-    SB  = @('Security Baseline')
-    FW  = @('Firewall')
-    EDR = @('Endpoint Detection and Response', 'MDE')
-    WFI = @('Wi-Fi', 'WiFi', 'Wired')
-    FU  = @('Feature Update')
-    QU  = @('Quality Update')
-    CRT = @('Certificate')
-}
-
-# Category-independent cleanup, in order. The leading forms run first and '\s+Default$'
-# runs last, which is what makes 'Filter Default' end up as 'Default': strip the leading
-# 'Filter ' and the trailing pattern no longer has whitespace to match against. Reversing
-# the order would leave 'Filter'. The standard's own example is WIN-B-USR-FI-DEV-Default,
-# so keeping 'Default' as a whole tail is the required behaviour, not an oversight.
-$script:CommonCleanup = @(
-    '^Compliance\s+'
-    '^Endpoint Security\s+'
-    '^Account Protection\s+'
-    '^Filter\s+'
-    '\s+Default$'
-)
-
-# Confidence, weakest first. The row's overall confidence is the weakest of its parts.
-$script:ConfidenceRank = @{
-    Unresolved = 0
-    Assumed    = 1
-    Derived    = 2
-    Compliant  = 3
-}
-
-function Test-StandardName {
-    <#
-    .SYNOPSIS
-        Decides whether a name already follows OS-SCOPE-TARGET-TYP-KAT-Name.
-
-    .DESCRIPTION
-        One source of truth for the format: this answers both "is the current name already
-        compliant" in mode 1 and "is this a legal target name" when validating a reviewed
-        CSV in mode 2.
-
-        Tokenises on a bare hyphen and consumes the positions left to right, stopping as
-        soon as KAT is taken. Consuming positionally rather than matching one regex is the
-        whole point - once KAT is consumed nothing else is split, so 'Wi-Fi Corporate' and
-        'Rollout 2025-03-13' survive in the descriptive tail intact.
-    #>
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Name,
-        # Optional. When given, the TYP has to be one this endpoint can carry.
-        [Parameter()][AllowEmptyString()][string]$GraphType = ''
-    )
-
-    $result = [pscustomobject]@{
-        IsValid = $false
-        Os = ''; Scope = ''; Target = ''; Typ = ''; Kat = ''
-        Rest    = ''
-        Reason  = ''
-    }
-
-    if ([string]::IsNullOrWhiteSpace($Name)) {
-        $result.Reason = 'name is empty'
-        return $result
-    }
-
-    $tokens = @($Name.Trim() -split '-')
-    if ($tokens.Count -lt 5) {
-        $result.Reason = 'fewer than five hyphen-separated segments'
-        return $result
-    }
-
-    if ($tokens[0] -notin $script:ValidOs)     { $result.Reason = "'$($tokens[0])' is not a platform code"; return $result }
-    if ($tokens[1] -notin $script:ValidScope)  { $result.Reason = "'$($tokens[1])' is not a scope code";    return $result }
-    if ($tokens[2] -notin $script:ValidTarget) { $result.Reason = "'$($tokens[2])' is not a target code";   return $result }
-    if (-not $script:KatByTyp.ContainsKey($tokens[3])) { $result.Reason = "'$($tokens[3])' is not a type code"; return $result }
-
-    $typ = $tokens[3]
-    $kat = ''
-    $tailIndex = 4
-
-    $allowedKat = @($script:KatByTyp[$typ])
-    if ($allowedKat.Count -gt 0) {
-        if ($tokens[4] -notin $allowedKat) {
-            $result.Reason = "'$($tokens[4])' is not a category of $typ"
-            return $result
-        }
-        $kat = $tokens[4]
-        $tailIndex = 5
-    }
-
-    # Guard before the slice: a descending range like $tokens[5..4] does not throw, it
-    # silently returns the array backwards, which would manufacture a tail out of the
-    # coded segments themselves.
-    if ($tailIndex -gt ($tokens.Count - 1)) {
-        $result.Reason = 'no descriptive part after the coded segments'
-        return $result
-    }
-
-    # Joined back with the hyphen it was split on, so nothing in the tail is altered.
-    $rest = ($tokens[$tailIndex..($tokens.Count - 1)] -join '-').Trim()
-    if ([string]::IsNullOrWhiteSpace($rest)) {
-        $result.Reason = 'no descriptive part after the coded segments'
-        return $result
-    }
-
-    if ($GraphType -and $script:TypByGraphType.ContainsKey($GraphType) -and
-        $typ -notin $script:TypByGraphType[$GraphType]) {
-        $result.Reason = "type $typ does not belong to $GraphType"
-        return $result
-    }
-
-    $result.IsValid = $true
-    $result.Os = $tokens[0]; $result.Scope = $tokens[1]; $result.Target = $tokens[2]
-    $result.Typ = $typ; $result.Kat = $kat; $result.Rest = $rest
-    $result.Reason = 'already matches the standard'
-    return $result
-}
-
-function ConvertTo-OsToken {
-    # Maps whatever platform spelling Graph used - a 'platforms' value, a filter 'platform'
-    # value or the tail of an '@odata.type' - onto the standard's three-letter code.
-    # Returns an empty string when nothing matches, which the caller reads as "unresolved",
-    # never as a default.
-    [CmdletBinding()]
-    [OutputType([string])]
-    param([Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$Value)
-
-    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
-
-    switch -Regex ($Value) {
-        'windows'  { return 'WIN' }
-        'macos'    { return 'MAC' }
-        # After 'windows' and 'macos', so 'ios' cannot match inside another platform name.
-        'ios'      { return 'IOS' }
-        'android'  { return 'AND' }
-        'linux'    { return 'LNX' }
-    }
-    return ''
-}
-
-function Get-StandardName {
-    <#
-    .SYNOPSIS
-        Derives a standard-compliant name for one policy, with a confidence level.
-
-    .DESCRIPTION
-        Returns an object rather than a string: the caller needs to know how the name was
-        arrived at, not only what it is. A row whose confidence is Unresolved comes back
-        with an empty NewName on purpose - a half-derived suggestion in the review CSV is
-        something an operator can approve by accident.
-
-        -Item is the raw Graph object from the list call, so platform and target can be
-        read from a field rather than guessed from the name. Every property read on it goes
-        through Get-ObjectProperty, because StrictMode throws on any field Graph omits.
-    #>
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory)][AllowEmptyString()][string]$CurrentName,
-        [Parameter(Mandatory)][string]$GraphType,
-        [Parameter(Mandatory)][AllowNull()]$Item,
-        [Parameter()][ValidateSet('B', 'C')][string]$DefaultScope = 'C'
-    )
-
-    $result = [pscustomobject]@{
-        NewName    = ''
-        Os = ''; Scope = ''; Target = ''; Typ = ''; Kat = ''
-        Confidence = 'Unresolved'
-        Reason     = ''
-    }
-
-    # --- Short circuit: is it already compliant? Runs before any interpretation, and this
-    # is what makes a second run of the tool a no-op instead of a corruption.
-    $compliant = Test-StandardName -Name $CurrentName -GraphType $GraphType
-    if ($compliant.IsValid) {
-        $result.NewName = $CurrentName
-        $result.Os = $compliant.Os; $result.Scope = $compliant.Scope; $result.Target = $compliant.Target
-        $result.Typ = $compliant.Typ; $result.Kat = $compliant.Kat
-        $result.Confidence = 'Compliant'
-        $result.Reason = $compliant.Reason
-        return $result
-    }
-
-    $notes = [System.Collections.Generic.List[string]]::new()
-    $levels = [System.Collections.Generic.List[string]]::new()
-
-    # Split ONLY on hyphens with whitespace on at least one side, so 'Wi-Fi', '802.1x' and
-    # '2025-03-13' stay whole. This regex is correct and is kept from the previous version.
-    $segments = @($CurrentName.Trim() -split '\s+-\s*|\s*-\s+' | Where-Object { $_ -ne '' })
-
-    # --- OS ---------------------------------------------------------------------------
-    $osMap = @{
-        'Windows' = 'WIN'; 'WIN' = 'WIN'
-        'iOS'     = 'IOS'
-        'macOS'   = 'MAC'; 'MAC' = 'MAC'
-        'Android' = 'AND'; 'AND' = 'AND'
-        'Linux'   = 'LNX'; 'LNX' = 'LNX'
-        'All'     = 'ALL'
-    }
-    $os = ''
-    if ($segments.Count -ge 1 -and $osMap.ContainsKey($segments[0])) {
-        $os = $osMap[$segments[0]]
-        $segments = @($segments | Select-Object -Skip 1)
-        $levels.Add('Derived')
-    }
-    else {
-        # Not in the name - read it off the Graph object instead.
-        switch ($GraphType) {
-            'SettingsCatalog' { $os = ConvertTo-OsToken -Value ([string](Get-ObjectProperty -InputObject $Item -Name 'platforms')) }
-            'Filter'          { $os = ConvertTo-OsToken -Value ([string](Get-ObjectProperty -InputObject $Item -Name 'platform')) }
-            { $PSItem -in 'Configuration', 'Compliance' } {
-                # '#microsoft.graph.windows10GeneralConfiguration' - the namespace prefix is
-                # stripped first so it cannot contribute letters to the platform match.
-                $odataType = [string](Get-ObjectProperty -InputObject $Item -Name '@odata.type')
-                $os = ConvertTo-OsToken -Value ($odataType -replace '^#?microsoft\.graph\.', '')
-            }
-            default {
-                # Remediation, PlatformScript, the three update profile types and Autopilot:
-                # the endpoint itself exists only for Windows.
-                $os = 'WIN'
-            }
-        }
-        if ($os) {
-            $levels.Add('Derived')
-            $notes.Add("platform $os read from $GraphType")
-        }
-        else {
-            $levels.Add('Unresolved')
-            $notes.Add('no platform token in the name and none readable from Graph')
-        }
-    }
-
-    # --- SCOPE ------------------------------------------------------------------------
-    # No Graph source exists: Base/Custom is an internal classification, not something the
-    # tenant knows about.
-    $scopeMap = @{ 'Base' = 'B'; 'B' = 'B'; 'Custom' = 'C'; 'C' = 'C' }
-    $scope = ''
-    if ($segments.Count -ge 1 -and $scopeMap.ContainsKey($segments[0])) {
-        $scope = $scopeMap[$segments[0]]
-        $segments = @($segments | Select-Object -Skip 1)
-        $levels.Add('Derived')
-    }
-    else {
-        $scope = $DefaultScope
-        $levels.Add('Assumed')
-        $notes.Add("no Base/Custom token in the source name; scope defaulted to $DefaultScope")
-    }
-
-    # --- TARGET -----------------------------------------------------------------------
-    $target = ''
-    $targetSegment = $segments | Where-Object { $PSItem -in 'User', 'Users', 'Device', 'Devices' } | Select-Object -First 1
-    if ($targetSegment) {
-        $target = ($targetSegment -like 'User*') ? 'USR' : 'DEV'
-        $segments = @($segments | Where-Object { $PSItem -ne $targetSegment })
-        $levels.Add('Derived')
-    }
-    else {
-        switch ($GraphType) {
-            'Filter' {
-                # 'devices' or 'apps'. The standard's own example WIN-B-USR-FI-DEV-Default
-                # pairs TARGET=USR with KAT=DEV, so the two are not the same axis: TARGET
-                # says what the filter is applied to, KAT is fixed by the endpoint.
-                $managementType = [string](Get-ObjectProperty -InputObject $Item -Name 'assignmentFilterManagementType')
-                if ($managementType -eq 'devices') { $target = 'DEV'; $levels.Add('Derived') }
-                elseif ($managementType -eq 'apps') { $target = 'USR'; $levels.Add('Derived') }
-                else {
-                    $levels.Add('Unresolved')
-                    $notes.Add('assignmentFilterManagementType is absent or unrecognised')
-                }
-                if ($target) { $notes.Add("target $target read from assignmentFilterManagementType") }
-            }
-            { $PSItem -in 'Configuration', 'SettingsCatalog' } {
-                $target = 'DEV'
-                $levels.Add('Assumed')
-                $notes.Add("device policy assumed for $GraphType; user scope is not exposed by Graph")
-            }
-            default {
-                # Compliance targets devices; so do remediations, platform scripts, the
-                # update profiles and Autopilot.
-                $target = 'DEV'
-                $levels.Add('Derived')
-            }
-        }
-    }
-
-    $rest = ($segments -join ' ').Trim()
-
-    # --- TYP and KAT ------------------------------------------------------------------
-    # The endpoint is authoritative wherever it can be. Only the two endpoints that hold a
-    # mixture of policy kinds fall through to reading the name.
-    $typ = ''
-    $kat = ''
-    switch ($GraphType) {
-        'Compliance'           { $typ = 'CO' }
-        'Remediation'          { $typ = 'RM' }
-        'PlatformScript'       { $typ = 'SC'; $kat = 'PS' }
-        'Filter'               { $typ = 'FI'; $kat = 'DEV' }
-        'WindowsFeatureUpdate' { $typ = 'WU'; $kat = 'FU' }
-        'WindowsQualityUpdate' { $typ = 'WU'; $kat = 'QU' }
-        # No driver category exists in the standard; QU is the closest and is recorded as
-        # an assumption below rather than presented as read.
-        'WindowsDriverUpdate'  { $typ = 'WU'; $kat = 'QU' }
-        'Autopilot'            { $typ = 'AP' }
-    }
-
-    if ($typ) {
-        if ($GraphType -eq 'WindowsDriverUpdate') {
-            $levels.Add('Assumed')
-            $notes.Add('driver update profiles have no category of their own in the standard; mapped to WU-QU')
-        }
-        else {
-            $levels.Add('Derived')
-        }
-    }
-    else {
-        # Configuration and SettingsCatalog only: derive TYP and KAT from the name.
-        switch -Regex ($rest) {
-            # --- Endpoint Security ---
-            'BitLocker|FileVault'                  { $typ = 'ES'; $kat = 'BTL'; break }
-            'Attack Surface|\bASR\b'               { $typ = 'ES'; $kat = 'ASR'; break }
-            'Security Baseline'                    { $typ = 'ES'; $kat = 'SB';  break }
-            'LAPS|Windows Hello|Account Protection'{ $typ = 'ES'; $kat = 'AP';  break }
-            'Firewall'                             { $typ = 'ES'; $kat = 'FW';  break }
-            'MDE|Defender for Endpoint|Endpoint Detection|\bEDR\b|Onboarding|Offboarding' { $typ = 'ES'; $kat = 'EDR'; break }
-            # Antivirus and VPN have no category in the naming standard (ES: BTL/ASR/SB/AP/
-            # FW/EDR, CP: SC/OMA/CRT/WFI/WHM). Resolved as far as TYP, then left without a
-            # category rather than forced into a neighbouring one. Raise the gap with the
-            # standard's owner.
-            'Antivirus|Microsoft Defender Antivirus' { $typ = 'ES'; $kat = ''; break }
-            # --- Configuration profiles with a specific category ---
-            'Wi-?Fi|Wired|802\.1x'                 { $typ = 'CP'; $kat = 'WFI'; break }
-            '\bVPN\b'                              { $typ = 'CP'; $kat = '';    break }
-            'PKCS|SCEP|Trusted Root|Root Certificate|Certificate' { $typ = 'CP'; $kat = 'CRT'; break }
-            'Health Monitoring'                    { $typ = 'CP'; $kat = 'WHM'; break }
-            'OMA-?URI'                             { $typ = 'CP'; $kat = 'OMA'; break }
-            # --- Windows Update ---
-            'Feature Update'                       { $typ = 'WU'; $kat = 'FU';  break }
-            'Quality Update|Hotpatch'              { $typ = 'WU'; $kat = 'QU';  break }
-            'Autopatch'                            { $typ = 'WU'; $kat = 'APC'; break }
-            default                                { $typ = 'CP'; $kat = 'SC' }
-        }
-
-        if ($typ -eq 'CP' -and $kat -eq 'SC' -and $rest -notmatch 'OMA-?URI') {
-            $levels.Add('Assumed')
-            $notes.Add('no category keyword matched; defaulted to CP-SC')
-        }
-        else {
-            $levels.Add('Derived')
-            $notes.Add("type $typ derived from a keyword in the name")
-        }
-    }
-
-    # A TYP whose category list is not empty must have a category. This is where the two
-    # gaps in the standard surface: an antivirus profile is ES with no valid ES category,
-    # a VPN profile is CP with no valid CP category, and a remediation is RM with nothing
-    # to pick APP or EXP from.
-    if ($typ -and -not $kat -and @($script:KatByTyp[$typ]).Count -gt 0) {
-        $levels.Add('Unresolved')
-        $notes.Add("no category could be established for type $typ (standard allows: $(@($script:KatByTyp[$typ]) -join ', '))")
-    }
-
-    # --- Redundancy cleanup -------------------------------------------------------------
-    $cleaned = $rest
-    if ($kat -and $script:RedundantByKat.ContainsKey($kat)) {
-        foreach ($word in $script:RedundantByKat[$kat]) {
-            # Word- and position-bound only. Escaped because 'Wi-Fi' and the like carry
-            # characters that would otherwise be read as regex.
-            $escaped = [regex]::Escape($word)
-            $cleaned = $cleaned -replace ('^{0}\s+' -f $escaped), ''
-            $cleaned = $cleaned -replace ('\s+{0}$' -f $escaped), ''
-        }
-    }
-    foreach ($pattern in $script:CommonCleanup) {
-        $cleaned = $cleaned -replace $pattern, ''
-    }
-    $cleaned = ($cleaned -replace '\s{2,}', ' ').Trim()
-
-    # Never let cleanup empty the name. A profile actually called 'Wi-Fi' has to keep being
-    # called Wi-Fi; '...-CP-WFI-' with nothing after it is not a name.
-    if ([string]::IsNullOrWhiteSpace($cleaned)) { $cleaned = $rest.Trim() }
-
-    # --- Assemble -----------------------------------------------------------------------
-    $weakest = 'Derived'
-    if ($levels.Count -gt 0) {
-        $weakest = ($levels | Sort-Object -Property { $script:ConfidenceRank[$PSItem] } | Select-Object -First 1)
-    }
-
-    $result.Os = $os; $result.Scope = $scope; $result.Target = $target
-    $result.Typ = $typ; $result.Kat = $kat
-    $result.Confidence = $weakest
-
-    if ($weakest -eq 'Unresolved') {
-        # No half-derived suggestion in the CSV: an empty cell cannot be approved by accident.
-        $result.NewName = ''
-        $result.Reason = ($notes.Count -gt 0) ? ($notes -join '; ') : 'could not be resolved'
-        return $result
-    }
-
-    $parts = @($os, $scope, $target, $typ)
-    if ($kat) { $parts += $kat }
-    $newName = ($parts -join '-')
-    if ($cleaned) { $newName = '{0}-{1}' -f $newName, $cleaned }
-
-    $result.NewName = $newName
-    $result.Reason = ($notes.Count -gt 0) ? ($notes -join '; ') : 'every segment read from the source name'
-    return $result
-}
+#region Collision detection
 
 function Get-NameCollision {
     <#
@@ -1421,8 +958,11 @@ function Get-NameCollision {
         Finds names that two policies of the same type would end up sharing.
 
     .DESCRIPTION
-        Intune enforces unique names per policy type, not globally, so the grouping key is
-        GraphType plus name and the comparison is OrdinalIgnoreCase.
+        This is the only judgment the script makes about a name, and it is not an opinion
+        about naming: Intune enforces unique names per policy type, so a run that produced a
+        duplicate would fail partway through and leave the tenant half-renamed. The grouping
+        key is therefore GraphType plus name, not name alone, and the comparison is
+        OrdinalIgnoreCase.
 
         The check is done over the FINAL state of every policy of the affected types, not
         only over the rows in the run: a rename can collide with a policy nobody is
@@ -1482,14 +1022,14 @@ function Get-NameCollision {
         }
     }
 
-    # Deliberately NOT comma-guarded, unlike Get-IntunePolicy's return. The callers ask this
+    # Deliberately NOT comma-guarded, unlike Get-IntunePolicy's return. The caller asks this
     # one "how many", and a guarded return arrives at @(...) as a one-element array holding
     # the list - so an empty result would count as 1 and every run would report a collision.
     # Letting the list enumerate is what makes "no collisions" countable as zero.
     return $collisions
 }
 
-#endregion Naming rules
+#endregion Collision detection
 
 #region Endpoints
 
@@ -1528,9 +1068,9 @@ function Get-EndpointDefinition {
 
 function Get-IntunePolicy {
     <#
-        One list call per selected type, paginated through Get-GraphCollection. The raw
-        Graph object travels with each row: the naming rules read platform and target off
-        it, and Set-PolicyName reads the derived type off it instead of making a second GET.
+        One list call per selected type, paginated through Get-GraphCollection. Reads the id
+        and the name and nothing else - the name is the only property this script has any
+        business knowing about.
     #>
     [CmdletBinding()]
     # Both, or PSUseOutputTypeCorrectly flags the comma-guarded return: the guard wraps the
@@ -1560,14 +1100,12 @@ function Get-IntunePolicy {
 
             $policies.Add([pscustomobject]@{
                 Id          = [string](Get-ObjectProperty -InputObject $item -Name 'id')
-                CurrentName = $currentName
                 GraphType   = $endpoint.Key
-                Uri         = $endpoint.Uri
-                NameField   = $endpoint.NameField
-                # Carried from the list response so Set-PolicyName does not need a second GET
-                # per policy on the abstract-base endpoints. Halves the call count for those.
-                OdataType   = [string](Get-ObjectProperty -InputObject $item -Name '@odata.type')
-                Item        = $item
+                CurrentName = $currentName
+                # Pre-filled so the CSV can be edited in place. A row still equal to
+                # CurrentName when the file comes back is a row nobody chose to change, and
+                # mode 2 skips it.
+                NewName     = $currentName
             })
         }
     }
@@ -1584,6 +1122,14 @@ function Get-ExistingPolicyName {
         type rather than one per row: a tenant holds at most a few hundred policies per
         type, and knowing which id owns which name is what separates a real collision from
         a name another row in the same run is vacating.
+
+        Also carries @odata.type for the three abstract-base endpoints. This call already
+        reads every object of the affected type, so recording the derived type here means
+        Set-PolicyName does not need a second GET per renamed policy on those endpoints - it
+        falls back to one only when this value is missing. For those three, $select is
+        skipped entirely rather than listing @odata.type alongside id/name: whether an
+        annotation survives a $select is not something to rely on, and the collections in
+        question are small.
     #>
     [CmdletBinding()]
     # Both, same reason as Get-IntunePolicy.
@@ -1593,13 +1139,16 @@ function Get-ExistingPolicyName {
     $endpoint = Get-EndpointDefinition -GraphType $GraphType
     if ($null -eq $endpoint) { throw "Unknown policy type '$GraphType'." }
 
-    $existing = [System.Collections.Generic.List[pscustomobject]]::new()
-    $uri = '{0}?$select=id,{1}' -f $endpoint.Uri, $endpoint.NameField
+    $uri = $endpoint.NeedsOdataType ?
+        $endpoint.Uri :
+        ('{0}?$select=id,{1}' -f $endpoint.Uri, $endpoint.NameField)
 
+    $existing = [System.Collections.Generic.List[pscustomobject]]::new()
     foreach ($item in (Get-GraphCollection -Uri $uri)) {
         $existing.Add([pscustomobject]@{
             Id          = [string](Get-ObjectProperty -InputObject $item -Name 'id')
             CurrentName = [string](Get-ObjectProperty -InputObject $item -Name $endpoint.NameField)
+            OdataType   = [string](Get-ObjectProperty -InputObject $item -Name '@odata.type')
         })
     }
 
@@ -1613,20 +1162,16 @@ function Get-ExistingPolicyName {
 
 function Import-RenameCsv {
     <#
-        Validates the reviewed CSV up front rather than discovering its problems one 404 at
-        a time in the middle of the rename loop. Four checks: the columns are present, Id is
-        a GUID, GraphType is one this script knows, and NewName is a name the standard would
-        accept - the last one through the same Test-StandardName the proposal used, so
-        "compliant" and "legal target name" cannot drift apart.
+        Validates the edited CSV up front rather than discovering its problems one 404 at a
+        time in the middle of the rename loop. The checks are about the file being usable,
+        not about the names being good: the columns are present, the file was not exported
+        by 1.0.0, each Id is a GUID and appears once, and each GraphType is one this script
+        knows. What NewName says is the operator's business.
     #>
     [CmdletBinding()]
     # Both, same reason as Get-IntunePolicy.
     [OutputType([System.Collections.Generic.List[pscustomobject]], [object[]])]
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$GuidPattern,
-        [switch]$AllowUnresolvedRow
-    )
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$GuidPattern)
 
     if (-not (Test-Path -Path $Path -PathType Leaf)) {
         throw "CSV file not found: $Path"
@@ -1645,21 +1190,34 @@ function Import-RenameCsv {
         throw ("'$Path' is missing required column(s): {0}. Present: {1}" -f ($missing -join ', '), ($columns -join ', '))
     }
 
-    $hasConfidence = 'Confidence' -in $columns
-    if (-not $hasConfidence) {
-        Write-Warning "'$Path' has no Confidence column - it was not produced by this script's propose mode. Every row is treated as reviewed."
+    # A Confidence column identifies a file exported by 1.0.0 unambiguously - this version
+    # never writes one. 1.0.0's NewName held a machine-derived guess nobody may have reviewed
+    # as carefully as a name they typed themselves; running it through unchanged would apply
+    # exactly the Assumed/Unresolved rows 1.0.0 either flagged or refused.
+    if ('Confidence' -in $columns) {
+        throw ("'$Path' has a Confidence column, which means it was exported by version 1.0.0. " +
+               "Its NewName values are derived names this version does not stand behind. " +
+               "Export a fresh CSV with mode 1 and edit that instead.")
     }
 
     $validTypes = @($script:EndpointMap | ForEach-Object { $PSItem.Key })
     $rows = [System.Collections.Generic.List[pscustomobject]]::new()
+    $seenId = @{}
+    $trimmed = 0
     $lineNumber = 1
 
     foreach ($row in $csv) {
         $lineNumber++
         $currentName = [string]$row.CurrentName
-        $newName     = [string]$row.NewName
         $id          = [string]$row.Id
         $graphType   = [string]$row.GraphType
+
+        # Excel adds trailing spaces on an edited cell more often than anyone would like, and
+        # a policy whose name ends in a space is invisible in the portal and permanent in the
+        # tenant. Trimmed rather than rejected, but counted so it is never silent.
+        $newNameRaw = [string]$row.NewName
+        $newName    = $newNameRaw.Trim()
+        if ($newName -cne $newNameRaw) { $trimmed++ }
 
         if ([string]::IsNullOrWhiteSpace($newName) -or $newName -ceq $currentName) {
             Write-Verbose ('Row {0} ({1}): no change requested, skipping.' -f $lineNumber, $currentName)
@@ -1670,22 +1228,18 @@ function Import-RenameCsv {
             throw ("Row {0} ('{1}'): Id '{2}' is not a GUID." -f $lineNumber, $currentName, $id)
         }
 
+        # Two rows renaming the same policy is an edit mistake with no correct resolution -
+        # whichever ran last would win, and which that is depends on row order.
+        if ($seenId.ContainsKey($id)) {
+            throw ("Row {0}: Id {1} also appears on row {2}. A policy can only be renamed once per run." -f
+                $lineNumber, $id, $seenId[$id])
+        }
+        $seenId[$id] = $lineNumber
+
         if ($graphType -notin $validTypes) {
             throw ("Row {0} ('{1}'): GraphType '{2}' is not one of: {3}" -f
                 $lineNumber, $currentName, $graphType, ($validTypes -join ', '))
         }
-
-        $check = Test-StandardName -Name $newName -GraphType $graphType
-        if (-not $check.IsValid) {
-            throw ("Row {0} ('{1}'): NewName '{2}' does not match OS-SCOPE-TARGET-TYP-KAT-Name - {3}." -f
-                $lineNumber, $currentName, $newName, $check.Reason)
-        }
-
-        # An Unresolved row is refused, not fatal: the rest of a reviewed CSV is still worth
-        # applying, and the refusal is recorded per row in the run report rather than losing
-        # the whole run to one bad line.
-        $confidence = $hasConfidence ? [string]$row.Confidence : 'Derived'
-        $refused = ($confidence -eq 'Unresolved' -and -not $AllowUnresolvedRow)
 
         $endpoint = Get-EndpointDefinition -GraphType $graphType
         $rows.Add([pscustomobject]@{
@@ -1693,21 +1247,21 @@ function Import-RenameCsv {
             GraphType   = $graphType
             CurrentName = $currentName
             NewName     = $newName
-            Confidence  = $confidence
-            Reason      = ($hasConfidence -and 'Reason' -in $columns) ? [string]$row.Reason : ''
-            Refused     = $refused
-            Changed     = $true
             Uri         = $endpoint.Uri
             NameField   = $endpoint.NameField
-            # Not in the CSV, and deliberately not looked up here: Set-PolicyName fetches it
-            # only for the endpoints that need it, and only when it is missing.
+            # The list response is not seen in this mode, so the derived type is fetched by
+            # Set-PolicyName for the endpoints that need it. See the note there.
             OdataType   = ''
         })
     }
 
-    if ($rows.Count -eq 0) {
-        throw "No row in '$Path' has a NewName that differs from its CurrentName."
+    if ($trimmed -gt 0) {
+        Write-Warning ('{0} NewName value(s) had leading or trailing whitespace, which was removed.' -f $trimmed)
     }
+
+    # An empty result is not an error - a valid file where nothing was edited is a
+    # legitimate outcome, and a scheduled run should not page anyone over it. The caller
+    # decides what to say about it.
 
     # Comma guard, same reason as Get-IntunePolicy's return.
     return , $rows
@@ -1736,10 +1290,13 @@ function Set-PolicyName {
     if ($endpoint.NeedsOdataType) {
         # deviceConfigurations, deviceCompliancePolicies and Autopilot profiles are abstract
         # base types: the body has to name the derived type or Graph rejects the request.
+        # The caller normally sets $Policy.OdataType from the collision-check read
+        # (Get-ExistingPolicyName), which already covers every policy of these types. This
+        # GET is therefore only the fallback for what that read cannot guarantee: an Id in
+        # the CSV that was not in the read set, or a Graph object with no annotation at all.
         $odataType = [string]$Policy.OdataType
         if ([string]::IsNullOrWhiteSpace($odataType)) {
-            # Only reachable from a hand-written CSV, where the list response was never seen.
-            Write-Verbose ('{0}: no @odata.type carried on the row, reading it from Graph.' -f $Policy.Id)
+            Write-Verbose ('{0}: reading @odata.type for the PATCH body.' -f $Policy.Id)
             $existing = Invoke-GraphRequest -Uri $patchUri
             $odataType = [string](Get-ObjectProperty -InputObject $existing -Name '@odata.type')
         }
@@ -1795,7 +1352,11 @@ if ($isRenameMode) {
         throw "CSV file not found: $ImportCsv"
     }
     $importCsvResolved = (Resolve-Path -Path $ImportCsv).Path
-    $csvRows = Import-RenameCsv -Path $importCsvResolved -GuidPattern $guidPattern -AllowUnresolvedRow:$AllowUnresolved
+    $csvRows = Import-RenameCsv -Path $importCsvResolved -GuidPattern $guidPattern
+    if ($csvRows.Count -eq 0) {
+        Write-Warning ("No row in '{0}' has a NewName that differs from its CurrentName. Nothing to do." -f $importCsvResolved)
+        return
+    }
     $selectedTypes = @($csvRows | ForEach-Object { [string]$PSItem.GraphType } | Sort-Object -Unique)
 }
 else {
@@ -1853,24 +1414,9 @@ $tenantLabel = $TenantName
 if ([string]::IsNullOrWhiteSpace($tenantLabel)) { $tenantLabel = $script:TargetCustomerName }
 if ([string]::IsNullOrWhiteSpace($tenantLabel)) { $tenantLabel = Get-TenantDisplayName -TenantId $tokenTenantId }
 
-function Write-CollisionReport {
-    # Reports the whole group, not just the offending row: knowing that two names collide is
-    # useless without knowing which two policies they are.
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Collision)
-
-    foreach ($group in $Collision) {
-        Write-Warning ('Name collision in {0}: {1} object(s) would be called "{2}".' -f
-            $group.GraphType, @($group.Member).Count, $group.NewName)
-        foreach ($member in @($group.Member)) {
-            Write-Warning ('    [{0}] {1}  (currently "{2}")' -f $member.Source, $member.Id, $member.CurrentName)
-        }
-    }
-}
-
 if (-not $isRenameMode) {
 
-    # --- MODE 1: propose ------------------------------------------------------------------
+    # --- MODE 1: export ------------------------------------------------------------------
     # Nothing here writes to the tenant. The CSV is the deliverable and, once mode 2 has run,
     # the only record of what the old names were.
 
@@ -1880,45 +1426,14 @@ if (-not $isRenameMode) {
         return
     }
 
-    $results = [System.Collections.Generic.List[pscustomobject]]::new()
-    foreach ($policy in $policies) {
-        # -Prefix filters which policies are PROPOSED, not which are read: the full list of
-        # every affected type is what the collision check needs, including the policies this
-        # run is not touching.
-        if ($Prefix -and $policy.CurrentName -notlike "$Prefix*") { continue }
-
-        $standard = Get-StandardName -CurrentName $policy.CurrentName -GraphType $policy.GraphType `
-            -Item $policy.Item -DefaultScope $DefaultScope
-
-        $results.Add([pscustomobject]@{
-            Id          = $policy.Id
-            GraphType   = $policy.GraphType
-            CurrentName = $policy.CurrentName
-            NewName     = $standard.NewName
-            Os          = $standard.Os
-            Scope       = $standard.Scope
-            Target      = $standard.Target
-            Typ         = $standard.Typ
-            Kat         = $standard.Kat
-            Confidence  = $standard.Confidence
-            Reason      = $standard.Reason
-            Changed     = (-not [string]::IsNullOrWhiteSpace($standard.NewName) -and
-                           $standard.NewName -cne $policy.CurrentName)
-        })
-    }
+    $results = @($policies | Where-Object {
+        -not $Prefix -or $PSItem.CurrentName -like "$Prefix*"
+    })
 
     if ($results.Count -eq 0) {
         Write-Warning ("No policy matched the prefix '{0}'." -f $Prefix)
         return
     }
-
-    $existingByType = @{}
-    foreach ($graphType in @($results | ForEach-Object { $PSItem.GraphType } | Sort-Object -Unique)) {
-        $existingByType[$graphType] = @($policies |
-            Where-Object { $PSItem.GraphType -eq $graphType } |
-            Select-Object -Property Id, CurrentName)
-    }
-    $collisions = @(Get-NameCollision -Row @($results | Where-Object { $PSItem.Changed }) -ExistingByType $existingByType)
 
     if ([string]::IsNullOrWhiteSpace($CsvPath)) {
         $csvRoot = -not [string]::IsNullOrWhiteSpace($PSScriptRoot) ? $PSScriptRoot : (Get-Location).Path
@@ -1927,33 +1442,29 @@ if (-not $isRenameMode) {
     }
     $CsvPath = [System.IO.Path]::GetFullPath($CsvPath)
 
-    # Sorted before the projection so the reviewer meets the uncertain rows first. The sort
-    # key is computed here rather than carried as a column: it is an artefact of presentation
-    # and has no business being in the file the operator edits.
     # utf8BOM, not UTF8: in PowerShell 7 'UTF8' means UTF-8 WITHOUT a BOM, and Excel then
     # reads the file as Windows-1252. A Swedish character in a policy name would come back
-    # from the reviewed CSV mangled and be written to the tenant that way.
+    # from the edited CSV mangled and be written to the tenant that way.
     $results |
-        Sort-Object -Property @{ Expression = { $script:ConfidenceRank[$PSItem.Confidence] } }, GraphType, CurrentName |
-        Select-Object -Property Id, GraphType, CurrentName, NewName, Os, Scope, Target, Typ, Kat,
-                                Confidence, Reason, Changed |
+        Sort-Object -Property GraphType, CurrentName |
+        Select-Object -Property Id, GraphType, CurrentName, NewName |
         Export-Csv -Path $CsvPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
 
-    $byConfidence = $results | Group-Object -Property Confidence |
+    $byType = $results | Group-Object -Property GraphType |
         Sort-Object -Property Name |
         ForEach-Object { '{0}={1}' -f $PSItem.Name, $PSItem.Count }
 
     Write-Host ''
     Write-Host ('Tenant : {0}  ({1})' -f $tenantLabel, $tokenTenantId) -ForegroundColor Cyan
-    Write-Host ('Rows   : {0} proposed, {1} to rename, {2}' -f
-        $results.Count, @($results | Where-Object { $PSItem.Changed }).Count, ($byConfidence -join ', '))
+    Write-Host ('Rows   : {0}  ({1})' -f $results.Count, ($byType -join ', '))
     Write-Host ('CSV    : {0}' -f $CsvPath) -ForegroundColor Green
     Write-Host ''
-
-    if ($collisions.Count -gt 0) {
-        Write-CollisionReport -Collision $collisions
-        Write-Warning ('{0} name collision(s) in this proposal. Mode 2 will refuse to run until the CSV is corrected.' -f $collisions.Count)
-    }
+    Write-Host 'Edit the NewName column, then apply it with:' -ForegroundColor Yellow
+    Write-Host ("    ./Rename-IntunePolicies.ps1 -ImportCsv '{0}' -WhatIf" -f $CsvPath)
+    Write-Host ''
+    Write-Host 'A name that looks like a date or a number (2025-03-13, 1.5) can be silently' -ForegroundColor DarkGray
+    Write-Host 'rewritten by Excel on open/save. See the README before editing in Excel.' -ForegroundColor DarkGray
+    Write-Host ''
 
     Write-Output $results
     return
@@ -1976,6 +1487,21 @@ function Add-Result {
     })
 }
 
+function Write-CollisionReport {
+    # Reports the whole group, not just the offending row: knowing that two names collide is
+    # useless without knowing which two policies they are.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Collision)
+
+    foreach ($group in $Collision) {
+        Write-Warning ('Name collision in {0}: {1} object(s) would be called "{2}".' -f
+            $group.GraphType, @($group.Member).Count, $group.NewName)
+        foreach ($member in @($group.Member)) {
+            Write-Warning ('    [{0}] {1}  (currently "{2}")' -f $member.Source, $member.Id, $member.CurrentName)
+        }
+    }
+}
+
 $reportRoot = [string]::IsNullOrWhiteSpace($ReportDirectory) ?
     (Split-Path -Path $importCsvResolved -Parent) : (Resolve-Path -Path $ReportDirectory).Path
 $runComplete = $false
@@ -1990,6 +1516,11 @@ try {
     # touching is caught too. This runs before the banner: an operator should not be asked to
     # confirm a run that cannot legally complete.
     $existingByType = @{}
+    # Types whose existing names could NOT be read. An empty list here is not "no
+    # collisions" - it is "we do not know", and uniqueness is the one guarantee -Force may
+    # not bypass. Rows of these types are pulled out below, before the collision check ever
+    # runs, and recorded as blocked rather than being treated as collision-free by default.
+    $unverifiableTypes = [System.Collections.Generic.List[string]]::new()
     foreach ($graphType in $selectedTypes) {
         try {
             # Assigned straight from the call: wrapping a comma-guarded return in @() yields a
@@ -1999,11 +1530,18 @@ try {
         catch [GraphAuthorizationException] {
             Write-Warning ('{0}: {1}' -f $graphType, $PSItem.Exception.Message)
             $existingByType[$graphType] = @()
+            $unverifiableTypes.Add($graphType)
         }
     }
 
-    $applicable = @($csvRows | Where-Object { -not $PSItem.Refused })
-    $collisions = @(Get-NameCollision -Row $applicable -ExistingByType $existingByType)
+    $verifiableRows = @($csvRows | Where-Object { $PSItem.GraphType -notin $unverifiableTypes })
+    $unverifiableRows = @($csvRows | Where-Object { $PSItem.GraphType -in $unverifiableTypes })
+    foreach ($row in $unverifiableRows) {
+        Add-Result -Id $row.Id -GraphType $row.GraphType -CurrentName $row.CurrentName -NewName $row.NewName `
+            -Status 'blocked' -Detail 'existing names could not be read, so uniqueness could not be verified'
+    }
+
+    $collisions = @(Get-NameCollision -Row $verifiableRows -ExistingByType $existingByType)
     if ($collisions.Count -gt 0) {
         Write-CollisionReport -Collision $collisions
         foreach ($group in $collisions) {
@@ -2019,32 +1557,39 @@ try {
         throw ('{0} name collision(s) detected. Nothing was renamed.' -f $collisions.Count)
     }
 
-    # Current name per id, so a row whose target name is already in place is recognised
-    # rather than patched again. Re-running the same reviewed CSV is then a no-op.
+    # Current name (and, where it was read, the derived type - see the OdataType note in
+    # Get-ExistingPolicyName) per id, so a row whose target name is already in place is
+    # recognised rather than patched again, and so Set-PolicyName does not need a second GET
+    # for it. Built only from types that were actually read; an unverifiable type has no
+    # entries here on purpose, so its rows cannot be mistaken for "already named as requested".
     $currentNameById = @{}
+    $odataTypeById = @{}
     foreach ($graphType in $existingByType.Keys) {
+        if ($graphType -in $unverifiableTypes) { continue }
         foreach ($existing in @($existingByType[$graphType])) {
             $currentNameById[[string]$existing.Id] = [string]$existing.CurrentName
+            if (-not [string]::IsNullOrWhiteSpace([string]$existing.OdataType)) {
+                $odataTypeById[[string]$existing.Id] = [string]$existing.OdataType
+            }
         }
     }
 
-    $refused = @($csvRows | Where-Object { $PSItem.Refused })
     # Ids rather than object identity: an id set is what the loop below can ask about cheaply,
     # and -in over a list of PSCustomObjects compares by reference, which is a property of the
     # collection rather than of the data.
     $renameIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($row in $applicable) {
+    foreach ($row in $verifiableRows) {
+        if ($odataTypeById.ContainsKey($row.Id)) { $row.OdataType = $odataTypeById[$row.Id] }
         $alreadyNamed = $currentNameById.ContainsKey($row.Id) -and $currentNameById[$row.Id] -ceq $row.NewName
         if (-not $alreadyNamed) { [void]$renameIds.Add([string]$row.Id) }
     }
-    $toRename = @($applicable | Where-Object { $renameIds.Contains([string]$PSItem.Id) })
 
     Write-Host ''
     Write-Host ('Source : {0}' -f $importCsvResolved) -ForegroundColor Cyan
     Write-Host ('Tenant : {0}  ({1})' -f $tenantLabel, $tokenTenantId) -ForegroundColor Yellow -NoNewline
     Write-Host ($WhatIfPreference ? '   DRY RUN' : '   WRITE') -ForegroundColor ($WhatIfPreference ? 'Green' : 'Red')
-    Write-Host ('Rows   : {0} to rename, {1} already named as requested, {2} refused as unresolved' -f
-        $toRename.Count, ($applicable.Count - $toRename.Count), $refused.Count)
+    Write-Host ('Rows   : {0} to rename, {1} already named as requested, {2} blocked' -f
+        $renameIds.Count, ($verifiableRows.Count - $renameIds.Count), $unverifiableRows.Count)
     Write-Host ''
 
     # One gate for the whole run, not ConfirmImpact = 'High' - that asks once per policy, and
@@ -2052,7 +1597,7 @@ try {
     # only when something will actually be written and there is someone at the keyboard to
     # answer: a redirected stdin means a scheduled run, where Read-Host would block forever.
     $sessionIsInteractive = [Environment]::UserInteractive -and -not [System.Console]::IsInputRedirected
-    if (-not $WhatIfPreference -and -not $Force -and $toRename.Count -gt 0) {
+    if (-not $WhatIfPreference -and -not $Force -and $renameIds.Count -gt 0) {
         if ($sessionIsInteractive) {
             $answer = Read-Host 'Rename the above in the TARGET tenant? Type YES to continue'
             if ($answer -cne 'YES') { throw 'Aborted at the confirmation prompt. Nothing was renamed.' }
@@ -2062,16 +1607,10 @@ try {
         }
     }
 
-    foreach ($row in $refused) {
-        Write-Warning ("'{0}': Confidence is Unresolved - refused. Review the row, or pass -AllowUnresolved." -f $row.CurrentName)
-        Add-Result -Id $row.Id -GraphType $row.GraphType -CurrentName $row.CurrentName -NewName $row.NewName `
-            -Status 'unresolved' -Detail $row.Reason
-    }
-
-    foreach ($row in $applicable) {
+    foreach ($row in $verifiableRows) {
         if (-not $renameIds.Contains([string]$row.Id)) {
             Add-Result -Id $row.Id -GraphType $row.GraphType -CurrentName $row.CurrentName -NewName $row.NewName `
-                -Status 'compliant' -Detail 'the policy is already named as the CSV requests'
+                -Status 'unchanged' -Detail 'the policy is already named as the CSV requests'
             continue
         }
 
@@ -2130,7 +1669,7 @@ finally {
     # not be missing. "No rows" and "did not happen" are different states, and both have to be
     # legible without interpreting the warning stream.
     $totals = [ordered]@{}
-    foreach ($statusKey in @('renamed', 'compliant', 'unresolved', 'collision', 'whatif', 'skipped', 'blocked', 'failed')) {
+    foreach ($statusKey in @('renamed', 'unchanged', 'collision', 'whatif', 'skipped', 'blocked', 'failed')) {
         $totals[$statusKey] = 0
     }
     foreach ($row in $results) {
@@ -2138,19 +1677,18 @@ finally {
     }
 
     $report = [ordered]@{
-        schemaVersion      = 1
+        schemaVersion      = 2
         runTimestampUtc    = $runUtc.ToString('o')
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
         timeZone           = [System.TimeZoneInfo]::Local.Id
-        scriptVersion      = '1.0.0'
+        scriptVersion      = '2.0.0'
         whatIf             = [bool]$WhatIfPreference
         targetTenantId     = $tokenTenantId
         targetTenantName   = $tenantLabel
         targetCustomerName = $script:TargetCustomerName
         sourceCsv          = $importCsvResolved
         typesSelected      = (@($selectedTypes | ForEach-Object { [string]$PSItem }) -join ', ')
-        allowUnresolved    = [bool]$AllowUnresolved
         runComplete        = $runComplete
         abortReason        = $abortReason
         totals             = $totals
@@ -2171,7 +1709,7 @@ finally {
         # Both files are written on a -WhatIf run too. A dry run that leaves something you can
         # read afterwards is the point of the dry run; whatIf: true is what tells them apart.
         Write-Utf8File -Path ('{0}.json' -f $reportBase) -Content (ConvertTo-Json -InputObject $report -Depth 6)
-        # utf8BOM for the same reason as the proposal CSV: this is the file an operator opens
+        # utf8BOM for the same reason as the exported CSV: this is the file an operator opens
         # in Excel to build the reverse run that undoes a rename.
         $results | Export-Csv -Path ('{0}.csv' -f $reportBase) -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
         Write-Verbose ('Report: {0}.json / .csv' -f $reportBase)

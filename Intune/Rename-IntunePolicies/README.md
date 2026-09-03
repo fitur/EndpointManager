@@ -1,24 +1,27 @@
 # Intune Policy Rename
 
-Renames Intune policies to the naming standard `OS-SCOPE-TARGET-TYP-KAT-Name`, over Graph
-REST, in two deliberate steps: propose to a CSV, review the CSV, then apply it.
+Exports every Intune policy name to a CSV, and applies an edited copy of that CSV back to the
+tenant. Two separate commands, over Graph REST.
 
 One script, `Rename-IntunePolicies.ps1`. It only ever writes `displayName` / `name`. No
 assignments, no descriptions, no settings.
 
-Three things are true of every run and worth knowing before the first one:
+**The script has no opinion about what a name should be.** It does not parse names, does not
+derive names and knows about no naming convention. What you type in `NewName` is what the
+policy is called afterwards.
 
-- **There is no rollback.** The proposal CSV and the run report are the only record of what the
+Three things are true of every run:
+
+- **There is no rollback.** The exported CSV and the run report are the only record of what the
   old names were. Undoing a run means swapping two columns and running the tool again.
-- **Mode 1 never writes.** It reads, proposes and stops. Everything that touches the tenant
-  happens in mode 2, against a CSV a person has looked at.
-- **A name that already follows the standard is left alone.** Running the tool twice is a
-  no-op, not a second round of renaming. This is checked before any interpretation of the name
-  happens, and it is the property most of the design exists to protect.
+- **Mode 1 never writes.** It reads, exports and stops. Everything that touches the tenant
+  happens in mode 2, against a CSV a person has edited.
+- **A row you did not edit is not touched.** `NewName` comes out pre-filled with `CurrentName`,
+  and a row where the two are still equal is skipped.
 
 ## Quick start
 
-Five steps from nothing to renamed policies. Every step has a fuller section further down.
+Five steps. Every step has a fuller section further down.
 
 **1. Check PowerShell.** 7.4 or later.
 
@@ -41,35 +44,31 @@ $env:INTUNE_CLIENT_SECRET = '<secret>'
 ./Rename-IntunePolicies.ps1 -TestPermissionOnly
 ```
 
-**4. Propose. This is mode 1 and it changes nothing.**
+**4. Export. This is mode 1 and it changes nothing.**
 
 ```powershell
-./Rename-IntunePolicies.ps1 -CsvPath ~/Desktop/rename.csv -Verbose
+./Rename-IntunePolicies.ps1 -CsvPath ~/Desktop/names.csv -Verbose
 ```
 
-Now open `~/Desktop/rename.csv`, sort by `Confidence`, and read it. See
-[Output](#output) for what the columns mean. Edit the `NewName` column where the script guessed
-wrong; blank it out for any row you do not want touched.
-
-**5. Apply. Dry run first, every time.**
+**5. Edit the `NewName` column, then apply. Dry run first, every time.**
 
 ```powershell
-./Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/rename.csv -WhatIf
+./Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/names.csv -WhatIf
 ```
 
 ```powershell
-./Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/rename.csv
+./Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/names.csv
 ```
 
 ## The hard requirement
 
-**The CSV is the only rollback that exists. Review it.**
+**The CSV is the only rollback that exists.**
 
 Nothing here can undo a rename. Graph has no version history for a policy name, and the tenant
 after a run carries no memory of what anything used to be called. Two files stand between a bad
 run and a tenant nobody can navigate:
 
-- the **proposal CSV** from mode 1, which pairs every `NewName` with the `CurrentName` it
+- the **exported CSV** from mode 1, which pairs every `NewName` with the `CurrentName` it
   replaces, and
 - the **run report** from mode 2, which records what was actually applied.
 
@@ -79,8 +78,8 @@ someone else is the point of the dry run.
 Three consequences follow from the same constraint:
 
 - **Mode 1 does not rename.** It writes the CSV and returns. There is no combined
-  propose-and-apply path, because the review step is the safety mechanism and a flag that skips
-  it is a flag that will get used.
+  export-and-apply path, because the edit step is where the decisions are made and a flag that
+  skips it is a flag that will get used.
 - **One confirmation, before the first write, not one per policy.** `ConfirmImpact = 'High'`
   would ask eighteen times, and an operator clicking through eighteen prompts has stopped
   reading by the third. `-Force` skips the single prompt for scheduled runs.
@@ -108,9 +107,9 @@ Ten endpoints, all on `beta`:
 
 `-PolicyType` restricts a run to some of them; the default is all ten.
 
-**Not covered:** app protection and app configuration policies (MAM), Enrollment Status Page
-configurations (ESP), and the `SYS` type in the standard. The endpoints exist in Graph; they
-are outside this version. They are not read, not proposed and not renamed.
+**Not covered:** app protection and app configuration policies (MAM), and Enrollment Status Page
+configurations (ESP). The endpoints exist in Graph; they are outside this version. They are not
+read and not renamed.
 
 ## Requirements
 
@@ -203,7 +202,7 @@ as the template.
 
 ```powershell
 ./Rename-IntunePolicies.ps1 -CustomerConfigPath ~/.intune/customers.json `
-    -CustomerName 'Fabrikam AB' -CsvPath ~/Desktop/fabrikam-rename.csv
+    -CustomerName 'Fabrikam AB' -CsvPath ~/Desktop/fabrikam-names.csv
 ```
 
 The customer selected is the tenant that gets **written to**. The run banner names it, and the
@@ -211,9 +210,9 @@ GUID beside the name comes from the token's own `tid` claim rather than from the
 that is the one source that cannot be wrong about which tenant is about to be modified:
 
 ```
-Source : /Users/you/Desktop/fabrikam-rename.csv
+Source : /Users/you/Desktop/fabrikam-names.csv
 Tenant : Fabrikam AB  (4444-…)   WRITE
-Rows   : 18 to rename, 3 already named as requested, 1 refused as unresolved
+Rows   : 18 to rename, 3 already named as requested, 0 blocked
 ```
 
 Add the filled-in copy to `.gitignore`, and `chmod 600` it — the script warns if it is readable
@@ -227,29 +226,29 @@ The two steps are separate commands on purpose. There is no flag that combines t
 # 1. Permission check. Reads no policies, writes nothing.
 ./Rename-IntunePolicies.ps1 -TestPermissionOnly
 
-# 2. Propose. Writes the CSV, touches nothing in the tenant.
-./Rename-IntunePolicies.ps1 -CsvPath ~/Desktop/rename.csv -Verbose
+# 2. Export. Writes the CSV, touches nothing in the tenant.
+./Rename-IntunePolicies.ps1 -CsvPath ~/Desktop/names.csv -Verbose
 
-# 3. Review ~/Desktop/rename.csv by hand. See below.
+# 3. Edit ~/Desktop/names.csv by hand. See below.
 
 # 4. Dry run. Reads existing names for the collision check, writes the report with whatIf: true.
-./Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/rename.csv -WhatIf
+./Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/names.csv -WhatIf
 
 # 5. For real. One YES prompt, then the renames.
-./Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/rename.csv
+./Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/names.csv
 ```
 
-**Reviewing the CSV** is step 3 and it is not optional:
+**Editing the CSV** is step 3, and it is the whole point of the tool:
 
-1. Sort by `Confidence`. The file is already written in that order — `Unresolved` first, then
-   `Assumed`, then the rest — so the rows that need a human are at the top.
-2. `Unresolved` rows have an empty `NewName`. Fill one in, or leave the row alone and it is
-   skipped. Read `Reason` to see what the script could not establish.
-3. `Assumed` rows have a name, but at least one segment is a default rather than something that
-   was read. In practice that is usually `SCOPE` — the script cannot know whether a policy is
-   Base or Custom, so it writes `C`. Change `C` to `B` where it should be.
-4. Blank the `NewName` of anything you do not want renamed.
-5. Do not edit `Id` or `GraphType`. They are what the script uses to find the policy.
+1. Change `NewName` on the rows you want renamed. Leave the rest alone — a row where `NewName`
+   still equals `CurrentName` is skipped, and so is a row where you blank it out.
+2. Do not edit `Id` or `GraphType`. They are what the script uses to find the policy.
+3. `CurrentName` is not read back for anything except the report and the log lines, so an
+   accidental edit there is harmless — but it makes the report harder to read.
+4. Names are taken verbatim. Hyphens, dots, dates, Swedish characters, whatever you like;
+   nothing is parsed or normalised. The one thing that *is* cleaned up is leading and trailing
+   whitespace, which Excel adds freely and which is invisible in the portal and permanent in
+   the tenant. The script strips it and warns how many rows it touched.
 
 Narrowing a first run to one type is a good habit:
 
@@ -257,50 +256,27 @@ Narrowing a first run to one type is a good habit:
 ./Rename-IntunePolicies.ps1 -PolicyType Filter -CsvPath ~/Desktop/filters.csv
 ```
 
-`-Prefix 'Windows - '` restricts the proposal to policies whose current name starts with a
-given string. It filters what is *proposed*, not what is *read*: the collision check still sees
+`-Prefix 'Windows - '` restricts the export to policies whose current name starts with a given
+string. It filters what is *exported*, not what is *read*: mode 2's collision check still sees
 every policy of the affected types, including the ones the prefix excluded.
 
 ## Output
 
-### The proposal CSV (mode 1)
+### The exported CSV (mode 1)
 
-One row per policy, UTF-8 **with a BOM**. The BOM is deliberate: in PowerShell 7 `-Encoding
-UTF8` means UTF-8 *without* one, and Excel then reads the file as Windows-1252. A policy name
-containing å, ä or ö would come back from the reviewed CSV mangled and be written to the tenant
-that way.
+One row per policy, four columns, UTF-8 **with a BOM**. The BOM is deliberate: in PowerShell 7
+`-Encoding UTF8` means UTF-8 *without* one, and Excel then reads the file as Windows-1252. A
+policy name containing å, ä or ö would come back from the edited CSV mangled and be written to
+the tenant that way.
 
 | Column | What it is |
 |---|---|
 | `Id` | Graph object ID. Do not edit. |
 | `GraphType` | Which endpoint the policy came from. Do not edit. |
 | `CurrentName` | The name in the tenant right now. |
-| `NewName` | The proposal. Edit this, or blank it to skip the row. |
-| `Os` `Scope` `Target` `Typ` `Kat` | The individual segments, so a wrong one is visible without parsing the name. |
-| `Confidence` | How the name was arrived at. See below. |
-| `Reason` | One line naming every assumption and every gap. |
-| `Changed` | Whether `NewName` differs from `CurrentName`. |
+| `NewName` | Pre-filled with `CurrentName`. **This is the column you edit.** |
 
-### Confidence
-
-**Read this column row by row.** It is the difference between a name the script *read* and a
-name it *chose*.
-
-| Level | Means | Mode 2 |
-|---|---|---|
-| `Compliant` | The current name already follows the standard. | Skipped, never rewritten |
-| `Derived` | Read from a Graph field, or from an explicit word in the current name. | Applied |
-| `Assumed` | An endpoint default that holds for the large majority, but was **not read**. `Reason` names the assumption. | Applied |
-| `Unresolved` | No basis at all. `NewName` is empty. | Refused, unless `-AllowUnresolved` |
-
-`Assumed` exists because a strict two-level model would make the entire Settings Catalog —
-the largest area in most tenants — `Unresolved`, and the flag meant to be the exception would
-become the normal way to run the tool. The assumption is still visible and still named; what it
-is not is silent.
-
-A row's confidence is the **weakest** of its segments. One assumed segment makes the whole row
-`Assumed`; one unresolved segment makes it `Unresolved` and empties `NewName`, so there is
-never a half-derived suggestion sitting in the file waiting to be approved by accident.
+Rows are sorted by `GraphType`, then `CurrentName`.
 
 ### The run report (mode 2)
 
@@ -313,12 +289,11 @@ Per row: `Id`, `GraphType`, `CurrentName`, `NewName`, `Status`, `Detail`.
 | Status | Means |
 |---|---|
 | `renamed` | Applied. |
-| `compliant` | The policy is already named what the CSV asks for. Re-running the same CSV produces a file of these and no Graph writes. |
+| `unchanged` | The policy is already named what the CSV asks for. Re-running the same CSV produces a file of these and no Graph writes. |
 | `whatif` | `-WhatIf` run; nothing was sent. |
 | `skipped` | Declined at a `-Confirm` prompt. |
-| `unresolved` | `Confidence` was `Unresolved` and `-AllowUnresolved` was not passed. |
 | `collision` | Part of a group that would have shared a name. Nothing in the run was applied. |
-| `blocked` | The token lacks the scope for that type. |
+| `blocked` | Either the token lacks the scope for that type, or that type's existing names could not be read at all, which means uniqueness could not be checked for it. `Detail` says which. |
 | `failed` | Graph rejected it. `Detail` carries Graph's own code and message. |
 
 The JSON report also carries `runComplete`, `abortReason`, `whatIf`, the target tenant ID from
@@ -327,12 +302,15 @@ as `0` rather than being missing, because "no rows" and "did not happen" are dif
 
 ### Collisions
 
-Intune enforces unique names **per policy type**, not globally. Before anything is written, the
-script works out what every policy of every affected type will be called when the run finishes
-and looks for two that land on the same name. That covers three cases a simple duplicate check
-does not:
+This is the only judgment the script makes about a name, and it is not an opinion about naming.
+Intune enforces unique names **per policy type**, so a run that produced a duplicate would fail
+partway through and leave the tenant half-renamed.
 
-- two rows in the run mapping to one name,
+Before anything is written, the script works out what every policy of every affected type will
+be called when the run finishes, and looks for two that land on the same name. That covers three
+cases a simple duplicate check does not:
+
+- two rows in the CSV mapping to one name,
 - a rename colliding with a policy nobody is touching,
 - a name that looks taken but is being vacated by another row in the same run — reported as
   fine, because it is.
@@ -342,11 +320,21 @@ aborts before the first PATCH. **`-Force` does not get past this.** A bad name c
 running the tool again; two identically named policies cannot, because by then the collision is
 already in the tenant.
 
+The same reasoning is why the same `Id` appearing on two rows is rejected outright: whichever
+ran last would win, and which that is depends on row order.
+
+**If a type's existing names cannot be read at all** — a 403 partway through the check, most
+often — its rows are not treated as collision-free by default. An empty read is "we do not
+know," not "no collisions." Those rows are recorded as `blocked` before anything else runs, and
+mode 2 continues with the types it could verify.
+
 ## Error semantics
 
 **403** means a missing scope for that one type. Intune names the scope it wants. The row is
 recorded as `blocked`, the type is marked, and the remaining rows of that type are recorded
-without another call — one line each, not one failing request each.
+without another call — one line each, not one failing request each. A 403 while reading a
+type's *existing* names — before any PATCH is attempted, during the collision check — blocks
+every row of that type the same way, since uniqueness could not be verified for it either.
 
 **401** is global: the token itself is not accepted. One automatic refresh covers a genuinely
 stale token; a second 401 aborts the run. The report is still written, with
@@ -360,7 +348,7 @@ app registration.
 
 **400** is why `Get-GraphErrorDetail` exists. `Invoke-RestMethod` puts the response body in
 `ErrorDetails.Message` and its own exception says only `400 (Bad Request)`. The report gets the
-full thing, so a missing `@odata.type` or a name Intune rejects is legible:
+full thing, so a name Intune rejects is legible:
 
 ```
 Response status code does not indicate success: 400 (Bad Request). |
@@ -368,14 +356,14 @@ BadRequest: Entity only allows writes with a JSON Content-Type header.
 ```
 
 **404** on a PATCH means the `Id` in the CSV is not in the tenant — usually a row edited by
-hand, or a policy deleted since the proposal was written. `Detail` carries Graph's own
+hand, or a policy deleted since the export was written. `Detail` carries Graph's own
 `ResourceNotFound` text.
 
 **429 and 5xx** are retried with backoff, honouring `Retry-After` when Graph sends it.
 
 ## Data sensitivity
 
-The proposal CSV and the run report list **every policy name in the tenant together with its
+The exported CSV and the run report list **every policy name in the tenant together with its
 object ID**. That is a map of the customer's security configuration: what is deployed, roughly
 what it does, and enough identifiers to address any of it through Graph. Neither file is
 encrypted, and both inherit the permissions of the folder they are written to.
@@ -383,8 +371,8 @@ encrypted, and both inherit the permissions of the folder they are written to.
 Do not leave either in a synchronised folder (OneDrive, Dropbox) unless that is a deliberate
 decision, and treat both as customer confidential when handing them over.
 
-`-ReportDirectory` exists so the report does not have to live next to the CSV. That matters
-when the CSV came from somewhere shared.
+`-ReportDirectory` exists so the report does not have to live next to the CSV. That matters when
+the CSV came from somewhere shared.
 
 ## Known limitations
 
@@ -395,47 +383,37 @@ when the CSV came from somewhere shared.
   ./Rename-IntunePolicies.ps1 -ImportCsv ~/Desktop/undo.csv -WhatIf
   ```
 
-  The reversed file needs the same four columns — `Id`, `GraphType`, `CurrentName`, `NewName` —
-  and the old names have to satisfy the standard, or the format check rejects them. A run that
-  moved a policy *to* the standard cannot be reversed this way if the original name was not
-  itself standard-compliant; in that case the report is a record you apply by hand.
+  The reversed file needs the same four columns — `Id`, `GraphType`, `CurrentName`, `NewName`.
+  Because the script validates nothing about the names themselves, a reversal always passes
+  validation; what it cannot do is bring back a policy that was deleted in between.
 
-- **`Confidence` must be reviewed row by row.** `Assumed` means the script chose an endpoint
-  default, not that it read the value. `Unresolved` means it had nothing to go on, and those
-  rows are refused unless `-AllowUnresolved` is passed.
+- **A possible extra `GET` per renamed policy on three endpoints.** `deviceConfigurations`,
+  `deviceCompliancePolicies` and `windowsAutopilotDeploymentProfiles` are abstract base types
+  whose PATCH body must name the derived type. The collision check already reads every policy
+  of these types and carries the derived type along, so in the normal case nothing extra is
+  fetched. The GET is a fallback for an Id the collision-check read did not cover — most often
+  a hand-edited CSV row.
 
-- **Antivirus and VPN profiles get no category.** The standard has no `AV` under `ES` and no VPN
-  category under `CP` (`ES`: BTL, ASR, SB, AP, FW, EDR; `CP`: SC, OMA, CRT, WFI, WHM). Earlier
-  versions mapped antivirus to a non-existent `ES-AV` and VPN to `CP-WFI`, which is a Wi-Fi
-  category. Both now resolve as far as the type and stop, and come out `Unresolved`. This is a
-  gap in the standard, not in the script — raise it with the standard's owner.
+- **Names are not validated.** Length limits, reserved characters and duplicate-name rules
+  beyond the per-type uniqueness check are left to Graph. A name Intune rejects comes back as a
+  `failed` row with Graph's own message, not as a local error.
 
-- **`WindowsDriverUpdate` is mapped to `WU-QU`.** There is no driver category in the standard.
-  The mapping is recorded as `Assumed` and named in `Reason`.
-
-- **The standard's TYP list has no `SC`, but its category table has `SC: PS, SH`.** The script
-  treats `SC` as a valid type, which is what makes platform scripts nameable at all.
-
-- **Filters: `TARGET` and `KAT` are not the same axis.** The standard's own example,
-  `WIN-B-USR-FI-DEV-Default`, pairs `TARGET=USR` with `KAT=DEV`. The script reads `TARGET` from
-  `assignmentFilterManagementType` (`devices` → `DEV`, `apps` → `USR`) and fixes `KAT=DEV` from
-  the endpoint. That reproduces the example exactly, but it is an inference from one example
-  rather than a documented rule — **verify it against a real filter before running mode 2 on
-  filters in production.**
-
-- **`TARGET` is assumed for Settings Catalog and device configuration templates.** Graph does
-  not expose whether such a policy is user- or device-scoped, so both come out `DEV`, marked
-  `Assumed`. Every other type reads it or is device-only by construction.
-
-- **`SCOPE` has no Graph source at all.** Base versus Custom is an internal classification. A
-  name with no `Base`/`Custom` token gets `-DefaultScope` (default `C`), marked `Assumed`. This
-  is the single most common thing to correct in the CSV.
-
-- **MAM, ESP and SYS cannot be renamed.** Out of scope for this version; the endpoints are not
-  read at all.
+- **Excel can rewrite `NewName` for you, silently.** A policy name that looks like a date or a
+  number — `2025-03-13`, `1.5`, `03-2025`, `SEP-25` — is converted the moment the file is opened
+  and saved back in the new format. That makes `NewName` differ from `CurrentName` even though
+  nobody meant to change anything, and the script has no way to tell that apart from a real
+  edit: the mangled value gets PATCHed in. Trimming whitespace does not catch this — it is not
+  whitespace, it is a different value. Open the CSV with **Data → Get Data → From Text/CSV** and
+  set the column type to **Text**, or edit it in a plain text editor instead.
 
 - **Only the name is written.** Assignments, descriptions and settings are never touched, and
   renaming does not affect any of them.
+
+- **`-Prefix` matches with `-like`,** so `*` and `?` in the prefix are wildcards. That is
+  usually what you want; it is worth knowing if a policy name contains one.
+
+- **MAM and ESP cannot be renamed.** Out of scope for this version; the endpoints are not read
+  at all.
 
 - **Beta endpoints throughout.** Required for remediations and driver update profiles. Beta can
   change without notice.
