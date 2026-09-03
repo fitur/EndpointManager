@@ -315,6 +315,12 @@ deleted only once the archive is verified to contain every file that went in; a 
 packing failure keeps the folders and warns, and never fails the export. The loose CSV,
 `AppInstallStatus_*.csv` and the `_*.json` files in the run root are not archived.
 
+For the three script areas the archive also holds the script body as a standalone `.ps1` or
+`.sh` next to the sidecar — same base name, and remediations split into `_detect` and
+`_remediate`. The body also goes into the sidecar itself, so `ConfigurationHash` moves when a
+script changes; the text is stored exactly as Graph returns it, BOM and line endings
+included. `-SkipDetailedSettings` skips it, and the manifest reports `scriptFilesWritten`.
+
 ### The CSV
 
 One row per policy, fixed column order:
@@ -487,6 +493,12 @@ and the zip are unencrypted and inherit the permissions of `-OutputDirectory`.
 
 Do not point `-OutputDirectory` at a synchronised folder unless that is a deliberate
 decision, and treat the zip as customer confidential material when handing it over.
+
+Since 1.13.0 the remediation, platform and shell script bodies are in the export as
+cleartext — in the sidecar, as a standalone `.ps1`/`.sh`, and truncated to 300 characters in
+the change set. A script with a hard-coded password or API key exposes it there. This is not
+a new *kind* of exposure — the export already held every policy's full configuration — but it
+is new sensitive text.
 
 ## On the code itself
 

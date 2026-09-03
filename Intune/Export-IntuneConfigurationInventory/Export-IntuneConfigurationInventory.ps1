@@ -15,6 +15,7 @@
                     _manifest_<yyyy-MM-dd_HHmm>.json
                     <Tenant>_<yyyy-MM-dd_HHmm>_sidecars.zip
                         <Policy-Area>/<Name>_<Id>_<yyyy-MM-dd_HHmm>.json   (one archive entry per policy)
+                        <Policy-Area>/<Name>_<Id>_<yyyy-MM-dd_HHmm>.ps1|.sh   (script areas; remediations get _detect / _remediate)
                     _changeset_<...>.json   (only with -CompareWithPrevious)
                     AppInstallStatus_<yyyy-MM-dd_HHmm>.csv   (only with -IncludeAppInstallStatus)
                     _auditevents_<yyyy-MM-dd_HHmm>.json   (only with -IncludeAuditActor)
@@ -99,13 +100,42 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.12.1
+    Version:        1.13.0
     Creation Date:  2026-07-30
-    Last Updated:   2026-08-31
+    Last Updated:   2026-09-03
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.13.0 - 2026-09-03
+            The three script areas (Remediation Script, Platform Script, Shell Script) now
+            export the script body. Graph leaves detectionScriptContent /
+            remediationScriptContent as "" and scriptContent as null in the list response and
+            fills them only on the entity GET, so each script object costs one extra call -
+            gated by -SkipDetailedSettings, the same lever as the detail settings. Measured:
+            25 of 229 policies in the test tenant, 40 script files.
+
+            Each body is written twice: decoded into the configuration, so the
+            ConfigurationHash (taken over the sidecar bytes) reflects a changed body; and as a
+            standalone .ps1/.sh beside the sidecar, since a script inside a JSON string cannot
+            be read, run or diffed. Remediations produce two files, _detect and _remediate.
+            The text is left exactly as Graph returned it - no BOM stripped, no line endings
+            normalised: BOM and CRLF/LF were observed to differ between the two bodies of one
+            object, so they belong to the uploaded file and a change to either is a real
+            change that must show in the diff.
+
+            ONE-TIME WAVE: the content fields move from ""/null to real text, so the hash of
+            every remediation, platform script and shell script changes once. The first run
+            after upgrading reports those as modified (field diffs on detectionScriptContent /
+            remediationScriptContent / scriptContent); 25 of 229 in the test tenant. The run
+            after that is clean. Same pattern as the 1.8.0 VPP wave.
+
+            No new permission (DeviceManagementScripts.Read.All already covers the entity
+            GET), no new CSV column (the script files share the sidecar's base name), no
+            change to the archive. The manifest gains scriptFilesWritten. NOTE: a
+            -SkipDetailedSettings run now also skips the script bodies, so the field-diff
+            count that switch produced for the 1.12.0 verification will be different.
 
         1.12.1 - 2026-08-31
             Documentation only, no behaviour change. Changelog entries 1.9.0 and older are
@@ -327,7 +357,8 @@ param(
     # there is warned about, never fatal, since the export on disk is already complete.
     [switch]$CompareWithPrevious,
 
-    # Settings Catalog / Endpoint Security settings need one extra call per policy. Skip for a fast run.
+    # Settings Catalog / Endpoint Security settings, and remediation / platform / shell script
+    # bodies, each need one extra call per policy. Skip for a fast run.
     [switch]$SkipDetailedSettings,
 
     # Collect per-app installation counts into a separate CSV. Deliberately not part of the
@@ -1325,6 +1356,78 @@ function Split-SettingDefinition {
     }
 }
 
+function Expand-ScriptContent {
+    <#
+        Remediation and platform-script bodies are absent from the list response: Graph
+        returns detectionScriptContent / remediationScriptContent as "" and scriptContent as
+        null, and fills them only on the entity GET. One extra GET per script object fetches
+        them. The entity GET returns the exact same key set as the list - measured on eight
+        objects - so nothing but the content fields can slip into the hash.
+
+        The content is written in two places, for two reasons. Into the configuration (decoded)
+        because the hash is taken over exactly the sidecar's bytes - without it a changed
+        script body is invisible in the change set. And as a standalone .ps1/.sh next to the
+        sidecar, because a script inside a JSON string cannot be read, run or diffed line by
+        line.
+
+        The text is NOT touched: no BOM stripped, no line endings normalised. BOM and CRLF/LF
+        vary between individual scripts - in one measurement one body of a remediation object
+        carried a BOM and the other did not - so it is a property of the file the admin
+        uploaded, not drift on Intune's side. A BOM that disappears means someone re-uploaded
+        the file, and that must show in the diff. Leaving the text alone also makes
+        Write-Utf8File byte-exact against what Graph returned, so the .ps1 can be uploaded
+        again as it is.
+
+        A failure on one object warns and moves on, like the relationships fetch. Microsoft's
+        built-in remediations (isGlobalScript = true) do not always hand out their body; that
+        must not fail the area.
+
+        $Configuration is mutated in place; the return value is the number of script files
+        written.
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory)][System.Collections.Specialized.OrderedDictionary]$Configuration,
+        [Parameter(Mandatory)][string]$EntityUri,
+        [Parameter(Mandatory)][string[]]$PropertyNames,
+        [Parameter(Mandatory)][string]$AreaFolderPath,
+        [Parameter(Mandatory)][string]$FileBaseName,
+        [Parameter(Mandatory)][string]$DefaultExtension
+    )
+
+    $entity = Invoke-GraphRequest -Uri $EntityUri
+    $written = 0
+
+    # Remediations are the only two-body area; the map covers it, the fallback is defensive.
+    $suffixLabels = @{ detectionScriptContent = 'detect'; remediationScriptContent = 'remediate' }
+
+    foreach ($propertyName in $PropertyNames) {
+        $encoded = [string](Get-ObjectProperty -InputObject $entity -Name $propertyName)
+        if ([string]::IsNullOrWhiteSpace($encoded)) { continue }
+
+        $bytes = [System.Convert]::FromBase64String($encoded)
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+
+        $Configuration[$propertyName] = $text
+
+        # Suffix only when the object carries more than one body, so the common case stays
+        # <sidecar name>.ps1 and remediations become ..._detect.ps1 / ..._remediate.ps1.
+        # Remediations expose no fileName to derive a name from - measured, absent on every one.
+        $suffix = ''
+        if ($PropertyNames.Count -gt 1) {
+            $label = $suffixLabels.ContainsKey($propertyName) ? $suffixLabels[$propertyName] : ($propertyName -replace 'ScriptContent$', '').ToLowerInvariant()
+            $suffix = '_' + $label
+        }
+
+        $scriptFileName = '{0}{1}{2}' -f $FileBaseName, $suffix, $DefaultExtension
+        Write-Utf8File -Path (Join-Path -Path $AreaFolderPath -ChildPath $scriptFileName) -Content $text
+        $written++
+    }
+
+    return $written
+}
+
 function Resolve-GroupDisplayName {
     [CmdletBinding()]
     [OutputType([string])]
@@ -1484,7 +1587,10 @@ function New-PolicyDefinition {
         [bool]$ExpandAssignments = $true,
         [string]$ExtraQuery = '',
         [string]$DetailResourceFormat = '',
-        [string]$DetailKey = ''
+        [string]$DetailKey = '',
+        # Script-body properties that only the entity GET returns, base64-encoded. Empty for
+        # every area except the three script areas - see Expand-ScriptContent.
+        [string[]]$ScriptContentProperties = @()
     )
     return [pscustomobject]@{
         Area                    = $Area
@@ -1496,6 +1602,7 @@ function New-PolicyDefinition {
         ExtraQuery              = $ExtraQuery
         DetailResourceFormat    = $DetailResourceFormat
         DetailKey               = $DetailKey
+        ScriptContentProperties = $ScriptContentProperties
         FetchAssignmentsPerItem = $false
     }
 }
@@ -2543,9 +2650,12 @@ $policyDefinitions = @(
     New-PolicyDefinition -Area 'Compliance Policy' -Resource 'deviceManagement/deviceCompliancePolicies' -RequiredRole $roleConfig `
         -ExtraQuery 'scheduledActionsForRule($expand=scheduledActionConfigurations)'
 
-    New-PolicyDefinition -Area 'Remediation Script' -Resource 'deviceManagement/deviceHealthScripts' -RequiredRole $roleScripts
-    New-PolicyDefinition -Area 'Platform Script (Windows)' -Resource 'deviceManagement/deviceManagementScripts' -RequiredRole $roleScripts
-    New-PolicyDefinition -Area 'Shell Script (macOS)' -Resource 'deviceManagement/deviceShellScripts' -RequiredRole $roleScripts
+    New-PolicyDefinition -Area 'Remediation Script' -Resource 'deviceManagement/deviceHealthScripts' -RequiredRole $roleScripts `
+        -ScriptContentProperties @('detectionScriptContent', 'remediationScriptContent')
+    New-PolicyDefinition -Area 'Platform Script (Windows)' -Resource 'deviceManagement/deviceManagementScripts' -RequiredRole $roleScripts `
+        -ScriptContentProperties @('scriptContent')
+    New-PolicyDefinition -Area 'Shell Script (macOS)' -Resource 'deviceManagement/deviceShellScripts' -RequiredRole $roleScripts `
+        -ScriptContentProperties @('scriptContent')
 
     New-PolicyDefinition -Area 'Autopilot Deployment Profile' -Resource 'deviceManagement/windowsAutopilotDeploymentProfiles' -RequiredRole $roleService
     New-PolicyDefinition -Area 'Enrollment Configuration' -Resource 'deviceManagement/deviceEnrollmentConfigurations' -RequiredRole $roleService
@@ -2703,6 +2813,8 @@ $areaResults = [System.Collections.Generic.List[pscustomobject]]::new()
 $skipped = [System.Collections.Generic.List[string]]::new()
 # Run-wide, deduplicated on definition id across every policy - see -IncludeSettingDefinitions.
 $settingDefinitions = @{}
+# Run-wide count of .ps1/.sh files written beside the sidecars - see Expand-ScriptContent.
+$scriptFilesWritten = 0
 
 foreach ($definition in $policyDefinitions) {
     $baseUri = 'https://graph.microsoft.com/{0}/{1}' -f $definition.ApiVersion, $definition.Resource
@@ -2778,6 +2890,15 @@ foreach ($definition in $policyDefinitions) {
 
         $assignmentDetail = ConvertTo-AssignmentDetail -Assignment $assignments
 
+        # Resolved here rather than just before the write: Expand-ScriptContent below needs the
+        # sidecar's base name to name the .ps1/.sh beside it. Both are pure reads of $item, $id
+        # and $fileStamp, none of which the payload block changes.
+        $displayName = [string](Get-ObjectProperty -InputObject $item -Name $definition.NameProperty)
+        if ([string]::IsNullOrWhiteSpace($displayName)) {
+            $displayName = [string](Get-ObjectProperty -InputObject $item -Name 'displayName')
+        }
+        $configFileName = New-ConfigurationFileName -DisplayName $displayName -Id $id -Stamp $fileStamp
+
         # Build the configuration payload: the object itself minus noise, plus fetched detail.
         # largeIcon is a base64 PNG on Win32 apps - tens of kilobytes of payload that would
         # also change the hash if Intune ever re-encodes it, without anything having changed.
@@ -2834,9 +2955,22 @@ foreach ($definition in $policyDefinitions) {
             }
         }
 
-        $displayName = [string](Get-ObjectProperty -InputObject $item -Name $definition.NameProperty)
-        if ([string]::IsNullOrWhiteSpace($displayName)) {
-            $displayName = [string](Get-ObjectProperty -InputObject $item -Name 'displayName')
+        # Script bodies, one extra GET per script object. Same lever as the detail settings:
+        # -SkipDetailedSettings means "skip the per-object fetches".
+        if (-not $SkipDetailedSettings -and @($definition.ScriptContentProperties).Count -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace($id)) {
+            try {
+                $scriptExtension = if ($definition.Resource -eq 'deviceManagement/deviceShellScripts') { '.sh' } else { '.ps1' }
+                $scriptFilesWritten += Expand-ScriptContent -Configuration $configuration `
+                    -EntityUri ('{0}/{1}' -f $baseUri, $id) `
+                    -PropertyNames $definition.ScriptContentProperties `
+                    -AreaFolderPath $areaFolderPath `
+                    -FileBaseName ($configFileName -replace '\.json$', '') `
+                    -DefaultExtension $scriptExtension
+            }
+            catch [System.Exception] {
+                Write-Warning ('{0} "{1}": could not read script content - {2}' -f $definition.Area, $displayName, $PSItem.Exception.Message)
+            }
         }
 
         # Canonicalise before serialising - otherwise Graph's property order leaks into the
@@ -2845,7 +2979,6 @@ foreach ($definition in $policyDefinitions) {
         $canonical = ConvertTo-CanonicalObject -InputObject $configuration
         $configurationJson = ConvertTo-Json -InputObject $canonical -Depth $JsonDepth
 
-        $configFileName = New-ConfigurationFileName -DisplayName $displayName -Id $id -Stamp $fileStamp
         Write-Utf8File -Path (Join-Path -Path $areaFolderPath -ChildPath $configFileName) -Content $configurationJson
 
         # Relative to the run folder, so the CSV and its JSON files stay together when moved.
@@ -2991,6 +3124,7 @@ $manifest = [ordered]@{
     appInstallStatusRequested = $appInstallStatusRequested
     appInstallStatusRows      = $appInstallStatus.Count
     settingDefinitionsCount   = $settingDefinitions.Count
+    scriptFilesWritten        = $scriptFilesWritten
     # Area folders are archived into this file at the end of the run; count is the number of
     # sidecar files that go in. Both loose in the run root: the CSV, AppInstallStatus_*.csv
     # and the four _*.json files.
