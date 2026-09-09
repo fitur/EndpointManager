@@ -260,9 +260,23 @@ Narrowing a first run to one type is a good habit:
 string. It filters what is *exported*, not what is *read*: mode 2's collision check still sees
 every policy of the affected types, including the ones the prefix excluded.
 
+`-CsvPath` and `-OutputDirectory` are two ways to say where the export goes, and only one at a
+time. `-CsvPath` names the exact file; `-OutputDirectory` names a folder and the script still
+builds the tenant-and-timestamp file name inside it — a `-ValidateScript` on `-OutputDirectory`
+checks the folder exists before any Graph call is made, where a typo in `-CsvPath` only fails
+at the very end, after the whole tenant has been read, because that failure comes from the
+write itself. Give neither and the file lands in the script's own folder — see
+[Data sensitivity](#data-sensitivity) before relying on that default beyond a one-off check.
+
 ## Output
 
 ### The exported CSV (mode 1)
+
+`IntuneRename_<tenant>_<yyyy-MM-dd_HHmm>.csv` by default (`ConvertTo-SafeFileNamePart` folds
+the tenant name to ASCII, the same way the export script does, so the two scripts spell the
+same customer identically in a file name). Two exports in the same minute do not collide: the
+second gets a seconds suffix, and only ever the auto-generated name — an explicit `-CsvPath` is
+always written exactly as given.
 
 One row per policy, four columns, UTF-8 **with a BOM**. The BOM is deliberate: in PowerShell 7
 `-Encoding UTF8` means UTF-8 *without* one, and Excel then reads the file as Windows-1252. A
@@ -280,9 +294,11 @@ Rows are sorted by `GraphType`, then `CurrentName`.
 
 ### The run report (mode 2)
 
-`_renamereport_<yyyy-MM-dd_HHmm>.csv` and `.json`, written next to the source CSV or wherever
-`-ReportDirectory` points. Both are written from a `finally` block, so an aborted run still
-leaves a record — the case that needs it most is the one that never reaches the end.
+`_renamereport_<tenant>_<yyyy-MM-dd_HHmm>.csv` and `.json`, written next to the source CSV or
+wherever `-ReportDirectory` points. The tenant name is in the file name — not just inside the
+report — so reports from different customers collected under one `-ReportDirectory` stay
+distinguishable. Both files are written from a `finally` block, so an aborted run still leaves
+a record — the case that needs it most is the one that never reaches the end.
 
 Per row: `Id`, `GraphType`, `CurrentName`, `NewName`, `Status`, `Detail`.
 
@@ -361,6 +377,15 @@ hand, or a policy deleted since the export was written. `Detail` carries Graph's
 
 **429 and 5xx** are retried with backoff, honouring `Retry-After` when Graph sends it.
 
+**The audit log shows more changed properties than actually changed.** Intune builds
+`Modified Properties` from the *request payload*, not from the resource's resulting state.
+Since a rename sends only the name field, every other property renders as changed-to-empty —
+`RoleScopeTagIds` typically shows as `Default -> <blank>`. Nothing was deleted. Measured
+2026-09-04 on a `windowsWifiConfiguration`: the scope tag was unchanged before and after, and
+the export's own changeset for the same rename listed exactly three field changes —
+`displayName`, `lastModifiedDateTime`, `version`. Use the export's `_changeset_*.json` to see
+what actually changed; the audit log answers who did it, not what became different.
+
 ## Data sensitivity
 
 The exported CSV and the run report list **every policy name in the tenant together with its
@@ -371,12 +396,19 @@ encrypted, and both inherit the permissions of the folder they are written to.
 Do not leave either in a synchronised folder (OneDrive, Dropbox) unless that is a deliberate
 decision, and treat both as customer confidential when handing them over.
 
+**Without `-CsvPath` or `-OutputDirectory`, mode 1 writes into the script's own folder** — which
+is this repository's working tree. `*.csv` is in the repository's root `.gitignore`, so the file
+will not be picked up by an unqualified `git add`, but it still exists on disk in a folder other
+tooling may treat as source, and nothing stops it from being committed deliberately. Point
+`-OutputDirectory` (or `-CsvPath`) somewhere that belongs to the customer, or somewhere outside
+the repository, for anything beyond a one-off local check.
+
 `-ReportDirectory` exists so the report does not have to live next to the CSV. That matters when
 the CSV came from somewhere shared.
 
 ## Known limitations
 
-- **There is no rollback.** To undo a run, open `_renamereport_<stamp>.csv`, swap the
+- **There is no rollback.** To undo a run, open `_renamereport_<tenant>_<stamp>.csv`, swap the
   `CurrentName` and `NewName` columns, save it as a new file and run mode 2 against it:
 
   ```powershell
@@ -408,6 +440,17 @@ the CSV came from somewhere shared.
 
 - **Only the name is written.** Assignments, descriptions and settings are never touched, and
   renaming does not affect any of them.
+
+- **A rename is measured as gentler than a manual rename in the portal, but only on one type
+  so far.** Both write `version` and `lastModifiedDateTime`, and both therefore make clients
+  re-evaluate the policy on next check-in — that part cannot be avoided by scripting the
+  rename. What differs is the audit footprint: the same test on a `windowsWifiConfiguration`
+  produced 3 changed fields from this script's PATCH against 13 from a manual portal rename,
+  ten of them with identical old and new values (`SSID`, `WifiSecurityType`,
+  `ProxySetting`, …), because the portal writes the whole object back. **Not yet measured
+  against a compliance policy** — `scheduledActionsForRule` is a navigation property the
+  Wi-Fi test says nothing about. Do not treat this as verified for compliance policies until
+  it has been.
 
 - **`-Prefix` matches with `-like`,** so `*` and `?` in the prefix are wildcards. That is
   usually what you want; it is worth knowing if a policy name contains one.

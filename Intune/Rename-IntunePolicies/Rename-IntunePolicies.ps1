@@ -68,7 +68,7 @@
 
     THERE IS NO ROLLBACK. The exported CSV and the run report are the only record of the
     previous names. To undo a run, swap the CurrentName and NewName columns of
-    _renamereport_<stamp>.csv and run mode 2 against the result.
+    _renamereport_<tenant>_<stamp>.csv and run mode 2 against the result.
 
     Secrets: read from environment variables by default. Prefer SecretManagement or a
     certificate credential over a client secret for anything long-lived. A secret passed as
@@ -89,13 +89,51 @@
     another copy over these. Change the copy you are working on and record it in the
     changelog below.
 
-    Version:        2.0.0
+    Version:        2.1.0
     Creation Date:  2026-07-31
-    Last Updated:   2026-09-01
+    Last Updated:   2026-09-04
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        2.1.0 - 2026-09-04
+            Follow-up review after 2.0.0's first live measurement, against a customer
+            tenant (Wistrand Advokatbyra) on two dummy Wi-Fi profiles.
+
+            The PATCH itself does what it should. Comparing the export's before/after
+            sidecars to the change: three fields moved (displayName, lastModifiedDateTime,
+            version), everything else identical - including roleScopeTagIds, which the
+            audit log's own Modified Properties line makes look cleared (see the README
+            note added under Error semantics; that log is built from the request payload,
+            not the resource's resulting state).
+
+            Documented, not measured yet: the same claim for a compliance policy.
+            scheduledActionsForRule is a navigation property the Wi-Fi test says nothing
+            about - see README Known limitations.
+
+            The standard export file name (tenant + date + time, e.g.
+            IntuneRename_Wistrand-Advokatbyra_2026-09-04_1243.csv) already existed; four
+            defects in it are fixed here:
+
+              - The tenant part is now ASCII-folded through ConvertTo-SafeFileNamePart,
+                copied verbatim from Export-IntuneConfigurationInventory.ps1 v1.13.0, so the
+                two scripts spell the same customer the same way in a file name and neither
+                produces a path that goes unreadable when moved between macOS (NFD) and
+                Linux (byte-exact comparison).
+              - Two mode-1 runs in the same minute no longer silently overwrite each
+                other's CSV - the only record of the previous names until mode 2 has run.
+                A second run appends seconds instead.
+              - The run report's file name now carries the tenant, matching the CSV, so
+                reports from different customers collected under -ReportDirectory stay
+                distinguishable.
+              - New -OutputDirectory parameter for mode 1: a folder, validated at bind
+                time, as an alternative to spelling out -CsvPath. Mutually exclusive with
+                -CsvPath. Without either, behaviour is unchanged - the script folder.
+
+            *.csv added to the repository's root .gitignore. Mode 1's default output
+            location is the script's own folder, and a CSV there is a complete map of a
+            customer's policy names and object IDs; nothing tracked it before this.
 
         2.0.0 - 2026-09-01
             The naming standard is gone. The script no longer derives names, and a CSV
@@ -190,9 +228,18 @@ param(
         'Filter', 'WindowsFeatureUpdate', 'WindowsQualityUpdate', 'WindowsDriverUpdate', 'Autopilot', 'All')]
     [string[]]$PolicyType = @('All'),
 
-    # Mode 1: where the CSV is written. Defaults to the script folder.
+    # Mode 1: the exact CSV file to write. Mutually exclusive with -OutputDirectory. Defaults
+    # to the script folder with a file name built from the tenant and the run time.
     [Parameter(ParameterSetName = 'Export')]
     [string]$CsvPath = '',
+
+    # Mode 1: a folder to write the CSV into, with the file name still built from the tenant
+    # and the run time. An alternative to spelling out -CsvPath. Validated at bind time -
+    # the alternative is failing on a mistyped folder only after the whole tenant has been
+    # read, which is what an unvalidated -CsvPath given a non-existent folder does today.
+    [Parameter(ParameterSetName = 'Export')]
+    [ValidateScript({ Test-Path -Path $PSItem -PathType Container })]
+    [string]$OutputDirectory,
 
     # Mode 2: the edited CSV to apply. Its presence is what selects the mode.
     [Parameter(ParameterSetName = 'Rename', Mandatory)]
@@ -473,6 +520,10 @@ if ($TenantId -notmatch $guidPattern -and $TenantId -notmatch '^[A-Za-z0-9][A-Za
 
 if ($PSBoundParameters.ContainsKey('ClientSecret')) {
     Write-Warning 'ClientSecret was passed as a parameter - it is now in PSReadLine history, any active transcript and potentially the process list. Prefer $env:INTUNE_CLIENT_SECRET, a SecretManagement vault or a certificate credential.'
+}
+
+if ($PSBoundParameters.ContainsKey('CsvPath') -and $PSBoundParameters.ContainsKey('OutputDirectory')) {
+    throw 'Specify either -CsvPath (an exact file) or -OutputDirectory (a folder), not both.'
 }
 
 #endregion Credential preflight
@@ -946,6 +997,37 @@ function Get-TenantDisplayName {
         Write-Verbose ('Could not read organisation name - using tenant ID in the banner. {0}' -f $PSItem.Exception.Message)
     }
     return $TenantId
+}
+
+function ConvertTo-SafeFileNamePart {
+    <#
+    .NOTES
+        Copied verbatim from Export-IntuneConfigurationInventory.ps1 v1.13.0 on 2026-09-04;
+        see the provenance note on Get-ClientCertificate. Without this, the two scripts spell
+        the same customer's name differently in a file name - the export folds a name typed
+        with Swedish diacritics to plain ASCII, the rename CSV used to keep them.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+
+    # ASCII-only file names. macOS stores names in NFD, Linux compares byte-exact, and a
+    # normalisation mismatch would make every path in the CSV unresolvable on the consuming
+    # side. Decompose first, then drop the combining marks: a-ring -> a, o-diaeresis -> o.
+    # This also neutralises path traversal from a hostile tenant display name.
+    $decomposed = $Value.Normalize([System.Text.NormalizationForm]::FormD)
+    $builder = [System.Text.StringBuilder]::new()
+    foreach ($char in $decomposed.ToCharArray()) {
+        if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($char) -ne
+            [System.Globalization.UnicodeCategory]::NonSpacingMark) {
+            [void]$builder.Append($char)
+        }
+    }
+
+    $safe = $builder.ToString() -replace '[^A-Za-z0-9._-]+', '-'
+    $safe = $safe -replace '-{2,}', '-'
+    # Regex rather than Trim(): no dependency on .NET overload resolution.
+    return ($safe -replace '^[-._]+|[-._]+$', '')
 }
 
 #endregion Helpers
@@ -1436,11 +1518,26 @@ if (-not $isRenameMode) {
     }
 
     if ([string]::IsNullOrWhiteSpace($CsvPath)) {
-        $csvRoot = -not [string]::IsNullOrWhiteSpace($PSScriptRoot) ? $PSScriptRoot : (Get-Location).Path
+        $csvRoot = $OutputDirectory
+        if ([string]::IsNullOrWhiteSpace($csvRoot)) {
+            $csvRoot = -not [string]::IsNullOrWhiteSpace($PSScriptRoot) ? $PSScriptRoot : (Get-Location).Path
+        }
         $CsvPath = Join-Path -Path $csvRoot -ChildPath ('IntuneRename_{0}_{1}.csv' -f
-            ($tenantLabel -replace '[\\/:*?"<>|]', '' -replace '\s+', '_'), $fileStamp)
+            (ConvertTo-SafeFileNamePart -Value $tenantLabel), $fileStamp)
     }
     $CsvPath = [System.IO.Path]::GetFullPath($CsvPath)
+
+    # Two mode-1 runs in the same minute would otherwise collide on the auto-generated name,
+    # and Export-Csv would silently overwrite the earlier file - the only record of what the
+    # policies were called before mode 2 runs. Only the auto-generated name is adjusted here;
+    # an explicit -CsvPath is respected exactly as given, collision or not.
+    if (-not $PSBoundParameters.ContainsKey('CsvPath') -and (Test-Path -Path $CsvPath)) {
+        $secondsSuffix = $runLocal.ToString('ss')
+        $CsvPath = [System.IO.Path]::Combine(
+            [System.IO.Path]::GetDirectoryName($CsvPath),
+            ('{0}{1}.csv' -f [System.IO.Path]::GetFileNameWithoutExtension($CsvPath), $secondsSuffix))
+        Write-Warning ('A CSV for this minute already exists - writing "{0}" instead.' -f (Split-Path -Path $CsvPath -Leaf))
+    }
 
     # utf8BOM, not UTF8: in PowerShell 7 'UTF8' means UTF-8 WITHOUT a BOM, and Excel then
     # reads the file as Windows-1252. A Swedish character in a policy name would come back
@@ -1704,7 +1801,11 @@ finally {
         })
     }
 
-    $reportBase = Join-Path -Path $reportRoot -ChildPath ('_renamereport_{0}' -f $fileStamp)
+    # The tenant name is in the file name, not just inside the report, because
+    # -ReportDirectory exists precisely to collect reports from several customers in one
+    # place - without it, reports from different tenants are indistinguishable by name alone.
+    $reportBase = Join-Path -Path $reportRoot -ChildPath ('_renamereport_{0}_{1}' -f
+        (ConvertTo-SafeFileNamePart -Value $tenantLabel), $fileStamp)
     try {
         # Both files are written on a -WhatIf run too. A dry run that leaves something you can
         # read afterwards is the point of the dry run; whatIf: true is what tells them apart.

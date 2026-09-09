@@ -15,6 +15,7 @@ appsettings.*.json
 *.log
 *.tmp
 *.bak
+*.csv
 *.ps1xml
 *.psd1.bak
 plan*.md
