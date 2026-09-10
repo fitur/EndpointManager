@@ -119,12 +119,6 @@
     Suppresses the per-chunk upload progress from the IntuneWin32App module, which is
     otherwise shown. Use it when running the script from a pipeline or scheduled job.
 
-.PARAMETER Supersede
-    Finds earlier versions of the same app already in Intune and marks them as superseded
-    by this upload. An app qualifies only when its name is exactly "<base> <version>" for
-    the resolved display name or the "<Vendor> <Name>" fallback, and its version is strictly
-    lower than the one being uploaded.
-
 .PARAMETER SupersedenceType
     Update (default) installs over the earlier version; Replace uninstalls it first.
 
@@ -178,10 +172,6 @@
         -CustomerConfigPath ~/.config/endpointmanager/customers.json -CustomerName "Contoso"
 
 .EXAMPLE
-    # Publish and supersede earlier versions of the same app
-    .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -Supersede
-
-.EXAMPLE
     # Publish to Company Portal for users to install themselves
     .\New-IntuneWin32AppJson.ps1 -AppPath ".\App.zip" -AssignmentIntent available
 
@@ -197,9 +187,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        2.7.1
+    Version:        3.0.0
     Creation Date:  2026-05-07
-    Last Updated:   2026-08-25
+    Last Updated:   2026-09-09
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -208,6 +198,25 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        3.0.0 - 2026-09-09
+            Version lifecycle. The script now supersedes the previous version automatically,
+            assigns in two rings and can retire earlier versions. The version kept is the
+            highest one that actually has an assignment, not simply the highest version
+            number - a half-finished earlier run can otherwise leave a higher version with
+            no assignments and get the right app retired. Retirement is opt-in via
+            -RetireSuperseded and only runs once the upload is verified and the assignment
+            succeeded, because it can otherwise leave the tenant with no deployed version.
+            The upload is now verified against the app's publishingState and
+            committedContentVersion rather than against a returned app id: the module creates
+            the app record before the content and returns nothing if the commit fails, which
+            leaves an empty app behind in the tenant. The assignment is built against Graph
+            directly instead of via the module, which always sends useLocalTime and
+            deadlineDateTime and therefore cannot express a scheduled available assignment;
+            the switch also removes a silent termination of the whole script, since the
+            module's validation failures exit with break, which neither try/catch nor warning
+            capture stops. Rerunning an already uploaded package is now refused instead of
+            creating a duplicate. -Supersede is gone; supersedence is no longer optional.
 
         2.7.1 - 2026-08-25
             Assignment and supersedence failures are no longer reported as successes. Both
@@ -418,14 +427,38 @@ param (
     [Parameter()]
     [switch]$Quiet,
 
-    # Marks earlier versions of the same app in Intune as superseded by this upload
-    [Parameter()]
-    [switch]$Supersede,
-
     # Update installs over the old version; Replace uninstalls it first
     [Parameter()]
     [ValidateSet("Update", "Replace")]
-    [string]$SupersedenceType = "Update"
+    [string]$SupersedenceType = "Update",
+
+    # Ring rollout: object ID of the pilot group. Requires -ProductionGroupId as well. When
+    # both are resolved (here or from the customer file) the app is assigned in two rings
+    # instead of to a single group. An explicit parameter still wins over the customer file.
+    [Parameter()]
+    [string]$PilotGroupId,
+
+    # Ring rollout: object ID of the production group. Requires -PilotGroupId as well.
+    [Parameter()]
+    [string]$ProductionGroupId,
+
+    # Hours from now to the production ring's start in the default (non-PatchTuesday) ring
+    # schedule; the pilot ring publishes immediately.
+    [Parameter()]
+    [ValidateRange(1, 8760)]
+    [int]$ProductionDelayHours = 24,
+
+    # Hours from a ring's start to its deadline, for the production ring in both schedules.
+    # The PatchTuesday pilot ring keeps its own fixed 12:00 deadline.
+    [Parameter()]
+    [ValidateRange(1, 8760)]
+    [int]$DeadlineOffsetHours = 24,
+
+    # Opt-in: after a verified upload and a fully successful assignment, retire the earlier
+    # versions - clear their supersedence, remove their assignments and rename them "(TBD)".
+    # Without it the script only reports which apps would be retired.
+    [Parameter()]
+    [switch]$RetireSuperseded
 )
 
 Set-StrictMode -Version Latest
@@ -577,6 +610,14 @@ if ($CustomerConfigPath) {
     # from a previously selected customer cannot follow into this run.
     if (-not $PSBoundParameters.ContainsKey("AssignmentGroupId")) {
         $AssignmentGroupId = $customer.ContainsKey("assignmentGroupId") ? [string]$customer["assignmentGroupId"] : $null
+    }
+    # Ring groups follow the same rule as assignmentGroupId: cleared, not inherited, when the
+    # customer does not define them, so another customer's pilot/production groups cannot leak in.
+    if (-not $PSBoundParameters.ContainsKey("PilotGroupId")) {
+        $PilotGroupId = $customer.ContainsKey("pilotGroupId") ? [string]$customer["pilotGroupId"] : $null
+    }
+    if (-not $PSBoundParameters.ContainsKey("ProductionGroupId")) {
+        $ProductionGroupId = $customer.ContainsKey("productionGroupId") ? [string]$customer["productionGroupId"] : $null
     }
     if (-not $PSBoundParameters.ContainsKey("Owner")) {
         $Owner = $customer.ContainsKey("appOwner") ? [string]$customer["appOwner"] : $null
@@ -1348,9 +1389,326 @@ function New-IntuneDetectionRuleObject {
     }
 }
 
+function ConvertTo-Win32AssignmentDate {
+    <#
+    .SYNOPSIS
+        Formats a DateTime for an Intune assignment installTimeSettings value, matching the
+        IntuneWin32App module.
+
+    .DESCRIPTION
+        The module stamps the local clock components with a literal Z suffix without
+        converting to UTC, which is what -UseLocalTime $true is meant to preserve. The Z is
+        concatenated rather than put in the format string, where it is not treated as a
+        literal and would shift the result.
+    #>
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory)][datetime]$Value
+    )
+    return $Value.ToString("yyyy-MM-ddTHH:mm:ss.000") + "Z"
+}
+
+function Get-RingSchedule {
+    <#
+    .SYNOPSIS
+        Computes pilot and production start/deadline times for a ring rollout.
+
+    .DESCRIPTION
+        Default schedule: the pilot ring publishes immediately (no install time settings) and
+        the production ring starts ProductionDelayHours from now, with a deadline
+        DeadlineOffsetHours after that start.
+
+        PatchTuesday schedule: the pilot ring starts at the next Patch Tuesday 00:00 with the
+        script's existing fixed 12:00 deadline, and the production ring starts seven days
+        later at 00:00 with a deadline DeadlineOffsetHours after its start.
+
+    .OUTPUTS
+        PSCustomObject with PilotStart, PilotDeadline, ProductionStart and ProductionDeadline.
+        PilotStart and PilotDeadline are $null in the default schedule.
+    #>
+    [OutputType([pscustomobject])]
+    param (
+        [Parameter()][switch]$PatchTuesday,
+        [Parameter(Mandatory)][ValidateRange(1, 8760)][int]$ProductionDelayHours,
+        [Parameter(Mandatory)][ValidateRange(1, 8760)][int]$DeadlineOffsetHours
+    )
+
+    if ($PatchTuesday) {
+        $patch          = Get-NextPatchTuesday
+        $productionStart = $patch.AddDays(7)
+        return [pscustomobject]@{
+            PilotStart         = $patch
+            PilotDeadline      = $patch.AddHours(12)
+            ProductionStart    = $productionStart
+            ProductionDeadline = $productionStart.AddHours($DeadlineOffsetHours)
+        }
+    }
+
+    $productionStart = (Get-Date).AddHours($ProductionDelayHours)
+    return [pscustomobject]@{
+        PilotStart         = $null
+        PilotDeadline      = $null
+        ProductionStart    = $productionStart
+        ProductionDeadline = $productionStart.AddHours($DeadlineOffsetHours)
+    }
+}
+
+function New-Win32AppAssignmentBody {
+    <#
+    .SYNOPSIS
+        Builds the raw Graph body for a POST to mobileApps/{id}/assignments.
+
+    .DESCRIPTION
+        Replaces Add-IntuneWin32AppAssignmentGroup, which always sends the full
+        installTimeSettings block including useLocalTime and deadlineDateTime and therefore
+        cannot express a scheduled available assignment.
+
+        installTimeSettings per intent:
+          no schedule           null
+          required, scheduled   useLocalTime plus whichever of startDateTime / deadlineDateTime
+                                is supplied, mirroring the module's own four cases
+          available, scheduled  startDateTime only; useLocalTime and deadlineDateTime are
+                                rejected by Intune for available and are left out entirely,
+                                not sent as null
+
+        autoUpdateSettings is added only for an available assignment when this upload
+        superseded an earlier version.
+    #>
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
+    param (
+        [Parameter(Mandatory)][ValidateSet("required", "available", "uninstall")][string]$Intent,
+        [Parameter(Mandatory)][string]$GroupId,
+        [Parameter(Mandatory)][string]$Notification,
+        [Parameter(Mandatory)][bool]$UseLocalTime,
+        [Parameter()][Nullable[datetime]]$AvailableTime,
+        [Parameter()][Nullable[datetime]]$DeadlineTime,
+        [Parameter()][switch]$EnableAutoUpdate
+    )
+
+    $settings = [ordered]@{
+        "@odata.type"                  = "#microsoft.graph.win32LobAppAssignmentSettings"
+        "notifications"                = $Notification
+        "restartSettings"              = $null
+        "deliveryOptimizationPriority" = "notConfigured"
+        "installTimeSettings"          = $null
+    }
+
+    if ($Intent -eq "available") {
+        # Available honours a start time only; deadline and useLocalTime are rejected by Intune
+        if ($AvailableTime) {
+            $settings["installTimeSettings"] = [ordered]@{
+                "startDateTime" = ConvertTo-Win32AssignmentDate -Value $AvailableTime
+            }
+        }
+    }
+    elseif ($AvailableTime -and $DeadlineTime) {
+        $settings["installTimeSettings"] = [ordered]@{
+            "useLocalTime"     = $UseLocalTime
+            "startDateTime"    = ConvertTo-Win32AssignmentDate -Value $AvailableTime
+            "deadlineDateTime" = ConvertTo-Win32AssignmentDate -Value $DeadlineTime
+        }
+    }
+    elseif ($AvailableTime) {
+        # Mirrors the module: a start time without a deadline still carries a null deadline key
+        $settings["installTimeSettings"] = [ordered]@{
+            "useLocalTime"     = $UseLocalTime
+            "startDateTime"    = ConvertTo-Win32AssignmentDate -Value $AvailableTime
+            "deadlineDateTime" = $null
+        }
+    }
+    elseif ($DeadlineTime) {
+        $settings["installTimeSettings"] = [ordered]@{
+            "useLocalTime"     = $UseLocalTime
+            "startDateTime"    = $null
+            "deadlineDateTime" = ConvertTo-Win32AssignmentDate -Value $DeadlineTime
+        }
+    }
+
+    if ($EnableAutoUpdate -and $Intent -eq "available") {
+        $settings["autoUpdateSettings"] = [ordered]@{
+            "@odata.type"                   = "#microsoft.graph.win32LobAppAutoUpdateSettings"
+            "autoUpdateSupersededAppsState" = "enabled"
+        }
+    }
+
+    return [ordered]@{
+        "@odata.type" = "#microsoft.graph.mobileAppAssignment"
+        "intent"      = $Intent
+        "source"      = "direct"
+        "target"      = [ordered]@{
+            "@odata.type"                                = "#microsoft.graph.groupAssignmentTarget"
+            "deviceAndAppManagementAssignmentFilterId"   = $null
+            "deviceAndAppManagementAssignmentFilterType" = "none"
+            "groupId"                                    = $GroupId
+        }
+        "settings"    = $settings
+    }
+}
+
+function Invoke-Win32AppAssignment {
+    <#
+    .SYNOPSIS
+        POSTs one assignment to Graph, reporting success as a boolean and warning - never
+        throwing - on failure, because the app already exists in Intune by this point.
+
+    .DESCRIPTION
+        For an available assignment that requested auto-update of superseded apps, the created
+        assignment is read back: the property name differs between Graph beta and v1.0 and a
+        wrong name is accepted and ignored silently, so reading it back is the only way to
+        know it took.
+
+    .OUTPUTS
+        [bool] - $true when the assignment was created, $false when the POST failed. An
+        auto-update setting that did not stick produces a warning but still returns $true,
+        since the assignment itself was created.
+    #>
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)][string]$GroupId,
+        [Parameter()][AllowEmptyString()][string]$RingLabel = "",
+        [Parameter(Mandatory)][ValidateSet("required", "available", "uninstall")][string]$Intent,
+        [Parameter(Mandatory)][string]$Notification,
+        [Parameter(Mandatory)][bool]$UseLocalTime,
+        [Parameter()][Nullable[datetime]]$AvailableTime,
+        [Parameter()][Nullable[datetime]]$DeadlineTime,
+        [Parameter()][switch]$EnableAutoUpdate
+    )
+
+    $where   = $RingLabel ? " ($RingLabel ring)" : ""
+    $headers = @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" }
+
+    $body = New-Win32AppAssignmentBody -Intent $Intent -GroupId $GroupId -Notification $Notification `
+        -UseLocalTime $UseLocalTime -AvailableTime $AvailableTime -DeadlineTime $DeadlineTime `
+        -EnableAutoUpdate:$EnableAutoUpdate
+
+    try {
+        $response = Invoke-RestMethod -Method Post `
+            -Uri  "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments" `
+            -Headers $headers -Body ($body | ConvertTo-Json -Depth 20) `
+            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+    }
+    catch {
+        # The raw REST path surfaces a real exception where the module only warned; make sure
+        # the Graph message in clear text reaches the operator.
+        $graphMessage = $PSItem.Exception.Message
+        if ($PSItem.ErrorDetails -and $PSItem.ErrorDetails.Message) { $graphMessage = $PSItem.ErrorDetails.Message }
+        Write-Warning "Assignment to group $GroupId$where failed: $graphMessage"
+        Write-Warning "Assign the app to $GroupId manually in the Intune portal."
+        return $false
+    }
+
+    $availableText = $AvailableTime ? (ConvertTo-Win32AssignmentDate -Value $AvailableTime) : "immediately"
+    $deadlineText  = $DeadlineTime  ? (ConvertTo-Win32AssignmentDate -Value $DeadlineTime)  : "none"
+    Write-Host "Assigned to group $GroupId$where as '$Intent'.  Available: $availableText   Deadline: $deadlineText" -ForegroundColor Green
+
+    if (-not ($EnableAutoUpdate -and $Intent -eq "available")) {
+        return $true
+    }
+
+    # Verify the auto-update setting actually took
+    $assignmentId    = ($response -and $response.PSObject.Properties["id"]) ? [string]$response.id : ""
+    $autoUpdateState = ""
+    if ($assignmentId) {
+        try {
+            $check = Invoke-RestMethod -Method Get `
+                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments/$assignmentId" `
+                -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
+                -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+
+            $settingsProp = $check.PSObject.Properties["settings"]
+            if ($settingsProp -and $settingsProp.Value) {
+                $autoProp = $settingsProp.Value.PSObject.Properties["autoUpdateSettings"]
+                if ($autoProp -and $autoProp.Value) {
+                    $stateProp = $autoProp.Value.PSObject.Properties["autoUpdateSupersededAppsState"]
+                    if ($stateProp) { $autoUpdateState = [string]$stateProp.Value }
+                }
+            }
+        }
+        catch {
+            Write-Warning "Could not read assignment $assignmentId back to verify auto-update: $($PSItem.Exception.Message)"
+        }
+    }
+
+    if ($autoUpdateState -eq "enabled") {
+        Write-Host "  Auto-update of superseded apps: enabled (verified)." -ForegroundColor Green
+    }
+    else {
+        Write-Warning "Auto-update of superseded apps was requested but is not set on the assignment. Graph beta expects 'autoUpdateSupersededAppsState', Graph v1.0 expects 'autoUpdateSupersededApps'; if the schema changed the script is sending the wrong name. Turn on 'Automatically update' for this assignment manually in the Intune portal."
+    }
+    return $true
+}
+
+function Select-SupersedenceTarget {
+    <#
+    .SYNOPSIS
+        Picks the single earlier-version app to keep and supersede against.
+
+    .DESCRIPTION
+        The kept app is the highest version that still has at least one assignment. A
+        half-finished earlier run can leave a higher version with no assignments, and keeping
+        that one would supersede - and later retire - the version that is actually deployed.
+        Ties on version are broken by createdDateTime. When no candidate has any assignment
+        the highest version is kept and a warning is written, because the choice was made
+        without assignment evidence.
+
+    .NOTES
+        Candidates carry only id/displayName/version from the inventory, so createdDateTime
+        and the assignment count are fetched per candidate here.
+    #>
+    [OutputType([pscustomobject])]
+    param (
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Candidate
+    )
+
+    $authHeader = @{ Authorization = $Global:AuthenticationHeader.Authorization }
+
+    $enriched = foreach ($item in $Candidate) {
+        $assignmentCount = 0
+        $created         = [datetime]::MinValue
+        try {
+            $detail = Invoke-RestMethod -Method Get `
+                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)?`$select=id,createdDateTime" `
+                -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            if ($detail.PSObject.Properties["createdDateTime"] -and $detail.createdDateTime) {
+                $created = [datetime]$detail.createdDateTime
+            }
+
+            $assignmentResponse = Invoke-RestMethod -Method Get `
+                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)/assignments" `
+                -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            if ($assignmentResponse.PSObject.Properties["value"]) {
+                $assignmentCount = @($assignmentResponse.value).Count
+            }
+        }
+        catch {
+            Write-Warning "Could not read details for '$($item.DisplayName)' ($($item.Id)): $($PSItem.Exception.Message). Treating it as unassigned for the keep decision."
+        }
+
+        [pscustomobject]@{
+            Id              = $item.Id
+            DisplayName     = $item.DisplayName
+            Version         = $item.Version
+            AssignmentCount = $assignmentCount
+            CreatedDateTime = $created
+        }
+    }
+    $enriched = @($enriched)
+    if ($enriched.Count -eq 0) { return $null }
+
+    $withAssignment = @($enriched | Where-Object { $_.AssignmentCount -gt 0 })
+    if ($withAssignment.Count -gt 0) {
+        return $withAssignment | Sort-Object -Property Version, CreatedDateTime -Descending | Select-Object -First 1
+    }
+
+    $fallback = $enriched | Sort-Object -Property Version, CreatedDateTime -Descending | Select-Object -First 1
+    Write-Warning "None of the earlier versions has an assignment; keeping '$($fallback.DisplayName)' (highest version) without assignment evidence."
+    return $fallback
+}
+
 #endregion Functions
 
-#region Step 1 - Validate credentials
+#region Step 1 - Validate credentials and assignment input
 
 # Fail before doing any work if credentials are missing
 $missingCredentials = @()
@@ -1365,28 +1723,54 @@ if ($missingCredentials.Count -gt 0) {
     throw "Missing required authentication credentials: $($missingCredentials -join ', ')"
 }
 
-# Assignment parameters are validated up front so a misconfiguration fails before the upload
+# Assignment input is validated up front so a misconfiguration fails before extraction (§7.2)
+
+# GUID check for every supplied group id, same pattern as the original AssignmentGroupId check
+foreach ($groupIdField in @(
+        @{ Name = "AssignmentGroupId"; Value = $AssignmentGroupId }
+        @{ Name = "PilotGroupId";      Value = $PilotGroupId }
+        @{ Name = "ProductionGroupId"; Value = $ProductionGroupId }
+    )) {
+    if ($groupIdField.Value) {
+        $parsedGuid = [guid]::Empty
+        if (-not [guid]::TryParse($groupIdField.Value, [ref]$parsedGuid)) {
+            throw "$($groupIdField.Name) '$($groupIdField.Value)' is not a valid GUID. Use the Entra group's object ID, not its display name."
+        }
+    }
+}
+
+# Ring rollout is active only when both ring groups are resolved (parameter or customer file)
+$ringMode        = [bool]$PilotGroupId -and [bool]$ProductionGroupId
+$singleGroupMode = [bool]$AssignmentGroupId
+
+# A single ring group is a misconfiguration, not a silent downgrade to single-group assignment
+if ([bool]$PilotGroupId -ne [bool]$ProductionGroupId) {
+    $missingRingGroup = $PilotGroupId ? "ProductionGroupId" : "PilotGroupId"
+    throw "Ring rollout needs both PilotGroupId and ProductionGroupId; $missingRingGroup is missing. Set both, or use -AssignmentGroupId for a single-group assignment."
+}
+
+if ($ringMode -and $singleGroupMode) {
+    throw "Ring rollout (PilotGroupId/ProductionGroupId) and single-group assignment (-AssignmentGroupId or env:INTUNE_ASSIGNMENT_GROUP_ID) cannot both be configured. Use one or the other."
+}
+if ($ringMode -and $AssignmentIntent -eq "uninstall") {
+    throw "Ring rollout cannot be combined with -AssignmentIntent uninstall; the ring schedule and supersedence both assume an installation."
+}
+if ($ringMode -and ($AvailableTime -or $DeadlineTime)) {
+    throw "Ring rollout derives its own schedule; -AvailableTime and -DeadlineTime belong to single-group mode."
+}
+if ($RetireSuperseded -and -not $ringMode -and -not $singleGroupMode) {
+    throw "-RetireSuperseded needs an active assignment (a ring rollout or -AssignmentGroupId); retirement can never meet its preconditions without one."
+}
+
+# Schedule parameters without any group is a configuration error, not a silent skip
 $assignmentParameters = @("AssignmentIntent", "AssignmentNotification", "AvailableTime", "DeadlineTime", "UseLocalTime", "PatchTuesday")
 $assignmentRequested  = @($assignmentParameters | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0
 
-if ($assignmentRequested -and -not $AssignmentGroupId) {
-    throw "Assignment parameters were supplied but no group was specified. Provide -AssignmentGroupId or set env:INTUNE_ASSIGNMENT_GROUP_ID."
+if ($assignmentRequested -and -not $singleGroupMode -and -not $ringMode) {
+    throw "Assignment parameters were supplied but no group was specified. Provide -AssignmentGroupId, set env:INTUNE_ASSIGNMENT_GROUP_ID, or configure PilotGroupId and ProductionGroupId."
 }
 
-if ($AssignmentGroupId) {
-    $parsedGuid = [guid]::Empty
-    if (-not [guid]::TryParse($AssignmentGroupId, [ref]$parsedGuid)) {
-        throw "AssignmentGroupId '$AssignmentGroupId' is not a valid GUID. Use the Entra group's object ID, not its display name."
-    }
-
-    # Intune rejects installTimeSettings on an available assignment: "use local time and
-    # deadline time settings are not valid for available intents". The module always includes
-    # useLocalTime whenever any time is supplied, so no scheduling at all works with this
-    # intent. Fail here rather than let the upload succeed and the assignment quietly not.
-    if ($AssignmentIntent -eq "available" -and ($PatchTuesday -or $AvailableTime -or $DeadlineTime)) {
-        throw "Scheduling is not supported for -AssignmentIntent available; Intune rejects deadline and local time settings on available assignments. Use -AssignmentIntent required for a scheduled rollout, or drop -PatchTuesday/-AvailableTime/-DeadlineTime to publish it to Company Portal immediately."
-    }
-
+if ($singleGroupMode) {
     # -PatchTuesday derives both times, so it cannot be combined with explicit ones
     if ($PatchTuesday) {
         if ($AvailableTime -or $DeadlineTime) {
@@ -1398,21 +1782,21 @@ if ($AssignmentGroupId) {
         Write-Verbose "-PatchTuesday: scheduling on $($nextPatchTuesday.ToString('yyyy-MM-dd')), available 00:00, deadline 12:00."
     }
 
-    # Add-IntuneWin32AppAssignmentGroup rejects a future available time unless a deadline is also
-    # given; it only emits a warning and skips the assignment, so catch it here instead.
-    # AddDays(-1) is not a typo: it mirrors the module's own check exactly, so the two cannot
-    # disagree about what counts as "future". Using (Get-Date) here would let times through
-    # that the module then silently drops.
-    if ($AvailableTime -and -not $DeadlineTime -and $AvailableTime -gt (Get-Date).AddDays(-1)) {
-        throw "-AvailableTime is in the future but no -DeadlineTime was supplied. The IntuneWin32App module requires both in this case."
-    }
-    if ($AvailableTime -and $DeadlineTime -and $DeadlineTime -le $AvailableTime) {
-        throw "-DeadlineTime ($DeadlineTime) must be later than -AvailableTime ($AvailableTime)."
-    }
-    # Mirrors the module's second guard: a past deadline with no available time is rejected
-    # there with a warning and a silent skip.
-    if ($DeadlineTime -and -not $AvailableTime -and $DeadlineTime -lt (Get-Date)) {
-        throw "-DeadlineTime ($DeadlineTime) is in the past. Supply a future deadline, or add -AvailableTime."
+    # Parity with 2.7.1 on the required/uninstall path: these mirrored module quirks where a
+    # future available time without a deadline, or a past deadline alone, was silently skipped.
+    # The available path had its own up-front rejection removed in 3.0.0 (the raw REST body
+    # sends startDateTime only for available, which Intune accepts), so these no longer apply
+    # to it. AddDays(-1) mirrors the module's own idea of "future".
+    if ($AssignmentIntent -ne "available") {
+        if ($AvailableTime -and -not $DeadlineTime -and $AvailableTime -gt (Get-Date).AddDays(-1)) {
+            throw "-AvailableTime is in the future but no -DeadlineTime was supplied. Supply both for a required rollout, or use -AssignmentIntent available."
+        }
+        if ($AvailableTime -and $DeadlineTime -and $DeadlineTime -le $AvailableTime) {
+            throw "-DeadlineTime ($DeadlineTime) must be later than -AvailableTime ($AvailableTime)."
+        }
+        if ($DeadlineTime -and -not $AvailableTime -and $DeadlineTime -lt (Get-Date)) {
+            throw "-DeadlineTime ($DeadlineTime) is in the past. Supply a future deadline, or add -AvailableTime."
+        }
     }
 }
 
@@ -1634,7 +2018,7 @@ try {
     # illegal in a filename on either macOS or Windows
     $safeFileName = ($displayName -replace '[\\/:*?"<>|]', '_') + ".json"
     $outputPath   = Join-Path -Path $unzippedDir.FullName -ChildPath $safeFileName
-    [System.IO.File]::WriteAllText($outputPath, ($appJson | ConvertTo-Json -Depth 10), [System.Text.Encoding]::Unicode)
+    [System.IO.File]::WriteAllText($outputPath, ($appJson | ConvertTo-Json -Depth 20), [System.Text.Encoding]::Unicode)
     Write-Host "JSON saved to: $outputPath" -ForegroundColor Green
 }
 catch {
@@ -1647,7 +2031,8 @@ catch {
 
 Write-Host "`n=== Step 6: Upload to Intune ===" -ForegroundColor Cyan
 
-$appId = $null
+$appId        = $null
+$appInventory = @()
 
 # ShouldProcess returns $false under -WhatIf, which skips authentication as well as the upload
 if (-not $PSCmdlet.ShouldProcess($displayName, "Upload Win32 app to Intune")) {
@@ -1680,6 +2065,36 @@ else {
     }
     catch {
         throw "Authentication failed: $($PSItem.Exception.Message)"
+    }
+
+    # Inventory once, before the upload, and reuse it for the duplicate check here and for
+    # supersedence in Step 8. It is not queried again later.
+    try {
+        $appInventory = Get-Win32AppInventory
+    }
+    catch {
+        throw "Could not read the existing Win32 app inventory from Intune: $($PSItem.Exception.Message)"
+    }
+
+    # Refuse to upload the same package twice. Before 3.0.0 this created a second app in Intune;
+    # with Step 10 now able to retire earlier versions, a rerun could retire a working one. The
+    # check sits before the upload, so it throws without leaving anything behind. -WhatIf never
+    # reaches here because ShouldProcess short-circuits authentication.
+    $candidateNames   = @($displayName, $defaultDisplayName) | Select-Object -Unique
+    $existingDuplicate = $null
+    foreach ($inventoryApp in $appInventory) {
+        if (-not $inventoryApp.PSObject.Properties["displayName"]) { continue }
+        foreach ($candidateName in $candidateNames) {
+            if ([string]::Equals($candidateName, [string]$inventoryApp.displayName, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $existingDuplicate = $inventoryApp
+                break
+            }
+        }
+        if ($existingDuplicate) { break }
+    }
+    if ($existingDuplicate) {
+        $existingId = $existingDuplicate.PSObject.Properties["id"] ? $existingDuplicate.id : "unknown"
+        throw "An app named '$($existingDuplicate.displayName)' already exists in the tenant (id $existingId). The script refuses to upload the same package twice. Remove or rename the existing app, or raise the version in ApplicationInformation.txt."
     }
 
     try {
@@ -1736,8 +2151,7 @@ else {
         $appId     = ${appObject}?.id
 
         if (-not $appId) {
-            $skipped = $AssignmentGroupId ? "return code patch AND group assignment" : "return code patch"
-            Write-Warning "App was uploaded but no ID was returned - skipping $skipped. Verify in the Intune portal."
+            Write-Warning "App was uploaded but no ID was returned - skipping the return code patch, upload verification, supersedence, assignment and retirement. Verify in the Intune portal."
         }
         else {
             Write-Host "App uploaded successfully. Intune App ID: $appId" -ForegroundColor Green
@@ -1775,109 +2189,264 @@ else {
 
 #endregion
 
-#region Step 7 - Assign to an Entra group (optional)
+#region Step 7 - Verify the upload actually committed
 
-# $appId is null under -WhatIf and when the upload returned no ID, so there is nothing to assign to
-$assignedGroupId = $null
+# Default false so a skipped or failed verification blocks Steps 8-10
+$uploadVerified = $false
 
-if ($AssignmentGroupId -and $appId) {
-    Write-Host "`n=== Step 7: Assignment ===" -ForegroundColor Cyan
+if ($appId) {
+    Write-Host "`n=== Step 7: Verify upload ===" -ForegroundColor Cyan
     try {
-        $assignSplat = @{
-            Include      = $true
-            ID           = $appId
-            GroupID      = $AssignmentGroupId
-            Intent       = $AssignmentIntent
-            Notification = $AssignmentNotification
-            UseLocalTime = $UseLocalTime
-        }
-        if ($AvailableTime) { $assignSplat["AvailableTime"] = $AvailableTime }
-        if ($DeadlineTime)  { $assignSplat["DeadlineTime"]  = $DeadlineTime }
+        # Our own GET, not the module's return object: verifying the module's claim with the
+        # module's own claim proves nothing. The module creates the app record before the
+        # content upload, so an app id is not evidence the app has committed content.
+        $verifyResponse = Invoke-RestMethod -Method Get `
+            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($appId)?`$select=id,displayName,publishingState,committedContentVersion" `
+            -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
+            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
 
-        # The module reports both validation failures and Graph errors with Write-Warning and
-        # then returns normally, so a try/catch alone would report success on a failed
-        # assignment. Capture the warnings and treat any of them as a failure.
-        Add-IntuneWin32AppAssignmentGroup @assignSplat -WarningVariable assignmentWarnings | Out-Null
+        $stateProp     = $verifyResponse.PSObject.Properties["publishingState"]
+        $contentProp   = $verifyResponse.PSObject.Properties["committedContentVersion"]
+        $publishState  = $stateProp   ? [string]$stateProp.Value   : ""
+        $contentVersion = $contentProp ? [string]$contentProp.Value : ""
 
-        if ($assignmentWarnings) {
-            Write-Warning "App $appId was uploaded, but the group assignment did not complete (see the warning above)."
-            Write-Warning "Assign the app to $AssignmentGroupId manually in the Intune portal."
+        if ($publishState -eq "published" -and $contentVersion -and $contentVersion -ne "0") {
+            $uploadVerified = $true
+            Write-Host "Upload verified: publishingState '$publishState', committedContentVersion '$contentVersion'." -ForegroundColor Green
         }
         else {
-            $assignedGroupId = $AssignmentGroupId
-
-        $availableText = $AvailableTime ? $AvailableTime.ToString("yyyy-MM-dd HH:mm") : "immediately"
-        $deadlineText  = $DeadlineTime  ? $DeadlineTime.ToString("yyyy-MM-dd HH:mm")  : "none"
-        $timeBaseText  = $UseLocalTime ? "device local time" : "UTC"
-
-        $scheduleSource = $PatchTuesday ? " [-PatchTuesday]" : ""
-
-            Write-Host "Assigned to group $AssignmentGroupId as '$AssignmentIntent'." -ForegroundColor Green
-            Write-Host "  Available: $availableText   Deadline: $deadlineText   ($timeBaseText)$scheduleSource"
+            Write-Warning "App $appId exists in Intune but has no committed content (publishingState '$publishState', committedContentVersion '$contentVersion'). Remove it manually in the Intune portal. Supersedence, assignment and retirement are skipped."
         }
     }
     catch {
-        # The app is uploaded and patched by now, so this is not a total failure. Throwing here
-        # would invite a rerun, which would create a duplicate app.
-        Write-Warning "App $appId was uploaded, but the group assignment failed: $($PSItem.Exception.Message)"
-        Write-Warning "Assign the app to $AssignmentGroupId manually in the Intune portal."
+        Write-Warning "Could not verify the upload of app $appId ($($PSItem.Exception.Message)). Supersedence, assignment and retirement are skipped."
     }
-}
-elseif ($AssignmentGroupId -and $WhatIfPreference) {
-    $whatIfAvailable = $AvailableTime ? "available $($AvailableTime.ToString('yyyy-MM-dd HH:mm'))" : "available immediately"
-    $whatIfDeadline  = $DeadlineTime  ? "deadline $($DeadlineTime.ToString('yyyy-MM-dd HH:mm'))"   : "no deadline"
-    $whatIfSource    = $PatchTuesday ? " [-PatchTuesday]" : ""
-    Write-Host "`nWhatIf: would assign to group $AssignmentGroupId as '$AssignmentIntent' ($whatIfAvailable, $whatIfDeadline)$whatIfSource." -ForegroundColor Yellow
 }
 
 #endregion
 
-#region Step 8 - Supersede earlier versions (optional)
+#region Step 8 - Supersede the previous version
 
-$supersededApps = @()
+$supersedenceConfigured = $false
+$keptApp                = $null
+$supersedeCandidates    = @()
 
-if ($Supersede -and $appId) {
+if ($appId -and $uploadVerified) {
     Write-Host "`n=== Step 8: Supersedence ===" -ForegroundColor Cyan
     try {
-        # Both naming conventions: the resolved name and the "<Vendor> <Name>" fallback,
-        # so apps uploaded before a displayName override existed are still found
-        # DisplayName is $null when the descriptions file supplies no override
+        # Both naming conventions: the resolved name and the "<Vendor> <Name>" fallback, so
+        # apps uploaded before a displayName override existed are still found. The regex and
+        # the strict version comparison in Select-SupersedableApp are unchanged.
         $nameBases = @($descResult.DisplayName, "$vendor $appName") | Where-Object { $_ }
 
-        $candidates = Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
-                                             -ExcludeId $appId -AllApps (Get-Win32AppInventory)
+        $supersedeCandidates = Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
+                                                      -ExcludeId $appId -AllApps $appInventory
 
-        if ($candidates.Count -eq 0) {
-            Write-Host "No earlier versions found to supersede."
+        if ($supersedeCandidates.Count -eq 0) {
+            Write-Host "No earlier versions found."
         }
         else {
-            # Sent in a single call: the module replaces the whole supersedence set each time,
-            # so adding them one by one would leave only the last one in place
-            $supersedence = foreach ($candidate in $candidates) {
-                New-IntuneWin32AppSupersedence -ID $candidate.Id -SupersedenceType $SupersedenceType
-            }
-            # Warns rather than throws on failure, same as the assignment function
-            Add-IntuneWin32AppSupersedence -ID $appId -Supersedence $supersedence -WarningVariable supersedenceWarnings | Out-Null
-
-            if ($supersedenceWarnings) {
-                Write-Warning "App $appId was uploaded, but supersedence was not configured (see the warning above)."
-                Write-Warning "Set supersedence manually in the Intune portal."
+            $keptApp = Select-SupersedenceTarget -Candidate $supersedeCandidates
+            if (-not $keptApp) {
+                Write-Warning "Could not determine which earlier version to keep; skipping supersedence."
             }
             else {
-                $supersededApps = $candidates
-                Write-Host "Superseded $($candidates.Count) earlier version(s) using '$SupersedenceType':" -ForegroundColor Green
-                foreach ($candidate in $candidates) { Write-Host "  $($candidate.DisplayName)" }
+                # Build the supersedence object inline. New-IntuneWin32AppSupersedence issues a
+                # Graph GET per app just to return three static fields, and computes the token
+                # lifetime with .Minutes instead of .TotalMinutes - a 60-61 minute token then
+                # reads as expired and triggers a break that exits the whole script.
+                $supersedenceSet = @(
+                    [ordered]@{
+                        "@odata.type"      = "#microsoft.graph.mobileAppSupersedence"
+                        "supersedenceType" = $SupersedenceType.ToLower()
+                        "targetId"         = $keptApp.Id
+                    }
+                )
+
+                # foreach ($x in 1) absorbs the module's `break` on a Begin-block validation
+                # failure, which try/catch does not catch and which otherwise exits the script
+                # silently with exit code 0. -WarningVariable still captures the module warnings.
+                $supersedenceWarnings = $null
+                foreach ($breakGuard in 1) {
+                    Add-IntuneWin32AppSupersedence -ID $appId -Supersedence $supersedenceSet `
+                        -WarningVariable supersedenceWarnings | Out-Null
+                }
+
+                if ($supersedenceWarnings) {
+                    Write-Warning "App $appId was uploaded, but supersedence against '$($keptApp.DisplayName)' was not configured (see the warning above)."
+                    Write-Warning "Set supersedence manually in the Intune portal."
+                }
+                else {
+                    $supersedenceConfigured = $true
+                    Write-Host "Superseding '$($keptApp.DisplayName)' ($($keptApp.Id)) using '$SupersedenceType'." -ForegroundColor Green
+                }
             }
         }
     }
     catch {
-        # The app is uploaded and assigned by now, so this must not be fatal
         Write-Warning "App $appId was uploaded, but configuring supersedence failed: $($PSItem.Exception.Message)"
         Write-Warning "Set supersedence manually in the Intune portal."
     }
 }
-elseif ($Supersede -and $WhatIfPreference) {
-    Write-Host "`nWhatIf: would look for earlier versions to supersede using '$SupersedenceType'." -ForegroundColor Yellow
+elseif ($WhatIfPreference) {
+    Write-Host "`nWhatIf: would supersede the previous version using '$SupersedenceType'." -ForegroundColor Yellow
+}
+
+#endregion
+
+#region Step 9 - Assign to an Entra group
+
+# $assignedGroupId is kept for backward compatibility and set only in single-group mode
+$assignedGroupId          = $null
+$pilotGroupAssigned       = $null
+$productionGroupAssigned  = $null
+$assignmentFullySucceeded = $false
+
+if (($singleGroupMode -or $ringMode) -and $appId -and $uploadVerified) {
+    Write-Host "`n=== Step 9: Assignment ===" -ForegroundColor Cyan
+
+    # Auto-update of superseded apps only applies to an available assignment, and only when
+    # this upload actually superseded something.
+    $enableAutoUpdate = ($AssignmentIntent -eq "available") -and $supersedenceConfigured
+
+    if ($ringMode) {
+        $ringSchedule = Get-RingSchedule -PatchTuesday:$PatchTuesday `
+            -ProductionDelayHours $ProductionDelayHours -DeadlineOffsetHours $DeadlineOffsetHours
+
+        # Pilot first; production only if the pilot assignment lands
+        $pilotOk = Invoke-Win32AppAssignment -AppId $appId -GroupId $PilotGroupId -RingLabel "pilot" `
+            -Intent $AssignmentIntent -Notification $AssignmentNotification -UseLocalTime $UseLocalTime `
+            -AvailableTime $ringSchedule.PilotStart -DeadlineTime $ringSchedule.PilotDeadline `
+            -EnableAutoUpdate:$enableAutoUpdate
+        if ($pilotOk) {
+            $pilotGroupAssigned = $PilotGroupId
+            $productionOk = Invoke-Win32AppAssignment -AppId $appId -GroupId $ProductionGroupId -RingLabel "production" `
+                -Intent $AssignmentIntent -Notification $AssignmentNotification -UseLocalTime $UseLocalTime `
+                -AvailableTime $ringSchedule.ProductionStart -DeadlineTime $ringSchedule.ProductionDeadline `
+                -EnableAutoUpdate:$enableAutoUpdate
+            if ($productionOk) {
+                $productionGroupAssigned  = $ProductionGroupId
+                $assignmentFullySucceeded = $true
+            }
+        }
+        if (-not $assignmentFullySucceeded) {
+            Write-Warning "App $appId was uploaded, but the ring rollout did not complete. Retirement (Step 10) is skipped."
+        }
+    }
+    else {
+        # Single-group mode: same schedule semantics as 2.7.1, the body just built locally now
+        $singleOk = Invoke-Win32AppAssignment -AppId $appId -GroupId $AssignmentGroupId `
+            -Intent $AssignmentIntent -Notification $AssignmentNotification -UseLocalTime $UseLocalTime `
+            -AvailableTime $AvailableTime -DeadlineTime $DeadlineTime -EnableAutoUpdate:$enableAutoUpdate
+        if ($singleOk) {
+            $assignedGroupId          = $AssignmentGroupId
+            $assignmentFullySucceeded = $true
+        }
+        else {
+            Write-Warning "App $appId was uploaded, but the group assignment did not complete."
+        }
+    }
+}
+elseif (($singleGroupMode -or $ringMode) -and $WhatIfPreference) {
+    if ($ringMode) {
+        $whatIfRingSource = $PatchTuesday ? " [-PatchTuesday]" : ""
+        Write-Host "`nWhatIf: would assign in two rings - pilot $PilotGroupId, then production $ProductionGroupId - as '$AssignmentIntent'$whatIfRingSource." -ForegroundColor Yellow
+    }
+    else {
+        $whatIfAvailable = $AvailableTime ? "available $($AvailableTime.ToString('yyyy-MM-dd HH:mm'))" : "available immediately"
+        $whatIfDeadline  = $DeadlineTime  ? "deadline $($DeadlineTime.ToString('yyyy-MM-dd HH:mm'))"   : "no deadline"
+        $whatIfSource    = $PatchTuesday ? " [-PatchTuesday]" : ""
+        Write-Host "`nWhatIf: would assign to group $AssignmentGroupId as '$AssignmentIntent' ($whatIfAvailable, $whatIfDeadline)$whatIfSource." -ForegroundColor Yellow
+    }
+}
+
+#endregion
+
+#region Step 10 - Retire superseded versions
+
+$retiredApps = @()
+
+if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
+    $retireSet = @($supersedeCandidates | Where-Object { $_.Id -ne $keptApp.Id })
+
+    if (-not $RetireSuperseded) {
+        if ($retireSet.Count -gt 0) {
+            Write-Host "`n=== Step 10: Retirement (preview) ===" -ForegroundColor Cyan
+            Write-Host "These earlier versions would be retired with -RetireSuperseded:"
+            foreach ($retireApp in $retireSet) { Write-Host "  $($retireApp.DisplayName)  ($($retireApp.Id))" }
+        }
+    }
+    elseif (-not ($uploadVerified -and $supersedenceConfigured -and $assignmentFullySucceeded)) {
+        Write-Warning "-RetireSuperseded was set, but retirement is skipped: the upload, supersedence and assignment did not all succeed. Retiring now could leave the tenant with no deployed version."
+    }
+    elseif ($retireSet.Count -eq 0) {
+        Write-Host "`n=== Step 10: Retirement ===" -ForegroundColor Cyan
+        Write-Host "No earlier versions to retire beyond the one kept."
+    }
+    else {
+        Write-Host "`n=== Step 10: Retirement ===" -ForegroundColor Cyan
+        $retireFailureCount = 0
+
+        foreach ($retireApp in $retireSet) {
+            $retireAppFailed = $false
+
+            # Order is fixed: relations, then assignments, then the rename. If the rename ran
+            # before the un-assignment and the un-assignment then failed, the app would be
+            # invisible to future runs (the "(TBD)" suffix drops it from the name match) and
+            # stay assigned forever. This order's worst case is an app that still has its real
+            # name and is picked up on the next run.
+
+            # 1. Clear supersedence relations (dependencies are preserved), wrapped against break
+            $removeSupersedenceWarnings = $null
+            foreach ($breakGuard in 1) {
+                Remove-IntuneWin32AppSupersedence -ID $retireApp.Id `
+                    -WarningVariable removeSupersedenceWarnings | Out-Null
+            }
+            if ($removeSupersedenceWarnings) { $retireAppFailed = $true }
+
+            # 2. Remove all assignments, wrapped against break
+            $removeAssignmentWarnings = $null
+            foreach ($breakGuard in 1) {
+                Remove-IntuneWin32AppAssignment -ID $retireApp.Id `
+                    -WarningVariable removeAssignmentWarnings | Out-Null
+            }
+            if ($removeAssignmentWarnings) { $retireAppFailed = $true }
+
+            # 3. Rename to "... (TBD)" via raw PATCH; skip when already suffixed so it is idempotent
+            if ($retireApp.DisplayName -notmatch ' \(TBD\)$') {
+                try {
+                    $renameBody = @{
+                        "@odata.type" = "#microsoft.graph.win32LobApp"
+                        "displayName" = "$($retireApp.DisplayName) (TBD)"
+                    } | ConvertTo-Json -Depth 20
+                    Invoke-RestMethod -Method Patch `
+                        -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($retireApp.Id)" `
+                        -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" } `
+                        -Body $renameBody -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop | Out-Null
+                }
+                catch {
+                    Write-Warning "Renaming '$($retireApp.DisplayName)' ($($retireApp.Id)) to '(TBD)' failed: $($PSItem.Exception.Message)"
+                    $retireAppFailed = $true
+                }
+            }
+
+            if ($retireAppFailed) {
+                $retireFailureCount++
+                Write-Warning "Retirement of '$($retireApp.DisplayName)' ($($retireApp.Id)) did not fully complete; continuing with the next app."
+            }
+            else {
+                $retiredApps += [pscustomobject]@{ DisplayName = $retireApp.DisplayName; Id = $retireApp.Id }
+                Write-Host "  Retired: $($retireApp.DisplayName)  ($($retireApp.Id))" -ForegroundColor Green
+            }
+        }
+
+        if ($retireFailureCount -gt 0) {
+            Write-Warning "$retireFailureCount of $($retireSet.Count) earlier version(s) did not retire cleanly. Check them in the Intune portal."
+        }
+    }
+}
+elseif ($RetireSuperseded -and $WhatIfPreference) {
+    Write-Host "`nWhatIf: would retire earlier versions after a verified upload and a fully successful assignment." -ForegroundColor Yellow
 }
 
 #endregion
@@ -1909,11 +2478,15 @@ elseif (Test-Path -Path $tempDir) {
 
 # Structured result so the script can be consumed by other tooling
 [pscustomobject]@{
-    DisplayName      = $displayName
-    AppId            = $appId
-    JsonPath         = $outputPath
-    DetectionType    = $detectionOdataType
-    DescriptionFound = $descResult.Found
-    AssignedGroupId  = $assignedGroupId
-    SupersededApps   = $supersededApps
+    DisplayName       = $displayName
+    AppId             = $appId
+    JsonPath          = $outputPath
+    DetectionType     = $detectionOdataType
+    DescriptionFound  = $descResult.Found
+    AssignedGroupId   = $assignedGroupId
+    PilotGroupId      = $pilotGroupAssigned
+    ProductionGroupId = $productionGroupAssigned
+    SupersededApp     = $keptApp ? ([pscustomobject]@{ DisplayName = $keptApp.DisplayName; Id = $keptApp.Id }) : $null
+    RetiredApps       = $retiredApps
+    UploadVerified    = $uploadVerified
 }

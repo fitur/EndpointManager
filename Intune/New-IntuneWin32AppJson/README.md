@@ -15,8 +15,14 @@ mistyped detection rule or a forgotten disk requirement.
 3. Locates `ApplicationInformation.txt`, the `.intunewin` file and an optional `.png` icon
 4. Reads the metadata and parses the detection rule (registry, MSI or file)
 5. Builds a `win32LobApp` JSON artifact in Intune's own export format (UTF-16 LE)
-6. Uploads the app, then corrects return code 1641 from `hardReboot` to `softReboot`
-7. Assigns the app to an Entra group, optionally on a schedule
+6. Refuses to run if the same package is already in the tenant, then uploads the app and
+   corrects return code 1641 from `hardReboot` to `softReboot`
+7. Verifies the upload actually committed content, not just that an app id came back
+8. Supersedes the previous version automatically
+9. Assigns the app to an Entra group, or across a pilot/production ring pair, optionally on
+   a schedule
+10. With `-RetireSuperseded`, retires the earlier versions - clears their supersedence and
+    assignments and renames them `(TBD)` for a later manual delete
 
 The JSON artifact is kept next to the zip file after a successful run, so it can be diffed,
 archived or imported elsewhere.
@@ -150,8 +156,11 @@ entirely. See [Working across several customers](#working-across-several-custome
 | `-DescriptionsPath` | GitHub URL | Path or URL to the descriptions file |
 | `-IntuneWin32AppVersion` | — | Pins the module version |
 | `-Owner` | env var | Owner recorded on the app in Intune |
-| `-Supersede` | off | Marks earlier versions of the same app as superseded |
 | `-SupersedenceType` | `Update` | `Update` installs over the old version, `Replace` uninstalls it first |
+| `-PilotGroupId` `-ProductionGroupId` | file/param | Entra group IDs for a two-ring rollout; set both to turn it on |
+| `-ProductionDelayHours` | `24` | Hours from now to the production ring's start, default schedule |
+| `-DeadlineOffsetHours` | `24` | Hours from the production ring's start to its deadline |
+| `-RetireSuperseded` | off | Retire earlier versions after a verified upload and a successful assignment |
 | `-CustomerConfigPath` | — | Local JSON file with credentials for several customers |
 | `-CustomerName` | — | Selects a customer without prompting |
 | `-CertificateThumbprint` | env var | Certificate in the CurrentUser store |
@@ -177,8 +186,9 @@ entirely. See [Working across several customers](#working-across-several-custome
     -AvailableTime (Get-Date "2026-09-01 08:00") `
     -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
-# Supersede earlier versions of the same app
-./New-IntuneWin32AppJson.ps1 -AppPath "./App_1.0_Intune.zip" -Supersede
+# Two-ring rollout: pilot now, production 24 h later, then retire the earlier versions
+./New-IntuneWin32AppJson.ps1 -AppPath "./App_1.0_Intune.zip" `
+    -PilotGroupId "1111..." -ProductionGroupId "2222..." -RetireSuperseded
 
 # Pick a customer from a local credential file
 ./New-IntuneWin32AppJson.ps1 -AppPath "./App_1.0_Intune.zip" -CustomerConfigPath ~/.config/em/customers.json
@@ -188,7 +198,9 @@ entirely. See [Working across several customers](#working-across-several-custome
 ```
 
 `-WhatIf` skips authentication entirely and leaves the extracted folder in place so the
-generated JSON can be inspected. Worth running first on any new package.
+generated JSON can be inspected. Worth running first on any new package. Because it skips
+authentication, the duplicate-package check - which reads the tenant's app inventory - does
+not run under `-WhatIf`.
 
 ### Scheduling
 
@@ -198,15 +210,27 @@ generated JSON can be inspected. Worth running first on any new package.
 | `-PatchTuesday` | Available 00:00, deadline 12:00 on the next second Tuesday |
 | `-AvailableTime` + `-DeadlineTime` | Your own window |
 
-`-PatchTuesday` cannot be combined with explicit times, and no scheduling works with
-`-AssignmentIntent available` — Intune rejects deadline and local time settings on available
-assignments, so the script stops before uploading rather than leaving the app published
-without its assignment. Both times are always set together,
-because the IntuneWin32App module silently skips an assignment when a future availability
-time has no accompanying deadline — the script catches that combination and fails loudly
-instead.
+`-PatchTuesday` cannot be combined with explicit times. `-AssignmentIntent available` now
+accepts a schedule: the assignment is built directly against Graph and, for available intent,
+sends only `startDateTime`, which Intune accepts (it rejects only `deadlineDateTime` and
+`useLocalTime` there). For `required`, a future availability time still needs an accompanying
+deadline.
 
 If today happens to be a Patch Tuesday, the next month is used rather than the same day.
+
+### Ring rollout
+
+Set both `-PilotGroupId` and `-ProductionGroupId` (or `pilotGroupId` / `productionGroupId` in
+the customer file) to assign the app in two rings instead of to one group. The pilot ring is
+assigned first; the production ring only if the pilot assignment succeeds.
+
+| | Pilot ring | Production ring |
+|---|---|---|
+| Default | Published immediately | Starts `now + -ProductionDelayHours` (24 h), deadline `+ -DeadlineOffsetHours` (24 h) |
+| `-PatchTuesday` | Available 00:00, deadline 12:00 on the next Patch Tuesday | Starts seven days later 00:00, deadline `+ -DeadlineOffsetHours` |
+
+Ring mode cannot be combined with `-AssignmentGroupId`, with `-AssignmentIntent uninstall`,
+or with `-AvailableTime` / `-DeadlineTime`.
 
 ### Output
 
@@ -224,23 +248,35 @@ $result.AppId
 | `JsonPath` | Path to the generated JSON artifact |
 | `DetectionType` | `RegistryDetection`, `ProductCodeDetection` or `FileSystemDetection` |
 | `DescriptionFound` | Whether the app matched an entry in the descriptions file |
-| `AssignedGroupId` | Set only once assignment actually succeeded |
-| `SupersededApps` | The earlier versions that were marked superseded |
+| `AssignedGroupId` | Single-group mode: set only once assignment actually succeeded |
+| `PilotGroupId` `ProductionGroupId` | Ring mode: each set only once that ring's assignment succeeded |
+| `SupersededApp` | The earlier version kept and superseded (name + id), or `$null` |
+| `RetiredApps` | Earlier versions retired by `-RetireSuperseded` |
+| `UploadVerified` | Whether the upload was confirmed to have committed content |
 
-### Superseding earlier versions
+### Version lifecycle
 
-`-Supersede` finds earlier versions already in Intune and marks them as superseded by the
-upload. Matching is deliberately strict, because a false positive would mark an unrelated app
-as superseded: a candidate qualifies only when its name is exactly `<base> <version>` for
-either the resolved display name or the `<Vendor> <Name>` fallback, and its version parses
-and is strictly lower than the one being uploaded.
+Every run supersedes the previous version - there is no opt-in switch. Matching is
+deliberately strict, because a false positive would mark an unrelated app as superseded: a
+candidate qualifies only when its name is exactly `<base> <version>` for either the resolved
+display name or the `<Vendor> <Name>` fallback, and its version parses and is strictly lower
+than the one being uploaded.
 
 Uploading `7-Zip 26.02` therefore supersedes `7-Zip 26.01` and `IgorPavlov 7Zip 25.00`,
 while leaving `7-Zip 27.00`, `7-Zip Pro 26.01`, `My 7-Zip 26.01` and a plain `7-Zip` alone.
 Both naming conventions are checked so apps uploaded before a `displayName` override existed
 are still recognised.
 
+Of the candidates, one is kept and superseded against: the highest version that still has an
+assignment. A half-finished earlier run can leave a higher version with no assignments, and
+superseding - then retiring - that one would drop the version actually deployed.
+
 `Update` installs over the earlier version; `Replace` uninstalls it first.
+
+With `-RetireSuperseded`, and only once the upload is verified and the assignment fully
+succeeds, the other earlier versions are retired: their supersedence relations and
+assignments are removed and they are renamed `... (TBD)`, ready for a manual delete during
+scheduled maintenance. Without the switch the script only lists which apps it would retire.
 
 ## Certificate authentication
 
@@ -304,7 +340,8 @@ a native picker on macOS, a numbered menu elsewhere.
 | `secretVault` + `secretName` | Resolved through `Microsoft.PowerShell.SecretManagement` |
 | `clientSecret` | Inline. Readable by any process running as you, whatever directory it sits in |
 
-`assignmentGroupId`, `appOwner` and `descriptionsPath` are optional.
+`assignmentGroupId`, `appOwner` and `descriptionsPath` are optional. For a two-ring rollout,
+set `pilotGroupId` and `productionGroupId` instead of `assignmentGroupId` - both, or neither.
 
 Two behaviours worth knowing:
 
@@ -371,7 +408,9 @@ read it before running it against a tenant you care about, and use `-WhatIf` fir
 
 ## Known limitations
 
-- **No duplicate check.** Running the same package twice creates two apps in Intune.
+- **Rerunning the same package is refused.** If an app with the same name is already in the
+  tenant the script stops before uploading - raise the version or remove the old app first.
+  The check needs the tenant inventory, so it is skipped under `-WhatIf`.
 - **The app uploads immediately**, even when the assignment is scheduled. Only the
   assignment is deferred; the app is visible in the portal right away.
 - **Patch Tuesday is calculated in the server's time zone** but interpreted in the device's,
