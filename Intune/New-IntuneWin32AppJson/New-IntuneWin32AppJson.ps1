@@ -187,9 +187,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        3.0.0
+    Version:        3.0.1
     Creation Date:  2026-05-07
-    Last Updated:   2026-09-09
+    Last Updated:   2026-09-15
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -198,6 +198,23 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        3.0.1 - 2026-09-15
+            Fixes from the first production run of 3.0.0. The upload check failed on every
+            run: it selected committedContentVersion, which lives on the derived mobileLobApp
+            type, and Graph rejects that on the mobileApps collection with 400 - so
+            supersedence, assignment and retirement never ran. The check now reads the full
+            app. Graph error bodies are reported in clear text; Invoke-RestMethod puts only a
+            generic status line in the exception message and the reason in ErrorDetails, which
+            is why that failure read "400 (Bad Request)" and nothing more. A failed check now
+            says the app may well be intact and that a rerun is refused while it exists. The
+            keep decision fails closed: a failed lookup used to count the version as
+            unassigned, which could keep the wrong one and retire the version actually
+            deployed; supersedence and retirement are now skipped instead. createdDateTime
+            comes from the inventory rather than an extra request per candidate. Retirement
+            also removes the kept version's supersedence link to the retired versions, which
+            previously stayed until the next release and kept the newest retired version
+            linked.
 
         3.0.0 - 2026-09-09
             Version lifecycle. The script now supersedes the previous version automatically,
@@ -964,21 +981,23 @@ function Get-ClientCertificate {
 function Get-Win32AppInventory {
     <#
     .SYNOPSIS
-        Returns every Win32 app in the tenant as id/displayName pairs.
+        Returns every Win32 app in the tenant as id/displayName/createdDateTime triples.
 
     .DESCRIPTION
         Uses the list endpoint and follows @odata.nextLink. Deliberately avoids
         Get-IntuneWin32App, which issues an extra request per app to fetch full details
         and triggers throttling on tenants with many apps - the list response already
-        carries the only two fields needed here.
+        carries the only three fields needed here.
     #>
     [OutputType([pscustomobject[]])]
     param ()
 
-    # $select keeps the payload small: only these two fields are used, and tenants with many
-    # apps otherwise return the full app body for every entry.
+    # $select keeps the payload small: only these three fields are used, and tenants with many
+    # apps otherwise return the full app body for every entry. createdDateTime is inherited
+    # from the mobileApp base class, unlike a derived-type property such as
+    # committedContentVersion, which mobileApps (typed mobileApp) rejects with a 400.
     $uri  = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps" +
-            "?`$filter=isof('microsoft.graph.win32LobApp')&`$select=id,displayName"
+            "?`$filter=isof('microsoft.graph.win32LobApp')&`$select=id,displayName,createdDateTime"
     $apps = [System.Collections.Generic.List[pscustomobject]]::new()
 
     while ($uri) {
@@ -1545,6 +1564,53 @@ function New-Win32AppAssignmentBody {
     }
 }
 
+function Get-GraphErrorMessage {
+    <#
+    .SYNOPSIS
+        Returns the most useful text from a failed Graph request.
+
+    .DESCRIPTION
+        Invoke-RestMethod puts only a generic status line in the exception message
+        ("Response status code does not indicate success: 400 (Bad Request).") and the reason
+        Graph gave in ErrorDetails. A Graph-shaped JSON body is reduced to
+        "<code>: <message> (request-id <id>)"; any other body is returned as is; without a
+        body the exception message is returned.
+    #>
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $details = $ErrorRecord.ErrorDetails
+    if (-not ($details -and $details.Message)) {
+        return $ErrorRecord.Exception.Message
+    }
+
+    try {
+        $body      = $details.Message | ConvertFrom-Json -ErrorAction Stop
+        $errorProp = $body.PSObject.Properties["error"]
+        if ($errorProp -and $errorProp.Value) {
+            $graphError = $errorProp.Value
+            $code       = $graphError.PSObject.Properties["code"]    ? [string]$graphError.code    : ""
+            $message    = $graphError.PSObject.Properties["message"] ? [string]$graphError.message : ""
+            $requestId  = ""
+            $innerProp  = $graphError.PSObject.Properties["innerError"]
+            if ($innerProp -and $innerProp.Value -and $innerProp.Value.PSObject.Properties["request-id"]) {
+                $requestId = [string]$innerProp.Value.'request-id'
+            }
+            # ${code} and not $code: a colon straight after a variable name is parsed as a
+            # scope qualifier and the string no longer parses
+            $text = $code ? "${code}: $message" : $message
+            if ($requestId) { $text += " (request-id $requestId)" }
+            if ($text) { return $text }
+        }
+    }
+    catch {
+        Write-Verbose "Graph error body is not JSON; returning it unparsed."
+    }
+    return $details.Message
+}
+
 function Invoke-Win32AppAssignment {
     <#
     .SYNOPSIS
@@ -1591,8 +1657,7 @@ function Invoke-Win32AppAssignment {
     catch {
         # The raw REST path surfaces a real exception where the module only warned; make sure
         # the Graph message in clear text reaches the operator.
-        $graphMessage = $PSItem.Exception.Message
-        if ($PSItem.ErrorDetails -and $PSItem.ErrorDetails.Message) { $graphMessage = $PSItem.ErrorDetails.Message }
+        $graphMessage = Get-GraphErrorMessage -ErrorRecord $PSItem
         Write-Warning "Assignment to group $GroupId$where failed: $graphMessage"
         Write-Warning "Assign the app to $GroupId manually in the Intune portal."
         return $false
@@ -1626,7 +1691,7 @@ function Invoke-Win32AppAssignment {
             }
         }
         catch {
-            Write-Warning "Could not read assignment $assignmentId back to verify auto-update: $($PSItem.Exception.Message)"
+            Write-Warning "Could not read assignment $assignmentId back to verify auto-update: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
         }
     }
 
@@ -1652,28 +1717,36 @@ function Select-SupersedenceTarget {
         the highest version is kept and a warning is written, because the choice was made
         without assignment evidence.
 
+        The decision fails closed: when the assignments of any candidate cannot be read, $null
+        is returned and supersedence and retirement are skipped for the run. Counting an
+        unreadable candidate as unassigned could keep the wrong version and retire the one
+        actually deployed.
+
     .NOTES
-        Candidates carry only id/displayName/version from the inventory, so createdDateTime
-        and the assignment count are fetched per candidate here.
+        createdDateTime comes from the inventory; only the assignment count is fetched per
+        candidate.
     #>
     [OutputType([pscustomobject])]
     param (
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Candidate
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Candidate,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Inventory
     )
 
     $authHeader = @{ Authorization = $Global:AuthenticationHeader.Authorization }
 
+    $createdById = @{}
+    foreach ($inventoryApp in $Inventory) {
+        $idProp      = $inventoryApp.PSObject.Properties["id"]
+        $createdProp = $inventoryApp.PSObject.Properties["createdDateTime"]
+        if ($idProp -and $createdProp -and $createdProp.Value) {
+            $createdById[[string]$idProp.Value] = [datetime]$createdProp.Value
+        }
+    }
+
+    $failedLookups = 0
     $enriched = foreach ($item in $Candidate) {
         $assignmentCount = 0
-        $created         = [datetime]::MinValue
         try {
-            $detail = Invoke-RestMethod -Method Get `
-                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)?`$select=id,createdDateTime" `
-                -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
-            if ($detail.PSObject.Properties["createdDateTime"] -and $detail.createdDateTime) {
-                $created = [datetime]$detail.createdDateTime
-            }
-
             $assignmentResponse = Invoke-RestMethod -Method Get `
                 -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)/assignments" `
                 -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
@@ -1682,17 +1755,26 @@ function Select-SupersedenceTarget {
             }
         }
         catch {
-            Write-Warning "Could not read details for '$($item.DisplayName)' ($($item.Id)): $($PSItem.Exception.Message). Treating it as unassigned for the keep decision."
+            $failedLookups++
+            Write-Warning "Could not read the assignments of '$($item.DisplayName)' ($($item.Id)): $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
+            continue
         }
 
+        $itemId = [string]$item.Id
         [pscustomobject]@{
             Id              = $item.Id
             DisplayName     = $item.DisplayName
             Version         = $item.Version
             AssignmentCount = $assignmentCount
-            CreatedDateTime = $created
+            CreatedDateTime = $createdById.ContainsKey($itemId) ? $createdById[$itemId] : [datetime]::MinValue
         }
     }
+
+    if ($failedLookups -gt 0) {
+        Write-Warning "The keep decision needs the assignment state of every earlier version, and $failedLookups lookup(s) failed. Supersedence and retirement are skipped for this run so the deployed version cannot be retired by mistake."
+        return $null
+    }
+
     $enriched = @($enriched)
     if ($enriched.Count -eq 0) { return $null }
 
@@ -1704,6 +1786,108 @@ function Select-SupersedenceTarget {
     $fallback = $enriched | Sort-Object -Property Version, CreatedDateTime -Descending | Select-Object -First 1
     Write-Warning "None of the earlier versions has an assignment; keeping '$($fallback.DisplayName)' (highest version) without assignment evidence."
     return $fallback
+}
+
+function Remove-KeptAppSupersedence {
+    <#
+    .SYNOPSIS
+        Removes the kept version's supersedence relations that point at versions being retired.
+
+    .DESCRIPTION
+        Relations are stored on the superseding app, so clearing a retired app's own relations
+        does not reach the kept app's relation to it. Left in place, the most recently retired
+        version stays superseded by the kept one until that one is itself retired at the next
+        release.
+
+        Only child supersedence relations whose target is being retired are removed. Any other
+        supersedence on the kept app - a manually configured replacement of an unrelated
+        product, say - is resubmitted unchanged, and the module preserves dependencies.
+
+    .OUTPUTS
+        [bool] - $true when nothing needed changing or the change went through.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory)][string]$KeptAppId,
+        [Parameter(Mandatory)][string[]]$RetiredAppId
+    )
+
+    try {
+        $response = Invoke-RestMethod -Method Get `
+            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$KeptAppId/relationships" `
+            -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
+            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Could not read the relationships of kept app ${KeptAppId}: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
+        return $false
+    }
+
+    # The whole supersedence set is replaced on write, so a partial page must never be the
+    # basis of one. A supersedence graph caps at 11 nodes, so paging should not occur; the
+    # guard keeps a surprise from turning into lost relations.
+    if ($response.PSObject.Properties["@odata.nextLink"]) {
+        Write-Warning "The relationships of kept app $KeptAppId came back paged; not rewriting them from a partial list."
+        return $false
+    }
+
+    $valueProp = $response.PSObject.Properties["value"]
+    $entries   = $valueProp ? @($valueProp.Value) : @()
+    $targetIdOf = { param($entry) $prop = $entry.PSObject.Properties["targetId"]; $prop ? [string]$prop.Value : "" }
+
+    # Only the kept app's own supersedences. Entries with targetType 'parent' are apps that
+    # supersede the kept app - the new upload among them - and are stored on those apps.
+    $ownSupersedence = @($entries | Where-Object {
+        $typeProp       = $_.PSObject.Properties["@odata.type"]
+        $targetTypeProp = $_.PSObject.Properties["targetType"]
+        $typeProp -and $typeProp.Value -eq "#microsoft.graph.mobileAppSupersedence" -and
+            $targetTypeProp -and $targetTypeProp.Value -eq "child"
+    })
+
+    $toRetired = @($ownSupersedence | Where-Object { (& $targetIdOf $_) -in $RetiredAppId })
+    if ($toRetired.Count -eq 0) {
+        Write-Verbose "Kept app $KeptAppId has no supersedence pointing at the versions being retired."
+        return $true
+    }
+
+    $remaining = @($ownSupersedence | Where-Object { (& $targetIdOf $_) -notin $RetiredAppId })
+
+    # Never guess a supersedence type: a wrong one would silently turn an update into an
+    # uninstall-first replacement, or the reverse
+    $untyped = @($remaining | Where-Object {
+        $prop = $_.PSObject.Properties["supersedenceType"]
+        -not ($prop -and $prop.Value)
+    })
+    if ($untyped.Count -gt 0) {
+        Write-Warning "A supersedence relation on kept app $KeptAppId has no supersedenceType; not rewriting the set."
+        return $false
+    }
+
+    $rebuilt = @(foreach ($entry in $remaining) {
+        [ordered]@{
+            "@odata.type"      = "#microsoft.graph.mobileAppSupersedence"
+            "supersedenceType" = [string]$entry.PSObject.Properties["supersedenceType"].Value
+            "targetId"         = & $targetIdOf $entry
+        }
+    })
+
+    if (-not $PSCmdlet.ShouldProcess($KeptAppId, "Remove supersedence to retired versions")) {
+        return $true
+    }
+
+    # foreach ($x in 1) absorbs the module's `break` on a Begin-block validation failure;
+    # -WarningVariable captures both that and Graph errors
+    $writeWarnings = $null
+    foreach ($breakGuard in 1) {
+        if ($rebuilt.Count -gt 0) {
+            Add-IntuneWin32AppSupersedence -ID $KeptAppId -Supersedence $rebuilt -WarningVariable writeWarnings | Out-Null
+        }
+        else {
+            Remove-IntuneWin32AppSupersedence -ID $KeptAppId -WarningVariable writeWarnings | Out-Null
+        }
+    }
+    return -not $writeWarnings
 }
 
 #endregion Functions
@@ -2073,7 +2257,7 @@ else {
         $appInventory = Get-Win32AppInventory
     }
     catch {
-        throw "Could not read the existing Win32 app inventory from Intune: $($PSItem.Exception.Message)"
+        throw "Could not read the existing Win32 app inventory from Intune: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
     }
 
     # Refuse to upload the same package twice. Before 3.0.0 this created a second app in Intune;
@@ -2177,7 +2361,7 @@ else {
                 Write-Host "Return code 1641 patched to softReboot." -ForegroundColor Green
             }
             catch {
-                Write-Warning "App $appId was uploaded, but patching return code 1641 failed: $($PSItem.Exception.Message)"
+                Write-Warning "App $appId was uploaded, but patching return code 1641 failed: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
                 Write-Warning "Set return code 1641 to softReboot manually in the Intune portal. Do not rerun the script - that would create a duplicate app."
             }
         }
@@ -2200,8 +2384,11 @@ if ($appId) {
         # Our own GET, not the module's return object: verifying the module's claim with the
         # module's own claim proves nothing. The module creates the app record before the
         # content upload, so an app id is not evidence the app has committed content.
+        # No $select: committedContentVersion lives on the derived mobileLobApp type and the
+        # mobileApps collection is typed mobileApp, so selecting it fails with 400 on every app.
+        # The unselected GET returns the full win32LobApp, derived properties included.
         $verifyResponse = Invoke-RestMethod -Method Get `
-            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($appId)?`$select=id,displayName,publishingState,committedContentVersion" `
+            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId" `
             -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
             -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
 
@@ -2219,7 +2406,11 @@ if ($appId) {
         }
     }
     catch {
-        Write-Warning "Could not verify the upload of app $appId ($($PSItem.Exception.Message)). Supersedence, assignment and retirement are skipped."
+        # Fail closed as before, but say what state the app is in: it was the check that failed,
+        # not necessarily the upload, and the duplicate guard in Step 6 refuses a rerun while an
+        # app with this name exists.
+        Write-Warning "Could not verify the upload of app ${appId}: $(Get-GraphErrorMessage -ErrorRecord $PSItem). Supersedence, assignment and retirement are skipped."
+        Write-Warning "The app exists in Intune and may well be intact. A rerun is refused while it exists: either delete app $appId in the Intune portal and rerun, or configure its supersedence and assignment manually."
     }
 }
 
@@ -2246,7 +2437,7 @@ if ($appId -and $uploadVerified) {
             Write-Host "No earlier versions found."
         }
         else {
-            $keptApp = Select-SupersedenceTarget -Candidate $supersedeCandidates
+            $keptApp = Select-SupersedenceTarget -Candidate $supersedeCandidates -Inventory $appInventory
             if (-not $keptApp) {
                 Write-Warning "Could not determine which earlier version to keep; skipping supersedence."
             }
@@ -2387,12 +2578,22 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
         Write-Host "`n=== Step 10: Retirement ===" -ForegroundColor Cyan
         $retireFailureCount = 0
 
+        # The kept app's relations point at the versions being retired, and relations live on the
+        # superseding app, so the per-app clean-up below cannot reach them. A failure here does not
+        # stop the per-app retirement: the leftover link clears itself when the kept app is
+        # retired at the next release.
+        $keptRelationsOk = Remove-KeptAppSupersedence -KeptAppId $keptApp.Id -RetiredAppId @($retireSet.Id)
+        if (-not $keptRelationsOk) {
+            Write-Warning "'$($keptApp.DisplayName)' still supersedes the versions being retired. They stay linked to it until it is retired itself, and cannot be deleted before then if Intune blocks deleting superseded apps."
+        }
+
         foreach ($retireApp in $retireSet) {
             $retireAppFailed = $false
 
-            # Order is fixed: relations, then assignments, then the rename. If the rename ran
-            # before the un-assignment and the un-assignment then failed, the app would be
-            # invisible to future runs (the "(TBD)" suffix drops it from the name match) and
+            # Order is fixed per app: relations, then assignments, then the rename - the kept
+            # app's own relation to each retired app was handled above, before this loop. If the
+            # rename ran before the un-assignment and the un-assignment then failed, the app would
+            # be invisible to future runs (the "(TBD)" suffix drops it from the name match) and
             # stay assigned forever. This order's worst case is an app that still has its real
             # name and is picked up on the next run.
 
@@ -2425,7 +2626,7 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
                         -Body $renameBody -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop | Out-Null
                 }
                 catch {
-                    Write-Warning "Renaming '$($retireApp.DisplayName)' ($($retireApp.Id)) to '(TBD)' failed: $($PSItem.Exception.Message)"
+                    Write-Warning "Renaming '$($retireApp.DisplayName)' ($($retireApp.Id)) to '(TBD)' failed: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
                     $retireAppFailed = $true
                 }
             }
@@ -2444,6 +2645,9 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
             Write-Warning "$retireFailureCount of $($retireSet.Count) earlier version(s) did not retire cleanly. Check them in the Intune portal."
         }
     }
+}
+elseif ($RetireSuperseded -and $supersedeCandidates.Count -gt 0 -and -not $keptApp) {
+    Write-Warning "-RetireSuperseded was set, but retirement is skipped: no earlier version could be chosen to keep (see Step 8)."
 }
 elseif ($RetireSuperseded -and $WhatIfPreference) {
     Write-Host "`nWhatIf: would retire earlier versions after a verified upload and a fully successful assignment." -ForegroundColor Yellow

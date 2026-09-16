@@ -21,8 +21,9 @@ mistyped detection rule or a forgotten disk requirement.
 8. Supersedes the previous version automatically
 9. Assigns the app to an Entra group, or across a pilot/production ring pair, optionally on
    a schedule
-10. With `-RetireSuperseded`, retires the earlier versions - clears their supersedence and
-    assignments and renames them `(TBD)` for a later manual delete
+10. With `-RetireSuperseded`, retires the earlier versions - clears their supersedence
+    relations in both directions and their assignments, and renames them `(TBD)` for a later
+    manual delete
 
 The JSON artifact is kept next to the zip file after a successful run, so it can be diffed,
 archived or imported elsewhere.
@@ -271,12 +272,17 @@ Of the candidates, one is kept and superseded against: the highest version that 
 assignment. A half-finished earlier run can leave a higher version with no assignments, and
 superseding - then retiring - that one would drop the version actually deployed.
 
+The keep decision needs the assignment state of every earlier version. If any of those
+lookups fails, the run skips supersedence and retirement rather than guess.
+
 `Update` installs over the earlier version; `Replace` uninstalls it first.
 
 With `-RetireSuperseded`, and only once the upload is verified and the assignment fully
-succeeds, the other earlier versions are retired: their supersedence relations and
-assignments are removed and they are renamed `... (TBD)`, ready for a manual delete during
-scheduled maintenance. Without the switch the script only lists which apps it would retire.
+succeeds, the other earlier versions are retired: their own supersedence relations and
+their assignments are removed, the kept version's link to them is removed too, and they are
+renamed `... (TBD)`, ready for a manual delete during scheduled maintenance. Afterwards
+exactly two versions remain linked - the new one and the one it supersedes. Without the
+switch the script only lists which apps it would retire.
 
 ## Certificate authentication
 
