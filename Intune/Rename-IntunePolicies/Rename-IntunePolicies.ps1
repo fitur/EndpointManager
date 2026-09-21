@@ -89,13 +89,47 @@
     another copy over these. Change the copy you are working on and record it in the
     changelog below.
 
-    Version:        2.1.0
+    Version:        2.1.1
     Creation Date:  2026-07-31
-    Last Updated:   2026-09-04
+    Last Updated:   2026-09-16
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        2.1.1 - 2026-09-16
+            Fixed against a live failure: -CsvPath and -OutputDirectory with a tilde
+            ('~/OneDrive - Advania/...') both sent the CSV somewhere other than where the
+            operator pointed, after the whole tenant had already been read.
+
+            [System.IO.Path]::GetFullPath is .NET, not PowerShell, and has two problems a
+            path typed by an operator runs into. It does not expand '~' - '~/x' resolves to
+            a literal folder called '~' under the current directory, which is why
+            -OutputDirectory's own -ValidateScript passed (that check goes through the
+            PowerShell provider, which does expand '~') while the write two lines later
+            still failed: the two were resolving the same string two different ways. It
+            also resolves a relative path against the process's working directory, which
+            PowerShell 7 does not keep in step with Set-Location - a relative -CsvPath after
+            a Set-Location in the same session would silently land somewhere other than
+            $PWD. Replaced with $PSCmdlet.GetUnresolvedProviderPathFromPSPath, which
+            resolves both correctly and, unlike Resolve-Path, does not require the file to
+            already exist.
+
+            An explicit -CsvPath is now validated in the same preflight block as
+            -OutputDirectory's mutual-exclusion check, so a missing target folder fails
+            before a token is requested - -OutputDirectory got this in 2.1.0; -CsvPath did
+            not, which is why the first live run read the whole tenant before failing on
+            the write.
+
+            Export-Csv and the same-minute collision check's Test-Path now take
+            -LiteralPath instead of -Path. A CSV name the operator provides is free text;
+            -Path treats '[', ']', '*' and '?' as wildcards, so a name like
+            'Lindahl [test].csv' would not have matched itself.
+
+            Mode 1's blocked-type warning used to say "will likely fail" for every blocked
+            type, which is wrong in mode 1: it only reads, and a Read-only token can export
+            successfully even where it cannot rename. The message now depends on which mode
+            is running.
 
         2.1.0 - 2026-09-04
             Follow-up review after 2.0.0's first live measurement, against a customer
@@ -524,6 +558,19 @@ if ($PSBoundParameters.ContainsKey('ClientSecret')) {
 
 if ($PSBoundParameters.ContainsKey('CsvPath') -and $PSBoundParameters.ContainsKey('OutputDirectory')) {
     throw 'Specify either -CsvPath (an exact file) or -OutputDirectory (a folder), not both.'
+}
+
+if ($PSBoundParameters.ContainsKey('CsvPath')) {
+    # Resolved here as well as at write time, so a missing folder fails before a token is
+    # requested rather than after the whole tenant has been read.
+    $csvParent = Split-Path -Path $PSCmdlet.GetUnresolvedProviderPathFromPSPath($CsvPath) -Parent
+    if (-not (Test-Path -LiteralPath $csvParent -PathType Container)) {
+        throw ("The folder for -CsvPath does not exist: '{0}'. Create it, or use -OutputDirectory to pick an existing folder and let the file name be generated." -f $csvParent)
+    }
+}
+
+if ($PSBoundParameters.ContainsKey('OutputDirectory')) {
+    $OutputDirectory = $PSCmdlet.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 }
 
 #endregion Credential preflight
@@ -1487,7 +1534,13 @@ if ($TestPermissionOnly) {
 }
 
 foreach ($blocked in $blockedTypes) {
-    Write-Warning ('{0} will likely fail - token lacks {1}.' -f $blocked, $scopeByType[$blocked])
+    if ($isRenameMode) {
+        Write-Warning ('{0} will likely fail - token lacks {1}.' -f $blocked, $scopeByType[$blocked])
+    }
+    else {
+        # Mode 1 only reads. The rows are still exported; mode 2 will record them as blocked.
+        Write-Warning ('{0} can be exported but not renamed - token lacks {1}.' -f $blocked, $scopeByType[$blocked])
+    }
 }
 
 # The tenant label is cosmetic; the GUID beside it comes from the token's own 'tid' claim,
@@ -1525,13 +1578,18 @@ if (-not $isRenameMode) {
         $CsvPath = Join-Path -Path $csvRoot -ChildPath ('IntuneRename_{0}_{1}.csv' -f
             (ConvertTo-SafeFileNamePart -Value $tenantLabel), $fileStamp)
     }
-    $CsvPath = [System.IO.Path]::GetFullPath($CsvPath)
+    # Resolved through the PowerShell provider, not [System.IO.Path]::GetFullPath. .NET knows
+    # nothing about '~' and treats it as a folder name, and it resolves relative paths against
+    # the process directory, which PowerShell 7 does not update on Set-Location. Either one
+    # sends the CSV somewhere other than where the operator pointed. This also works for a file
+    # that does not exist yet, which Resolve-Path does not.
+    $CsvPath = $PSCmdlet.GetUnresolvedProviderPathFromPSPath($CsvPath)
 
     # Two mode-1 runs in the same minute would otherwise collide on the auto-generated name,
     # and Export-Csv would silently overwrite the earlier file - the only record of what the
     # policies were called before mode 2 runs. Only the auto-generated name is adjusted here;
     # an explicit -CsvPath is respected exactly as given, collision or not.
-    if (-not $PSBoundParameters.ContainsKey('CsvPath') -and (Test-Path -Path $CsvPath)) {
+    if (-not $PSBoundParameters.ContainsKey('CsvPath') -and (Test-Path -LiteralPath $CsvPath)) {
         $secondsSuffix = $runLocal.ToString('ss')
         $CsvPath = [System.IO.Path]::Combine(
             [System.IO.Path]::GetDirectoryName($CsvPath),
@@ -1545,7 +1603,7 @@ if (-not $isRenameMode) {
     $results |
         Sort-Object -Property GraphType, CurrentName |
         Select-Object -Property Id, GraphType, CurrentName, NewName |
-        Export-Csv -Path $CsvPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
+        Export-Csv -LiteralPath $CsvPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
 
     $byType = $results | Group-Object -Property GraphType |
         Sort-Object -Property Name |
@@ -1779,7 +1837,7 @@ finally {
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
         timeZone           = [System.TimeZoneInfo]::Local.Id
-        scriptVersion      = '2.0.0'
+        scriptVersion      = '2.1.1'
         whatIf             = [bool]$WhatIfPreference
         targetTenantId     = $tokenTenantId
         targetTenantName   = $tenantLabel

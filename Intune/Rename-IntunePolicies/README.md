@@ -262,11 +262,16 @@ every policy of the affected types, including the ones the prefix excluded.
 
 `-CsvPath` and `-OutputDirectory` are two ways to say where the export goes, and only one at a
 time. `-CsvPath` names the exact file; `-OutputDirectory` names a folder and the script still
-builds the tenant-and-timestamp file name inside it — a `-ValidateScript` on `-OutputDirectory`
-checks the folder exists before any Graph call is made, where a typo in `-CsvPath` only fails
-at the very end, after the whole tenant has been read, because that failure comes from the
-write itself. Give neither and the file lands in the script's own folder — see
+builds the tenant-and-timestamp file name inside it. Both are checked before any Graph call is
+made — `-OutputDirectory` by a `-ValidateScript`, `-CsvPath` by a matching check on its parent
+folder in the same preflight — rather than failing on the write itself, after the whole tenant
+has already been read. Give neither and the file lands in the script's own folder — see
 [Data sensitivity](#data-sensitivity) before relying on that default beyond a one-off check.
+
+Both accept `~` and relative paths, resolved the same way PowerShell itself resolves them —
+against `$HOME` and the current session's working directory, not against the folder the script
+happens to live in. Quote a path that contains spaces, as in
+`-OutputDirectory '~/OneDrive - Advania/Kunder/Dataexport/_namnbyte/'`.
 
 ## Output
 
