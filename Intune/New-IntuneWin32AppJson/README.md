@@ -108,7 +108,9 @@ HKLM\Software\<COMPANY>\IgorPavlov 7Zip 26.02 x64 = Installed
 Short hive names (`HKLM`, `HKCU`, `HKCR`, `HKU`, `HKCC`) are expanded automatically. Spaces
 are handled in both the key path and the value name. The `=` operator is treated as a
 version comparison when the value looks like a version number, and as a string comparison
-otherwise.
+otherwise. String comparison exists for registry rules only: Intune's file detection compares
+versions, not text, so a file rule whose value is not a version stops the run before
+anything is uploaded.
 
 An unparseable rule aborts the run and prints the raw value alongside the supported formats,
 so it is immediately clear what needs fixing in the text file.

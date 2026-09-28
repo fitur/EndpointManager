@@ -187,9 +187,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        3.0.1
+    Version:        3.0.2
     Creation Date:  2026-05-07
-    Last Updated:   2026-09-15
+    Last Updated:   2026-09-28
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -198,6 +198,22 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        3.0.2 - 2026-09-28
+            File detection rules work. The rule's path was split with System.IO.Path, which
+            splits on the host's separator - '/' on macOS and Linux - so a Windows path came
+            back with an empty folder and the whole path as the file name. The JSON artifact
+            was written that way without any error, under -WhatIf too, and the upload then
+            failed in the module with "Cannot validate argument on parameter 'Path'". The path
+            is now split on its last backslash, a file in a drive root keeps its trailing
+            backslash, and a rule that still yields no folder or file name stops the run in
+            Step 5. Behind that, file rules had never uploaded on any platform: they were
+            passed to the module with the registry function's parameter names
+            (-VersionComparison, -VersionComparisonOperator, -VersionComparisonValue), which
+            the file function does not have, and the upload failed with "Parameter set cannot
+            be resolved". They now use -Version, -Operator and -VersionValue. A file rule whose
+            value is not a version - a string comparison, which Intune's file detection cannot
+            express - now stops in Step 5 instead of failing at upload.
 
         3.0.1 - 2026-09-15
             Fixes from the first production run of 3.0.0. The upload check failed on every
@@ -1200,6 +1216,8 @@ function ConvertFrom-DetectionRule {
           >   greaterThan          <   lessThan
           =   equal - treated as a version comparison when the value looks like x.y.z,
               otherwise as a string comparison (e.g. PSADT tags with value "Installed").
+              String comparison exists for registry rules only; a file rule whose value
+              is not a version throws.
 
         Throws a descriptive error, including the raw value, when nothing matches.
     #>
@@ -1276,11 +1294,33 @@ function ConvertFrom-DetectionRule {
 
         $isVersion = ($operator -in ">=", "<=", ">", "<") -or
                      ($operator -eq "=" -and $detValue -match "^\d+(\.\d+){1,3}$")
-        $typeValue = $isVersion ? "version" : "string"
+
+        # Intune's file detection compares existence, dates, version or size - never a string -
+        # so a value that is not a version cannot become a file rule. Stop here, in Step 5 and
+        # under -WhatIf too, rather than write an artifact the upload then rejects.
+        if (-not $isVersion) {
+            throw "File detection rules support version comparison only, and '$detValue' is not a version. Raw value: '$DetectionString'. Use a registry rule, such as the PSADT install tag, for a string comparison."
+        }
+        $typeValue = "version"
         $mapped    = $operatorMap[$operator]
 
-        $folder   = [System.IO.Path]::GetDirectoryName($filePath)
-        $fileName = [System.IO.Path]::GetFileName($filePath)
+        # Split on the last backslash rather than with System.IO.Path: this is a Windows path
+        # evaluated on the device, and System.IO.Path splits on the host's separator, which is
+        # '/' on macOS and Linux - there it returned an empty folder and the whole path as the
+        # file name. The regex above guarantees at least one backslash.
+        $lastSeparator = $filePath.LastIndexOf([char]'\')
+        $folder        = $filePath.Substring(0, $lastSeparator)
+        $fileName      = $filePath.Substring($lastSeparator + 1)
+
+        # A file directly in a drive root keeps the trailing backslash, as on Windows: "C:" on
+        # its own means the current directory on drive C, not its root
+        if ($folder -match '^[A-Za-z]:$') { $folder += '\' }
+
+        # Fail here, in Step 5 and under -WhatIf too, rather than write an artifact the upload
+        # then rejects
+        if (-not $folder -or -not $fileName) {
+            throw "File detection rule has no folder or no file name after splitting '$filePath'. Raw value: '$DetectionString'. Expected e.g. %ProgramFiles%\App\file.exe >= 1.0"
+        }
 
         return @{
             DetectionRule = [ordered]@{
@@ -1377,22 +1417,17 @@ function New-IntuneDetectionRuleObject {
         }
 
         "#microsoft.graph.win32LobAppFileSystemDetection" {
+            # The file function names its parameters differently from the registry one -
+            # -Version/-Operator/-VersionValue, not -VersionComparison* - and has no string
+            # comparison at all; ConvertFrom-DetectionRule rejects that case before this point
             switch ($dr.detectionType) {
                 "version" {
-                    return New-IntuneWin32AppDetectionRuleFile -VersionComparison `
-                        -Path                      $dr.path `
-                        -FileOrFolder              $dr.fileOrFolderName `
-                        -Check32BitOn64System      $false `
-                        -VersionComparisonOperator $dr.operator `
-                        -VersionComparisonValue    $dr.detectionValue
-                }
-                "string" {
-                    return New-IntuneWin32AppDetectionRuleFile -StringComparison `
-                        -Path                     $dr.path `
-                        -FileOrFolder             $dr.fileOrFolderName `
-                        -Check32BitOn64System     $false `
-                        -StringComparisonOperator $dr.operator `
-                        -StringComparisonValue    $dr.detectionValue
+                    return New-IntuneWin32AppDetectionRuleFile -Version `
+                        -Path                 $dr.path `
+                        -FileOrFolder         $dr.fileOrFolderName `
+                        -Check32BitOn64System $false `
+                        -Operator             $dr.operator `
+                        -VersionValue         $dr.detectionValue
                 }
                 default { throw "Unsupported file detectionType: '$($dr.detectionType)'" }
             }
