@@ -126,6 +126,7 @@ version to pin, and no typed deserialisation layer between the response and the 
 | `Group.Read.All` | Resolving group IDs to names |
 | `Organization.Read.All` | Optional — tenant name in the folder name |
 | `Policy.Read.All` | Only with `-IncludeConditionalAccess` |
+| `DeviceManagementManagedDevices.Read.All` | Only with `-IncludeDeviceInventory` |
 
 Application, not Delegated — client credentials ignores delegated permissions entirely.
 A `ReadWrite` variant satisfies its `Read` counterpart; Graph emits only one of the two.
@@ -439,6 +440,47 @@ The expanded definitions are lifted out and **recursively stripped** from each p
 configuration before it is hashed, so the switch never moves a `ConfigurationHash`. Intents
 do not support the same expand, so their settings stay opaque. The file's absence means
 "not requested"; an empty `definitions` array means "requested, none found".
+
+### Device inventory
+
+The policy export holds the compliance *policy*, not the state of the devices it applies to.
+`-IncludeDeviceInventory` reads `deviceManagement/managedDevices` once and writes
+`DeviceInventory_<stamp>.csv` in the run folder — enough for a monthly report to say which
+Windows 11 versions are deployed and how many devices are compliant. For a customer file, the
+same switch is `"includeDeviceInventory": true`.
+
+```powershell
+./Export-IntuneConfigurationInventory.ps1 -CompareWithPrevious -IncludeDeviceInventory -Verbose
+```
+
+**It needs a permission the other areas do not:** `DeviceManagementManagedDevices.Read.All`
+(Application, `Read` not `ReadWrite`), with admin consent **in every customer tenant** that
+should have the file. Without it the preflight warns, Graph answers 403, and the export
+completes unaffected — the manifest then shows `deviceInventoryRequested = true` with
+`deviceInventoryRows = 0`, and no CSV is written.
+
+One row per managed device, all platforms, eleven columns: `RunTimestamp` · `DeviceName` ·
+`Id` · `OperatingSystem` · `OsVersion` · `OsBuild` · `OsRevision` · `WindowsRelease` ·
+`ComplianceState` · `LastSyncDateTime` · `OwnerType`. `OsRevision` is the patch level; 24H2,
+25H2 and 26H2 receive the same revision from the same monthly update, so it answers "is the
+machine patched" independently of the release. No user principal name, e-mail address, serial
+number or IMEI is requested or written. The manifest also carries
+`deviceInventorySummary` — device counts by operating system and, for Windows, by release and
+compliance state — so a report can quote the numbers without parsing the CSV. It is `null`
+when the switch was not used.
+
+Like `AppInstallStatus`, the file is a point-in-time reading: it stays out of the inventory
+CSV, out of every `ConfigurationHash`, out of the change set and out of the sidecar archive.
+
+`WindowsRelease` comes from a build-number table maintained **by hand** in
+`Get-WindowsRelease`, only for devices whose `OperatingSystem` is `Windows`. It is an exact
+lookup, not a range — 26H1 (build 28000) is numerically above 26H2 (26300) but is a
+new-hardware-only branch. An unknown build is reported as `unmapped build N` rather than
+guessed; extend the table when Microsoft ships a new release.
+
+The file contains **device names**. Treat it like the script bodies under
+[Data sensitivity](#data-sensitivity): keep it out of synchronised folders unless that is a
+deliberate decision.
 
 ### For a documentation run
 

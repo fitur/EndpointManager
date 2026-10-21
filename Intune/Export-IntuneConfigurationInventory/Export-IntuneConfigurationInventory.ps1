@@ -18,6 +18,7 @@
                         <Policy-Area>/<Name>_<Id>_<yyyy-MM-dd_HHmm>.ps1|.sh   (script areas; remediations get _detect / _remediate)
                     _changeset_<...>.json   (only with -CompareWithPrevious)
                     AppInstallStatus_<yyyy-MM-dd_HHmm>.csv   (only with -IncludeAppInstallStatus)
+                    DeviceInventory_<yyyy-MM-dd_HHmm>.csv   (only with -IncludeDeviceInventory)
                     _auditevents_<yyyy-MM-dd_HHmm>.json   (only with -IncludeAuditActor)
                     _settingdefinitions_<yyyy-MM-dd_HHmm>.json   (only with -IncludeSettingDefinitions)
 
@@ -66,6 +67,7 @@
                                                   assignment filters
         Group.Read.All                          - Resolve group object IDs to display names
         Policy.Read.All                         - ONLY needed when -IncludeConditionalAccess is used
+        DeviceManagementManagedDevices.Read.All - ONLY needed when -IncludeDeviceInventory is used
 
     OPTIONAL:
         Organization.Read.All                   - Tenant display name for the root folder.
@@ -100,13 +102,38 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.13.0
+    Version:        1.14.0
     Creation Date:  2026-07-30
-    Last Updated:   2026-09-03
+    Last Updated:   2026-10-21
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.14.0 - 2026-10-21
+            Added -IncludeDeviceInventory (and includeDeviceInventory in the customer file).
+            With the switch, one row per Intune-managed device - all platforms - is read from
+            deviceManagement/managedDevices and written to DeviceInventory_<stamp>.csv:
+            operating system, osVersion split into OsBuild / OsRevision, the Windows release it
+            maps to, complianceState, last sync and owner type. It exists so a monthly report
+            can state Windows 11 versions and compliance per device, which the policy export
+            alone cannot. Like the install status it is a point-in-time reading, so the file is
+            kept out of the inventory CSV, out of every ConfigurationHash and out of the change
+            set. No UPN, e-mail, serial number or IMEI is requested or written; deviceName is.
+
+            NEW PERMISSION: DeviceManagementManagedDevices.Read.All (Application), with admin
+            consent in every customer tenant that wants the file. Without it the preflight
+            warns, the request returns 403, and the export completes unaffected - the manifest
+            then shows deviceInventoryRequested = true with zero rows. The manifest gains
+            deviceInventoryRequested, deviceInventoryRows and deviceInventorySummary (counts by
+            operating system and, for Windows, by release and compliance state); the result
+            object gains DeviceInventoryPath.
+
+            The release is an exact build-number lookup, not a range: 26H1 (build 28000) is
+            numerically above 26H2 (26300) but is a new-hardware-only branch. An unknown build
+            is reported as "unmapped build N", never guessed; extend the table by hand when
+            Microsoft ships a new release. Only operatingSystem = Windows is mapped; the other
+            platforms keep empty build and release columns but still carry their compliance state.
 
         1.13.0 - 2026-09-03
             The three script areas (Remediation Script, Platform Script, Shell Script) now
@@ -367,6 +394,13 @@ param(
     # not one per app; the counts are a cached aggregation whose age Intune does not report.
     [switch]$IncludeAppInstallStatus,
 
+    # Collect one row per managed device - OS version, Windows release, compliance state,
+    # last sync - into DeviceInventory_<stamp>.csv. Same rule as -IncludeAppInstallStatus:
+    # device state changes on every check-in, so it stays out of the inventory, out of every
+    # ConfigurationHash and out of the change set. Needs DeviceManagementManagedDevices.Read.All,
+    # which the other areas do not; without it the switch warns and the export is unaffected.
+    [switch]$IncludeDeviceInventory,
+
     # Fetch Intune audit events for the window since the previous run and attach the actor
     # (person or automation) to added/modified policies in the change set. Without the switch
     # no auditEvents call is made at all - not "fetch and filter out". Needs no new Entra
@@ -571,6 +605,10 @@ if ($CustomerConfigPath) {
     # returns to $false, so a customer that does not opt in cannot inherit a skipped area.
     if (-not $PSBoundParameters.ContainsKey("IncludeConditionalAccess")) {
         $IncludeConditionalAccess = [bool]($customer.ContainsKey("includeConditionalAccess") -and $customer["includeConditionalAccess"])
+    }
+    # Same reasoning: DeviceManagementManagedDevices.Read.All is not granted everywhere.
+    if (-not $PSBoundParameters.ContainsKey("IncludeDeviceInventory")) {
+        $IncludeDeviceInventory = [bool]($customer.ContainsKey("includeDeviceInventory") -and $customer["includeDeviceInventory"])
     }
     # Values with a working default are only replaced, never cleared
     if ($customer.ContainsKey("jsonDepth") -and $customer["jsonDepth"] -and
@@ -1296,6 +1334,69 @@ function Get-AppInstallSummaryReport {
     return @{ Rows = $rows }
 }
 
+function Get-DeviceInventory {
+    <#
+        One row per Intune-managed device, all platforms. $select keeps the request to the
+        fields that are written - userPrincipalName, userDisplayName, emailAddress,
+        serialNumber, imei, phoneNumber and the MAC addresses never leave Graph. The
+        projection below is the actual guarantee: even if $select were ignored, only these
+        columns reach disk. deviceName is kept on purpose - a non-compliant device has to be
+        findable to be fixed.
+        Returns a flat list, comma-guarded like Get-GraphCollection.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RunTimestamp)
+
+    $select = 'id,deviceName,operatingSystem,osVersion,complianceState,lastSyncDateTime,managedDeviceOwnerType'
+    $uri = 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?$select={0}' -f $select
+
+    $rows = [System.Collections.Generic.List[pscustomobject]]::new()
+    foreach ($device in (Get-GraphCollection -Uri $uri)) {
+        $operatingSystem = [string](Get-ObjectProperty -InputObject $device -Name 'operatingSystem')
+        $osVersion = [string](Get-ObjectProperty -InputObject $device -Name 'osVersion')
+        $windows = Get-WindowsRelease -OperatingSystem $operatingSystem -OsVersion $osVersion
+
+        $rows.Add([pscustomobject][ordered]@{
+            RunTimestamp     = $RunTimestamp
+            DeviceName       = [string](Get-ObjectProperty -InputObject $device -Name 'deviceName')
+            Id               = [string](Get-ObjectProperty -InputObject $device -Name 'id')
+            OperatingSystem  = $operatingSystem
+            OsVersion        = $osVersion
+            OsBuild          = $windows.Build
+            OsRevision       = $windows.Revision
+            WindowsRelease   = $windows.Release
+            ComplianceState  = [string](Get-ObjectProperty -InputObject $device -Name 'complianceState')
+            LastSyncDateTime = ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject $device -Name 'lastSyncDateTime')
+            OwnerType        = [string](Get-ObjectProperty -InputObject $device -Name 'managedDeviceOwnerType')
+        })
+    }
+    return , $rows
+}
+
+function Get-DeviceInventorySummary {
+    # Invariant-culture key order (case-insensitive: iOS sorts before Windows) so the
+    # manifest is byte-stable between runs and machines with the same devices.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Row)
+
+    $countBy = {
+        param($Items, $Property)
+        $map = [ordered]@{}
+        $groups = @($Items | Group-Object -Property $Property)
+        foreach ($group in ($groups | Sort-Object -Property Name -Culture ([cultureinfo]::InvariantCulture))) {
+            $map[([string]::IsNullOrEmpty($group.Name) ? '<empty>' : $group.Name)] = $group.Count
+        }
+        return $map
+    }
+
+    $windows = @($Row | Where-Object { $PSItem.OperatingSystem -eq 'Windows' })
+    return [ordered]@{
+        byOperatingSystem        = & $countBy $Row 'OperatingSystem'
+        windowsByRelease         = & $countBy $windows 'WindowsRelease'
+        windowsByComplianceState = & $countBy $windows 'ComplianceState'
+    }
+}
+
 function Split-SettingDefinition {
     <#
         Walks a Settings Catalog settings tree, moves every $expand=settingDefinitions payload
@@ -1573,6 +1674,45 @@ function Get-PolicyPlatform {
         'windows' { return 'windows' }
         default   { return '' }
     }
+}
+
+function Get-WindowsRelease {
+    <#
+        Splits a Windows osVersion ("10.0.26100.6584") into build and revision and names the
+        release. Exact lookup, never a range: 26H1 (28000) is numerically above 26H2 (26300)
+        but is a new-hardware-only branch, so "build >= x means release y or later" is wrong.
+        An unknown build is reported as "unmapped build N" rather than guessed - extend the
+        table by hand when Microsoft ships the next release.
+
+        Source: learn.microsoft.com, Windows 11 release information, read 2026-10-21.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [AllowEmptyString()][string]$OperatingSystem,
+        [AllowEmptyString()][string]$OsVersion
+    )
+
+    $releaseByBuild = @{
+        '19044' = 'Windows 10 21H2'
+        '19045' = 'Windows 10 22H2'
+        '22000' = 'Windows 11 21H2'
+        '22621' = 'Windows 11 22H2'
+        '22631' = 'Windows 11 23H2'
+        '26100' = 'Windows 11 24H2'
+        '26200' = 'Windows 11 25H2'
+        '26300' = 'Windows 11 26H2'
+        '28000' = 'Windows 11 26H1'
+    }
+
+    $result = [pscustomobject][ordered]@{ Build = ''; Revision = ''; Release = '' }
+    if ($OperatingSystem -ne 'Windows') { return $result }
+    if ($OsVersion -notmatch '^10\.0\.(\d+)\.(\d+)$') { return $result }
+
+    $result.Build = $Matches[1]
+    $result.Revision = $Matches[2]
+    $result.Release = $releaseByBuild.ContainsKey($Matches[1]) ? $releaseByBuild[$Matches[1]] : ('unmapped build {0}' -f $Matches[1])
+    return $result
 }
 
 function New-PolicyDefinition {
@@ -2739,6 +2879,11 @@ if (-not (Test-RoleSatisfied -GrantedRole $grantedRoles -RequiredRole 'Group.Rea
     Write-Warning 'Group.Read.All is missing - assigned/excluded groups will be exported as raw GUIDs.'
 }
 
+if ($IncludeDeviceInventory -and
+    -not (Test-RoleSatisfied -GrantedRole $grantedRoles -RequiredRole 'DeviceManagementManagedDevices.Read.All')) {
+    Write-Warning 'Device inventory will likely fail - token lacks DeviceManagementManagedDevices.Read.All.'
+}
+
 $blockedAreas = @($policyDefinitions | Where-Object {
     -not (Test-RoleSatisfied -GrantedRole $grantedRoles -RequiredRole $PSItem.RequiredRole)
 })
@@ -2809,6 +2954,7 @@ $csvPath = Join-Path -Path $runDirectory -ChildPath $csvName
 
 $inventory = [System.Collections.Generic.List[pscustomobject]]::new()
 $appInstallStatus = [System.Collections.Generic.List[pscustomobject]]::new()
+$deviceInventory = [System.Collections.Generic.List[pscustomobject]]::new()
 $areaResults = [System.Collections.Generic.List[pscustomobject]]::new()
 $skipped = [System.Collections.Generic.List[string]]::new()
 # Run-wide, deduplicated on definition id across every policy - see -IncludeSettingDefinitions.
@@ -3088,6 +3234,22 @@ if ($appInstallStatusRequested) {
     }
 }
 
+# Device state, not configuration - read once, written to its own CSV, never hashed. A 403
+# (DeviceManagementManagedDevices.Read.All not granted) warns and leaves the export intact;
+# the manifest then shows deviceInventoryRequested = true with zero rows.
+$deviceInventoryRequested = $IncludeDeviceInventory.IsPresent
+if ($deviceInventoryRequested) {
+    try {
+        # No @() - Get-DeviceInventory already returns ', $rows'.
+        $deviceInventory = Get-DeviceInventory -RunTimestamp $runStamp
+        Write-Verbose ('Device inventory: {0} device(s).' -f $deviceInventory.Count)
+    }
+    catch [System.Exception] {
+        Write-Warning ('Device inventory could not be read, export unaffected - {0}' -f
+            (Get-GraphErrorDetail -ErrorRecord $PSItem))
+    }
+}
+
 # Deterministic row order - required for a meaningful line-by-line diff between runs.
 $inventory |
     Sort-Object -Property PolicyArea, DisplayName, Id |
@@ -3123,11 +3285,16 @@ $manifest = [ordered]@{
     # the apps) and must be visible without reading the warning stream, like areasSkipped.
     appInstallStatusRequested = $appInstallStatusRequested
     appInstallStatusRows      = $appInstallStatus.Count
+    deviceInventoryRequested  = $deviceInventoryRequested
+    deviceInventoryRows       = $deviceInventory.Count
+    # Counts for a report to quote without parsing the CSV. $null when not requested -
+    # absence means "not asked for", an empty map means "asked for, nothing came back".
+    deviceInventorySummary    = $deviceInventoryRequested ? (Get-DeviceInventorySummary -Row $deviceInventory) : $null
     settingDefinitionsCount   = $settingDefinitions.Count
     scriptFilesWritten        = $scriptFilesWritten
     # Area folders are archived into this file at the end of the run; count is the number of
-    # sidecar files that go in. Both loose in the run root: the CSV, AppInstallStatus_*.csv
-    # and the four _*.json files.
+    # sidecar files that go in. Both loose in the run root: the CSV, AppInstallStatus_*.csv,
+    # DeviceInventory_*.csv and the four _*.json files.
     sidecarArchive            = $sidecarArchiveName
     sidecarCount              = $sidecarFiles.Count
     areas                    = @($areaResults)
@@ -3162,6 +3329,17 @@ if ($IncludeAppInstallStatus -and $appInstallStatus.Count -gt 0) {
         Sort-Object -Property DisplayName, Id |
         Export-Csv -Path $appInstallStatusPath -NoTypeInformation -Delimiter $Delimiter -Encoding utf8BOM
     Write-Verbose ('Install status for {0} app(s): {1}' -f $appInstallStatus.Count, $appInstallStatusPath)
+}
+
+# Same rule as AppInstallStatus: a point-in-time reading, kept out of the inventory CSV and
+# out of every hash.
+$deviceInventoryPath = $null
+if ($IncludeDeviceInventory -and $deviceInventory.Count -gt 0) {
+    $deviceInventoryPath = Join-Path -Path $runDirectory -ChildPath ('DeviceInventory_{0}.csv' -f $fileStamp)
+    $deviceInventory |
+        Sort-Object -Property OperatingSystem, DeviceName, Id |
+        Export-Csv -Path $deviceInventoryPath -NoTypeInformation -Delimiter $Delimiter -Encoding utf8BOM
+    Write-Verbose ('Device inventory for {0} device(s): {1}' -f $deviceInventory.Count, $deviceInventoryPath)
 }
 
 # Audit events for the window since the previous run. The projection in Get-AuditEventWindow
@@ -3221,7 +3399,8 @@ if ($CompareWithPrevious) {
 # Pack the per-area sidecar folders into one archive in the run folder. Standard now, not
 # opt-in. Written after the comparison so the current run is diffed from loose files and only
 # earlier runs are read through their archive (see Get-SidecarContent). The loose CSV,
-# AppInstallStatus_*.csv and _*.json files in the run root stay where they are.
+# AppInstallStatus_*.csv, DeviceInventory_*.csv and _*.json files in the run root stay where
+# they are.
 #
 # A failure here does not fail the export - the inventory on disk is complete, same rule as
 # the comparison and the audit fetch. The area folders are removed only once the archive has
@@ -3293,6 +3472,7 @@ Write-Output ([pscustomobject]@{
     ManifestPath           = $manifestPath
     SidecarArchivePath     = $sidecarArchivePath
     AppInstallStatusPath   = $appInstallStatusPath
+    DeviceInventoryPath    = $deviceInventoryPath
     AuditEventsPath        = $auditEventsPath
     SettingDefinitionsPath = $settingDefinitionsPath
     ChangeSetPath          = $changeSetPath

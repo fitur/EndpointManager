@@ -8,7 +8,7 @@
         "  clientSecret            inline - simplest, but readable by any process running as you",
         "  secretVault+secretName  resolved through Microsoft.PowerShell.SecretManagement (preferred)",
         "",
-        "tenantName, outputDirectory, includeConditionalAccess and jsonDepth are optional.",
+        "tenantName, outputDirectory, includeConditionalAccess, includeDeviceInventory and jsonDepth are optional.",
         "A value left out is treated as 'not set for this customer' rather than inherited",
         "from the environment or from a previously selected customer.",
         "",
@@ -39,7 +39,8 @@
             "secretVault": "EndpointManager",
             "secretName": "Fabrikam-Intune",
             "outputDirectory": "/Users/you/IntuneInventory/Data",
-            "includeConditionalAccess": true
+            "includeConditionalAccess": true,
+            "includeDeviceInventory": true
         },
         {
             "name": "Northwind",
