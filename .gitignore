@@ -19,6 +19,7 @@ appsettings.*.json
 *.ps1xml
 *.psd1.bak
 plan*.md
+decisions*.md
 
 # IntuneWin packaging output
 *.intunewin
