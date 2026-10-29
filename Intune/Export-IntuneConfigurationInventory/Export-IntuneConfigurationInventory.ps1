@@ -2907,6 +2907,17 @@ if ($TestPermissionOnly) {
 # sidecar files are written as policies are read.
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = -not [string]::IsNullOrWhiteSpace($PSScriptRoot) ? $PSScriptRoot : (Get-Location).Path
+
+    # The script folder is normally a git checkout, and the repository's .gitignore covers
+    # *.csv but not the manifest, the change set or the sidecar archive. Say so rather than
+    # write a tenant's security configuration one 'git add .' away from a remote.
+    $probe = Get-Item -Path $OutputDirectory
+    while ($null -ne $probe -and -not (Test-Path -Path (Join-Path -Path $probe.FullName -ChildPath '.git'))) {
+        $probe = $probe.Parent
+    }
+    if ($null -ne $probe) {
+        Write-Warning ('-OutputDirectory not set: writing into the git work tree "{0}". Pass -OutputDirectory outside the repository.' -f $probe.FullName)
+    }
 }
 
 $tenantRoot = Join-Path -Path $OutputDirectory -ChildPath $tenantNamePart
