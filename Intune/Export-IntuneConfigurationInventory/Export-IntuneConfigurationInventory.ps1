@@ -3029,6 +3029,15 @@ if ([string]::IsNullOrWhiteSpace($TenantName)) {
 $tenantNamePart = ConvertTo-SafeFileNamePart -Value $TenantName
 if ([string]::IsNullOrWhiteSpace($tenantNamePart)) { $tenantNamePart = $tokenTenantId }
 
+# The tenant part names a folder, the CSV and the archive, with no id behind it to make it
+# unique. 40 characters like the policy names keeps the deepest path inside what Explorer,
+# Excel and zip tools handle, and Windows refuses CON, PRN, AUX, NUL, COM1-9 and LPT1-9 as a
+# name, with or without an extension. A name that is neither long nor reserved is unchanged.
+if ($tenantNamePart.Length -gt 40) {
+    $tenantNamePart = ($tenantNamePart.Substring(0, 40) -replace '[-._]+$', '')
+}
+$tenantNamePart = $tenantNamePart -replace '^((?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]))(?=\.|$)', '${1}_'
+
 Write-Verbose ('Tenant         : {0} ({1})' -f $TenantName, $tokenTenantId)
 Write-Verbose ('Token audience : {0}' -f [string](Get-ObjectProperty -InputObject $claims -Name 'aud'))
 Write-Verbose ('Token appid    : {0}' -f [string](Get-ObjectProperty -InputObject $claims -Name 'appid'))
