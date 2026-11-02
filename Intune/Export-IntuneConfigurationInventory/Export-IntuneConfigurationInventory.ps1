@@ -496,7 +496,7 @@ if ($CustomerConfigPath) {
 
         # Native picker on macOS, console menu everywhere else and on cancel/failure
         if ($IsMacOS) {
-            $quotedNames  = ($customerNames | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ", "
+            $quotedNames  = ($customerNames | ForEach-Object { '"' + (($_ -replace '\\', '\\') -replace '"', '\"') + '"' }) -join ", "
             $chosenName   = & osascript -e ("choose from list {$quotedNames} with prompt ""Select customer tenant"" with title ""EndpointManager""") 2>$null
             if ($chosenName -eq "false") { throw "Customer selection cancelled." }
             if ($LASTEXITCODE -eq 0 -and $chosenName) {
