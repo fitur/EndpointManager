@@ -14,8 +14,8 @@
                     IntuneConfigurationInventory_<Tenant>_<yyyy-MM-dd_HHmm>.csv
                     _manifest_<yyyy-MM-dd_HHmm>.json
                     <Tenant>_<yyyy-MM-dd_HHmm>_sidecars.zip
-                        <Policy-Area>/<Name>_<Id>_<yyyy-MM-dd_HHmm>.json   (one archive entry per policy)
-                        <Policy-Area>/<Name>_<Id>_<yyyy-MM-dd_HHmm>.ps1|.sh   (script areas; remediations get _detect / _remediate)
+                        <Policy-Area>/<Name>_<Id>.json   (one archive entry per policy)
+                        <Policy-Area>/<Name>_<Id>.ps1|.sh   (script areas; remediations get _detect / _remediate)
                     _changeset_<...>.json   (only with -CompareWithPrevious)
                     AppInstallStatus_<yyyy-MM-dd_HHmm>.csv   (only with -IncludeAppInstallStatus)
                     DeviceInventory_<yyyy-MM-dd_HHmm>.csv   (only with -IncludeDeviceInventory)
@@ -102,13 +102,56 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.14.0
+    Version:        1.15.0
     Creation Date:  2026-07-30
-    Last Updated:   2026-10-21
+    Last Updated:   2026-11-02
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.15.0 - 2026-11-02
+            Review fixes (W44). No hash wave: ConfigurationHash is unchanged for an unchanged
+            tenant. What does change is listed under CHANGED OUTPUT.
+
+            Determinism. JSON and CSV are written with LF whatever the host OS (ConvertTo-
+            StableJson, Export-StableCsv; byte-identical to before on macOS). Assignment
+            strings, the three CSV row orders and the change set order use ordinal, case-
+            sensitive sorting, and the comparator compares assignments as sets so a baseline
+            written with the old culture-sorted strings does not read as re-targeted. The
+            sidecar archive no longer has the run stamp in its entry names and is written with
+            ordinal entry order, a fixed timestamp and no file-mode bits, so two runs against
+            an unchanged tenant give the same archive on the same platform. Ties in the change
+            set and in auditActors are broken by RecordKey / activityType / resource id.
+
+            Comparison. A $expand fallback runs only on 400/501; after throttling or a 5xx the
+            area is skipped, not re-read without its extra query. An area in the baseline's
+            manifest but not in the current one, and runs with different jsonDepth or
+            detailedSettingsIncluded, make the change set reliable = false (new field
+            comparabilityNotes). Records exported after a failed per-object call, or with a
+            group or filter name that could not be resolved, are listed in the manifest's
+            degradedRecords and carry degraded = true when modified. The manifest records
+            csvDelimiter and the baseline CSV is read with it. The baseline and the audit
+            window start are the newest run folder with a manifest, by runTimestampUtc, and
+            the in-script caller passes -CurrentRunPath. Field and metadata comparisons are
+            case-sensitive.
+
+            Other. Standalone script files are written from the raw bytes Graph returned.
+            Tenant and run folders are set to 700 on macOS and Linux. The tenant name part is
+            capped at 40 characters and Windows reserved names get an underscore. With
+            FUNCTIONS_WORKER_RUNTIME set, -OutputDirectory (and -CustomerName with a customer
+            file) is required. A run into a git work tree warns, and the script folder has a
+            .gitignore for run output. Retry-After is capped at 300 s, a failed token request
+            stops instead of being retried, the change set holds only the tenant folder name,
+            and backslashes in customer names are escaped in the macOS picker.
+
+            CHANGED OUTPUT (once): ConfigurationFile in the CSV loses the stamp
+            (..._<id>.json); assignment strings and CSV row order change for policies whose
+            group names mix case or contain underscores or non-ASCII letters; tenant names over
+            40 characters, or reserved on Windows, get a new folder name and so a new baseline;
+            the manifest gains csvDelimiter and degradedRecords and the change set gains
+            comparabilityNotes. Not done: F14 (datetime offsets), the hash of raw script
+            bytes (F11 part 2), F21-F24.
 
         1.14.0 - 2026-10-21
             Added -IncludeDeviceInventory (and includeDeviceInventory in the customer file).
@@ -487,12 +530,16 @@ if ($CustomerConfigPath) {
         }
     }
     else {
+        # No console to ask in: Read-Host would hang or throw in a non-interactive host.
+        if (-not [string]::IsNullOrWhiteSpace($env:FUNCTIONS_WORKER_RUNTIME)) {
+            throw '-CustomerName is required when running in Azure Functions; there is no console to pick a customer in.'
+        }
         $customerNames = $customers | ForEach-Object { $_["name"] }
         $customer      = $null
 
         # Native picker on macOS, console menu everywhere else and on cancel/failure
         if ($IsMacOS) {
-            $quotedNames  = ($customerNames | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ", "
+            $quotedNames  = ($customerNames | ForEach-Object { '"' + (($_ -replace '\\', '\\') -replace '"', '\"') + '"' }) -join ", "
             $chosenName   = & osascript -e ("choose from list {$quotedNames} with prompt ""Select customer tenant"" with title ""EndpointManager""") 2>$null
             if ($chosenName -eq "false") { throw "Customer selection cancelled." }
             if ($LASTEXITCODE -eq 0 -and $chosenName) {
@@ -619,6 +666,14 @@ if ($CustomerConfigPath) {
     Write-Host "Customer: $($customer["name"])  (tenant $TenantId)" -ForegroundColor Green
 }
 
+# Azure Functions: the default output folder is $PSScriptRoot, which is read-only under
+# run-from-package, and a local path there does not survive the instance. Fail before the
+# first Graph call rather than after reading every policy.
+if (-not [string]::IsNullOrWhiteSpace($env:FUNCTIONS_WORKER_RUNTIME) -and
+    [string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    throw '-OutputDirectory is required when running in Azure Functions; point it at mounted storage (for example Azure Files).'
+}
+
 #endregion
 
 #region Credential preflight
@@ -693,6 +748,8 @@ $script:AuthContext = [pscustomobject]@{
 }
 $script:GroupNameCache = @{}
 $script:FilterNameCache = @{}
+# Group ids whose lookup failed for a reason other than 404 - the name is unknown, not gone.
+$script:GroupLookupFailed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
 #region Helpers
 
@@ -739,6 +796,35 @@ function Get-GraphErrorDetail {
         # Body was not JSON - fall through and return it verbatim.
     }
     return '{0} | {1}' -f $message, $details.Message
+}
+
+function Join-OrdinalUnique {
+    # Ordinal and case-sensitive. Sort-Object collates by the host culture (sv-SE puts A-ring
+    # after Z, en-US after A) and -Unique folds case, so the same set of groups joined differently
+    # on another machine, and two groups differing only in case collapsed into one.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Value, [string]$Separator = ';')
+    $set = [System.Collections.Generic.SortedSet[string]]::new(
+        [string[]]@($Value | Where-Object { $null -ne $PSItem }), [System.StringComparer]::Ordinal)
+    return ($set -join $Separator)
+}
+
+function Get-OrdinalSortedRow {
+    # Sort-Object has no ordinal mode. OrderBy is stable and takes an explicit comparer;
+    # the key joins the properties with NUL so they compare field by field.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Row,
+        [Parameter(Mandatory)][string[]]$Property
+    )
+    $names = $Property
+    $keySelector = [System.Func[object, string]] {
+        param($item)
+        @(foreach ($name in $names) { [string]$item.$name }) -join [char]0
+    }.GetNewClosure()
+    return [object[]][System.Linq.Enumerable]::ToArray(
+        [System.Linq.Enumerable]::OrderBy([object[]]@($Row), $keySelector, [System.StringComparer]::Ordinal))
 }
 
 function ConvertTo-CanonicalObject {
@@ -849,11 +935,12 @@ function New-ConfigurationFileName {
     [OutputType([string])]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$DisplayName,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Id,
-        [Parameter(Mandatory)][string]$Stamp
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Id
     )
-    # Name first so the folder is navigable, id second so the file survives a rename,
-    # stamp last so a file identifies its own run even when moved out of the folder.
+    # Name first so the folder is navigable, id second so the file survives a rename. No run
+    # stamp: entry names inside the sidecar archive must not change between two runs against
+    # an unchanged tenant, or the archive can never be byte-identical. The run folder, the
+    # archive name and the manifest carry the stamp instead.
     # 40 characters keeps the deepest path well inside Windows' 260 character limit;
     # the id guarantees uniqueness, so the name only has to be recognisable.
     $namePart = ConvertTo-SafeFileNamePart -Value $DisplayName
@@ -863,7 +950,7 @@ function New-ConfigurationFileName {
     if ([string]::IsNullOrWhiteSpace($namePart)) { $namePart = 'unnamed' }
 
     $idPart = [string]::IsNullOrWhiteSpace($Id) ? 'no-id' : (ConvertTo-SafeFileNamePart -Value $Id)
-    return '{0}_{1}_{2}.json' -f $namePart, $idPart, $Stamp
+    return '{0}_{1}.json' -f $namePart, $idPart
 }
 
 function New-AreaResult {
@@ -1121,8 +1208,10 @@ function Get-GraphAccessToken {
     catch [System.Exception] {
         # The AADSTS code in this message is the fastest way to separate "app not registered
         # in this tenant" (AADSTS700016) from "wrong secret" (AADSTS7000215).
-        throw ('Failed to acquire Graph token for tenant {0}: {1}' -f
-            $script:AuthContext.TenantId, (Get-GraphErrorDetail -ErrorRecord $PSItem))
+        # GraphAuthenticationException, not a plain exception: Invoke-GraphRequest retries
+        # anything without a status code, and a rejected credential does not get better.
+        throw [GraphAuthenticationException]::new(('Failed to acquire Graph token for tenant {0}: {1}' -f
+            $script:AuthContext.TenantId, (Get-GraphErrorDetail -ErrorRecord $PSItem)))
     }
 
     $script:TokenCache = [pscustomobject]@{
@@ -1161,6 +1250,10 @@ function Invoke-GraphRequest {
                 $requestArgs['ContentType'] = 'application/json'
             }
             return Invoke-RestMethod @requestArgs
+        }
+        catch [GraphAuthenticationException] {
+            # From Get-GraphAccessToken: no response, no point in retrying.
+            throw
         }
         catch [System.Exception] {
             $statusCode = 0
@@ -1203,7 +1296,8 @@ function Invoke-GraphRequest {
             if (-not $isRetryable -or $attempt -ge $MaxAttempt) { throw }
 
             # Retry-After wins over backoff: Graph knows the actual throttle window, we don't.
-            $delay = $retryAfterSeconds ?? [int][math]::Min([math]::Pow(2, $attempt), 60)
+            # Capped: a bogus header value must not freeze the run for an hour.
+            $delay = ($null -ne $retryAfterSeconds) ? [math]::Min($retryAfterSeconds, 300) : [int][math]::Min([math]::Pow(2, $attempt), 60)
             Write-Warning ('Graph {0} on attempt {1}/{2}, waiting {3}s: {4}' -f $statusCode, $attempt, $MaxAttempt, $delay, $Uri)
             Start-Sleep -Seconds ([math]::Max($delay, 1))
         }
@@ -1475,9 +1569,11 @@ function Expand-ScriptContent {
         vary between individual scripts - in one measurement one body of a remediation object
         carried a BOM and the other did not - so it is a property of the file the admin
         uploaded, not drift on Intune's side. A BOM that disappears means someone re-uploaded
-        the file, and that must show in the diff. Leaving the text alone also makes
-        Write-Utf8File byte-exact against what Graph returned, so the .ps1 can be uploaded
-        again as it is.
+        the file, and that must show in the diff. The standalone file is written from the
+        decoded bytes, not from the decoded text, so it is byte-exact against what Graph
+        returned even for a script that is not valid UTF-8 (Windows-1252, UTF-16) and can be
+        uploaded again as it is. The sidecar holds the UTF-8 decoding, which replaces invalid
+        bytes with U+FFFD; the hash is taken over that.
 
         A failure on one object warns and moves on, like the relationships fetch. Microsoft's
         built-in remediations (isGlobalScript = true) do not always hand out their body; that
@@ -1522,7 +1618,7 @@ function Expand-ScriptContent {
         }
 
         $scriptFileName = '{0}{1}{2}' -f $FileBaseName, $suffix, $DefaultExtension
-        Write-Utf8File -Path (Join-Path -Path $AreaFolderPath -ChildPath $scriptFileName) -Content $text
+        [System.IO.File]::WriteAllBytes((Join-Path -Path $AreaFolderPath -ChildPath $scriptFileName), $bytes)
         $written++
     }
 
@@ -1548,6 +1644,13 @@ function Resolve-GroupDisplayName {
         if (-not [string]::IsNullOrWhiteSpace($name)) { $displayName = $name }
     }
     catch [System.Exception] {
+        # 404 is the normal deleted-group case. Anything else (403 without Group.Read.All,
+        # retries exhausted) leaves the same placeholder, so the record is marked degraded.
+        $lookupResponse = $PSItem.Exception.PSObject.Properties['Response']
+        if ($null -eq $lookupResponse -or $null -eq $lookupResponse.Value -or
+            [int]$lookupResponse.Value.StatusCode -ne 404) {
+            [void]$script:GroupLookupFailed.Add($GroupId)
+        }
         Write-Verbose ('Could not resolve group {0}: {1}' -f $GroupId, $PSItem.Exception.Message)
     }
 
@@ -1565,6 +1668,7 @@ function ConvertTo-AssignmentDetail {
     $filters = [System.Collections.Generic.List[string]]::new()
     $intents = [System.Collections.Generic.List[string]]::new()
     $count = 0
+    $degraded = $false
 
     foreach ($item in @($Assignment)) {
         if ($null -eq $item) { continue }
@@ -1592,22 +1696,26 @@ function ConvertTo-AssignmentDetail {
             }
             default { $included.Add(($targetType -replace '^#microsoft\.graph\.', '')) }
         }
+        if (-not [string]::IsNullOrWhiteSpace($groupId) -and $script:GroupLookupFailed.Contains($groupId)) { $degraded = $true }
 
         $filterId = [string](Get-ObjectProperty -InputObject $target -Name 'deviceAndAppManagementAssignmentFilterId')
         if (-not [string]::IsNullOrWhiteSpace($filterId) -and $filterId -ne '00000000-0000-0000-0000-000000000000') {
             $filterType = [string](Get-ObjectProperty -InputObject $target -Name 'deviceAndAppManagementAssignmentFilterType')
-            $filterName = $script:FilterNameCache.ContainsKey($filterId) ? $script:FilterNameCache[$filterId] : $filterId
+            $filterName = $filterId
+            if ($script:FilterNameCache.ContainsKey($filterId)) { $filterName = $script:FilterNameCache[$filterId] }
+            else { $degraded = $true }
             $filters.Add(('{0} ({1})' -f $filterName, $filterType))
         }
     }
 
     # Sorted so an unchanged assignment set always produces an identical string between runs.
     return [pscustomobject]@{
-        Included = (($included | Sort-Object -Unique) -join ';')
-        Excluded = (($excluded | Sort-Object -Unique) -join ';')
-        Filters  = (($filters | Sort-Object -Unique) -join ';')
-        Intents  = (($intents | Sort-Object -Unique) -join ';')
+        Included = Join-OrdinalUnique -Value $included
+        Excluded = Join-OrdinalUnique -Value $excluded
+        Filters  = Join-OrdinalUnique -Value $filters
+        Intents  = Join-OrdinalUnique -Value $intents
         Count    = $count
+        Degraded = $degraded
     }
 }
 
@@ -1641,6 +1749,30 @@ function Write-Utf8File {
     )
     # No BOM: JSON consumers expect plain UTF-8, unlike the CSV where Excel needs the BOM.
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+}
+
+function ConvertTo-StableJson {
+    # ConvertTo-Json indents with Environment.NewLine: CRLF on Windows, LF on macOS/Linux.
+    # ConfigurationHash is taken over these bytes, so the host OS would move every hash.
+    # Literal line breaks only come from indentation - inside string values they are
+    # escaped (\r\n) - so the replacement cannot touch data.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][AllowNull()]$InputObject, [Parameter(Mandatory)][int]$Depth)
+    return (ConvertTo-Json -InputObject $InputObject -Depth $Depth) -replace "`r`n", "`n"
+}
+
+function Export-StableCsv {
+    # Export-Csv ends every line with Environment.NewLine. Fixed LF, UTF-8 with BOM (Excel
+    # needs it): byte-identical to Export-Csv -Encoding utf8BOM on macOS.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object[]]$InputObject,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Delimiter
+    )
+    $lines = $InputObject | ConvertTo-Csv -NoTypeInformation -Delimiter $Delimiter
+    [System.IO.File]::WriteAllText($Path, (($lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($true))
 }
 
 function Get-PolicyVersion {
@@ -2048,8 +2180,13 @@ function Get-RunContext {
         throw ('CSV "{0}" named by the manifest is missing from "{1}".' -f $csvName, $Path)
     }
 
+    # The CSV is read with the delimiter it was written with. A manifest from before 1.15.0
+    # has no csvDelimiter, and those runs were always written with a comma.
+    $csvDelimiter = [string](Get-ObjectProperty -InputObject $manifest -Name 'csvDelimiter')
+    if ([string]::IsNullOrEmpty($csvDelimiter)) { $csvDelimiter = ',' }
+
     $index = @{}
-    foreach ($row in (Import-Csv -Path $csvPath)) {
+    foreach ($row in (Import-Csv -Path $csvPath -Delimiter $csvDelimiter)) {
         $index[$row.RecordKey] = $row
     }
     Write-Verbose ('Loaded {0} record(s) from {1}' -f $index.Count, $csvName)
@@ -2067,7 +2204,44 @@ function Get-RunContext {
         Manifest   = $manifest
         Records    = $index
         Unreliable = $unreliable
+        Degraded   = @(Get-ObjectProperty -InputObject $manifest -Name 'degradedRecords')
     }
+}
+
+function Get-LatestRunFolder {
+    # The newest run folder that holds a manifest, ordered by the manifest's own
+    # runTimestampUtc. Folder names are local time, so at the end of daylight saving (02:00-03:00
+    # twice) or with hosts in different time zones the last name is not always the last run,
+    # and a run that died before writing its manifest is not a baseline at all.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TenantDirectory,
+        [string]$ExcludeName
+    )
+
+    if (-not (Test-Path -Path $TenantDirectory -PathType Container)) { return $null }
+
+    $candidates = foreach ($folder in @(Get-ChildItem -Path $TenantDirectory -Directory)) {
+        if ($folder.Name -ceq $ExcludeName) { continue }
+        $manifestFile = @(Get-ChildItem -Path $folder.FullName -Filter '_manifest_*.json' -File |
+            Sort-Object Name) | Select-Object -Last 1
+        if ($null -eq $manifestFile) { continue }
+        try {
+            $manifest = Get-Content -Path $manifestFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
+            $parsed = [datetimeoffset]::MinValue
+            $stamp = [string](Get-ObjectProperty -InputObject $manifest -Name 'runTimestampUtc')
+            if (-not [datetimeoffset]::TryParse($stamp, [cultureinfo]::InvariantCulture,
+                    [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsed)) { continue }
+            [pscustomobject]@{ Folder = $folder; RunUtc = $parsed.UtcDateTime }
+        }
+        catch [System.Exception] {
+            Write-Verbose ('Run folder "{0}" skipped as baseline: {1}' -f $folder.Name, $PSItem.Exception.Message)
+        }
+    }
+
+    $latest = @($candidates | Sort-Object -Property RunUtc, @{ Expression = { $PSItem.Folder.Name } }) |
+        Select-Object -Last 1
+    return ($null -eq $latest) ? $null : $latest.Folder
 }
 
 function Get-SidecarPlatform {
@@ -2303,7 +2477,8 @@ function Compare-JsonNode {
     }
 
     # Scalars, or a type change between runs.
-    if ([string]$Reference -ne [string]$Difference) {
+    # -cne: a change that only differs in case (true/True, a renamed script) is a change.
+    if ([string]$Reference -cne [string]$Difference) {
         $Changes.Add([pscustomobject][ordered]@{
             path       = $Path
             changeType = 'modified'
@@ -2358,8 +2533,20 @@ function Get-PolicyAuditActor {
     $key = $PolicyId.ToLowerInvariant()
     if (-not $Index.ContainsKey($key)) { return , @() }
 
-    return , @($Index[$key] |
-        Sort-Object -Property @{ Expression = { [string]$PSItem.activityDateTime }; Descending = $true })
+    # Newest first. Two events can share a timestamp, and the index holds them in the order
+    # the audit pages happened to arrive, so activityType and the first resource id break the
+    # tie. Ordinal throughout, like every other sort that reaches disk.
+    $byTime = [System.Func[object, string]] { param($e) [string]$e.activityDateTime }
+    $byType = [System.Func[object, string]] { param($e) [string]$e.activityType }
+    $byResource = [System.Func[object, string]] {
+        param($e)
+        $first = @(Get-ObjectProperty -InputObject $e -Name 'resources') | Select-Object -First 1
+        [string](Get-ObjectProperty -InputObject $first -Name 'resourceId')
+    }
+    $ordered = [System.Linq.Enumerable]::OrderByDescending([object[]]@($Index[$key]), $byTime, [System.StringComparer]::Ordinal)
+    $ordered = [System.Linq.Enumerable]::ThenBy($ordered, $byType, [System.StringComparer]::Ordinal)
+    $ordered = [System.Linq.Enumerable]::ThenBy($ordered, $byResource, [System.StringComparer]::Ordinal)
+    return , [object[]][System.Linq.Enumerable]::ToArray($ordered)
 }
 
 function Invoke-InventoryComparison {
@@ -2367,8 +2554,8 @@ function Invoke-InventoryComparison {
     # (the current run is always the one just produced), the taxonomy reads are
     # $script:-qualified, and the trailing Write-Output stays as the return path.
     #
-    # Only -TenantDirectory and -SidecarArchiveName are ever set by the in-script caller; the
-    # other four are not dead. -BaselineRun and -OutputPath are the seam that let the 1.9.0
+    # Only -TenantDirectory, -CurrentRunPath and -SidecarArchiveName are ever set by the
+    # in-script caller; the other four are not dead. -BaselineRun and -OutputPath are the seam that let the 1.9.0
     # merge be proven byte-identical against the old standalone script - run the comparison
     # over a chosen pair of runs and write the change set outside the run folder, the only way
     # to verify a change to this function without writing into a customer's data. -NoPlatformSplit
@@ -2378,6 +2565,8 @@ function Invoke-InventoryComparison {
     param(
         [Parameter(Mandatory)][string]$TenantDirectory,
         [string]$BaselineRun,
+        # The run just produced. Without it the last folder by name is taken as current.
+        [string]$CurrentRunPath,
         [string]$OutputPath,
         # Filename of the current run's sidecar archive, echoed into the change set so a
         # consumer knows configurationFile now points inside a zip. Discovered from the
@@ -2393,7 +2582,7 @@ function Invoke-InventoryComparison {
         throw ('No run folders found under "{0}".' -f $TenantDirectory)
     }
 
-    $currentFolder = $runFolders[-1].Name
+    $currentFolder = [string]::IsNullOrWhiteSpace($CurrentRunPath) ? $runFolders[-1].Name : (Split-Path -Path $CurrentRunPath -Leaf)
     $current = Get-RunContext -Path (Join-Path -Path $TenantDirectory -ChildPath $currentFolder)
 
     $baselineFolder = $null
@@ -2401,7 +2590,8 @@ function Invoke-InventoryComparison {
         $baselineFolder = $BaselineRun
     }
     elseif ($runFolders.Count -ge 2) {
-        $baselineFolder = @($runFolders | Where-Object { $PSItem.Name -ne $currentFolder })[-1].Name
+        $latestOther = Get-LatestRunFolder -TenantDirectory $TenantDirectory -ExcludeName $currentFolder
+        if ($null -ne $latestOther) { $baselineFolder = $latestOther.Name }
     }
 
     $isBaselineMode = [string]::IsNullOrWhiteSpace($baselineFolder)
@@ -2427,6 +2617,30 @@ function Invoke-InventoryComparison {
         @($current.Unreliable) + ($isBaselineMode ? @() : @($baseline.Unreliable)) |
             Sort-Object -Unique
     )
+
+    # An area present in only one manifest was not read at all in the other run - typically
+    # -IncludeConditionalAccess toggled between runs, or a baseline from an older version.
+    # Its absence proves deletion no more than a skipped area does.
+    $comparabilityNotes = [System.Collections.Generic.List[string]]::new()
+    if (-not $isBaselineMode) {
+        $currentAreas = @(@(Get-ObjectProperty -InputObject $current.Manifest -Name 'areas') | ForEach-Object { [string]$PSItem.area })
+        $baselineAreas = @(@(Get-ObjectProperty -InputObject $baseline.Manifest -Name 'areas') | ForEach-Object { [string]$PSItem.area })
+        $oneSided = @($baselineAreas | Where-Object { $PSItem -cnotin $currentAreas })
+        $unreliableAreas = @(@($unreliableAreas) + $oneSided | Sort-Object -Unique)
+
+        # A hash taken with and without detail settings, or at another depth, is not the same
+        # measurement - every policy with detail would read as modified.
+        foreach ($setting in @('detailedSettingsIncluded', 'jsonDepth')) {
+            $oldSetting = [string](Get-ObjectProperty -InputObject $baseline.Manifest -Name $setting)
+            $newSetting = [string](Get-ObjectProperty -InputObject $current.Manifest -Name $setting)
+            if ($oldSetting -cne $newSetting) {
+                $comparabilityNotes.Add(('{0} differs: {1} -> {2}' -f $setting, $oldSetting, $newSetting))
+            }
+        }
+        foreach ($note in $comparabilityNotes) {
+            Write-Warning ('Runs are not comparable - {0}. Configuration changes in this change set are not trustworthy.' -f $note)
+        }
+    }
     if ($unreliableAreas.Count -gt 0) {
         Write-Warning ('{0} area(s) were skipped in one or both runs - removals there are reported as uncertain: {1}' -f
             $unreliableAreas.Count, ($unreliableAreas -join '; '))
@@ -2565,12 +2779,12 @@ function Invoke-InventoryComparison {
             $unchangedCount = 0
 
             if ($isBaselineMode) {
-                foreach ($row in ($currentRows | Sort-Object PolicyArea, DisplayName)) {
+                foreach ($row in (Get-OrdinalSortedRow -Row $currentRows -Property PolicyArea, DisplayName, RecordKey)) {
                     $baselineItems.Add((New-RecordSummary -Row $row -RunFolder $currentFolder -Platforms $platformCache[$row.RecordKey]))
                 }
             }
             else {
-                foreach ($row in ($currentRows | Sort-Object PolicyArea, DisplayName)) {
+                foreach ($row in (Get-OrdinalSortedRow -Row $currentRows -Property PolicyArea, DisplayName, RecordKey)) {
                     $platforms = $platformCache[$row.RecordKey]
 
                     if (-not $baseline.Records.ContainsKey($row.RecordKey)) {
@@ -2596,7 +2810,12 @@ function Invoke-InventoryComparison {
                     foreach ($field in $assignmentFields) {
                         $oldValue = [string](Get-ObjectProperty -InputObject $old -Name $field)
                         $newValue = [string](Get-ObjectProperty -InputObject $row -Name $field)
-                        if ($oldValue -ne $newValue) {
+                        # Compared as ordinal sets: the join order is presentation, and a
+                        # baseline written with the old culture-sorted join must not read
+                        # as re-targeted.
+                        $oldSet = [System.Collections.Generic.SortedSet[string]]::new([string[]]($oldValue -split ';'), [System.StringComparer]::Ordinal)
+                        $newSet = [System.Collections.Generic.SortedSet[string]]::new([string[]]($newValue -split ';'), [System.StringComparer]::Ordinal)
+                        if (-not $oldSet.SetEquals($newSet)) {
                             $assignmentChanges.Add([pscustomobject][ordered]@{
                                 field = $field; oldValue = $oldValue; newValue = $newValue
                             })
@@ -2607,7 +2826,7 @@ function Invoke-InventoryComparison {
                     foreach ($field in $metadataFields) {
                         $oldValue = [string](Get-ObjectProperty -InputObject $old -Name $field)
                         $newValue = [string](Get-ObjectProperty -InputObject $row -Name $field)
-                        if ($oldValue -ne $newValue) {
+                        if ($oldValue -cne $newValue) {
                             $metadataChanges.Add([pscustomobject][ordered]@{
                                 field = $field; oldValue = $oldValue; newValue = $newValue
                             })
@@ -2648,10 +2867,13 @@ function Invoke-InventoryComparison {
                     if ($null -ne $auditByPolicy) {
                         $entry['auditActors'] = Get-PolicyAuditActor -Index $auditByPolicy -PolicyId ([string]$row.Id)
                     }
+                    if ($row.RecordKey -in $current.Degraded -or $row.RecordKey -in $baseline.Degraded) {
+                        $entry['degraded'] = $true
+                    }
                     $modified.Add($entry)
                 }
 
-                foreach ($row in ($baselineRows | Sort-Object PolicyArea, DisplayName)) {
+                foreach ($row in (Get-OrdinalSortedRow -Row $baselineRows -Property PolicyArea, DisplayName, RecordKey)) {
                     if ($current.Records.ContainsKey($row.RecordKey)) { continue }
 
                     $entry = New-RecordSummary -Row $row -RunFolder $baselineFolder -Platforms $platformCache[$row.RecordKey]
@@ -2707,7 +2929,9 @@ function Invoke-InventoryComparison {
         generatedUtc    = (Get-Date).ToUniversalTime().ToString('o')
         tenantName      = [string](Get-ObjectProperty -InputObject $current.Manifest -Name 'tenantName')
         tenantId        = [string](Get-ObjectProperty -InputObject $current.Manifest -Name 'tenantId')
-        tenantDirectory = $TenantDirectory
+        # Folder name only, like the manifest: an absolute path leaks the local user name and
+        # differs between machines.
+        tenantDirectory = (Split-Path -Path $TenantDirectory -Leaf)
         baselineRun     = $baselineFolder
         currentRun      = $currentFolder
         # configurationFile / previousConfigurationFile now point inside a per-run archive of
@@ -2719,8 +2943,11 @@ function Invoke-InventoryComparison {
         platformSplit   = (-not $NoPlatformSplit.IsPresent)
         # False means at least one area is unreadable in one of the runs, so the change set is
         # not a complete picture and deletions in those areas are unproven.
-        reliable        = ($unreliableAreas.Count -eq 0)
+        reliable        = ($unreliableAreas.Count -eq 0 -and $comparabilityNotes.Count -eq 0)
         unreliableAreas = @($unreliableAreas)
+        # Why two runs cannot be compared field for field (different jsonDepth or detail
+        # settings). Empty when they can.
+        comparabilityNotes = @($comparabilityNotes)
         totals          = $totals
         platformTotals  = $platformTotals
         pages           = @($pages)
@@ -2733,7 +2960,7 @@ function Invoke-InventoryComparison {
 
     # No BOM - this is machine input, not a spreadsheet.
     [System.IO.File]::WriteAllText($OutputPath,
-        (ConvertTo-Json -InputObject $changeSet -Depth 12),
+        (ConvertTo-StableJson -InputObject $changeSet -Depth 12),
         [System.Text.UTF8Encoding]::new($false))
 
     Write-Verbose ('Change set written to {0}' -f $OutputPath)
@@ -2866,6 +3093,15 @@ if ([string]::IsNullOrWhiteSpace($TenantName)) {
 $tenantNamePart = ConvertTo-SafeFileNamePart -Value $TenantName
 if ([string]::IsNullOrWhiteSpace($tenantNamePart)) { $tenantNamePart = $tokenTenantId }
 
+# The tenant part names a folder, the CSV and the archive, with no id behind it to make it
+# unique. 40 characters like the policy names keeps the deepest path inside what Explorer,
+# Excel and zip tools handle, and Windows refuses CON, PRN, AUX, NUL, COM1-9 and LPT1-9 as a
+# name, with or without an extension. A name that is neither long nor reserved is unchanged.
+if ($tenantNamePart.Length -gt 40) {
+    $tenantNamePart = ($tenantNamePart.Substring(0, 40) -replace '[-._]+$', '')
+}
+$tenantNamePart = $tenantNamePart -replace '^((?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]))(?=\.|$)', '${1}_'
+
 Write-Verbose ('Tenant         : {0} ({1})' -f $TenantName, $tokenTenantId)
 Write-Verbose ('Token audience : {0}' -f [string](Get-ObjectProperty -InputObject $claims -Name 'aud'))
 Write-Verbose ('Token appid    : {0}' -f [string](Get-ObjectProperty -InputObject $claims -Name 'appid'))
@@ -2907,6 +3143,17 @@ if ($TestPermissionOnly) {
 # sidecar files are written as policies are read.
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = -not [string]::IsNullOrWhiteSpace($PSScriptRoot) ? $PSScriptRoot : (Get-Location).Path
+
+    # The script folder is normally a git checkout, and the repository's .gitignore covers
+    # *.csv but not the manifest, the change set or the sidecar archive. Say so rather than
+    # write a tenant's security configuration one 'git add .' away from a remote.
+    $probe = Get-Item -Path $OutputDirectory
+    while ($null -ne $probe -and -not (Test-Path -Path (Join-Path -Path $probe.FullName -ChildPath '.git'))) {
+        $probe = $probe.Parent
+    }
+    if ($null -ne $probe) {
+        Write-Warning ('-OutputDirectory not set: writing into the git work tree "{0}". Pass -OutputDirectory outside the repository.' -f $probe.FullName)
+    }
 }
 
 $tenantRoot = Join-Path -Path $OutputDirectory -ChildPath $tenantNamePart
@@ -2930,8 +3177,7 @@ if (Test-Path -Path $runDirectory) {
 $auditSince = $null
 if ($IncludeAuditActor) {
     $auditSince = (Get-Date).ToUniversalTime().AddDays(-30)
-    $priorRun = @(Get-ChildItem -Path $tenantRoot -Directory -ErrorAction SilentlyContinue |
-        Sort-Object -Property Name) | Select-Object -Last 1
+    $priorRun = Get-LatestRunFolder -TenantDirectory $tenantRoot
     if ($null -ne $priorRun) {
         try {
             $priorStamp = [string](Get-ObjectProperty -InputObject (Get-RunContext -Path $priorRun.FullName).Manifest -Name 'runTimestampUtc')
@@ -2949,6 +3195,20 @@ if ($IncludeAuditActor) {
 
 New-Item -Path $runDirectory -ItemType Directory -Force | Out-Null
 
+# The output is the tenant's complete security configuration, and the umask would leave it
+# world-readable (755/644). Owner-only on the two folders keeps every file below them
+# unreachable for other local accounts. Windows has no Unix mode; its ACLs are inherited.
+if (-not $IsWindows) {
+    try {
+        foreach ($protectedFolder in @($tenantRoot, $runDirectory)) {
+            [System.IO.File]::SetUnixFileMode($protectedFolder, [System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute')
+        }
+    }
+    catch [System.Exception] {
+        Write-Warning ('Could not restrict "{0}" to its owner: {1}' -f $tenantRoot, $PSItem.Exception.Message)
+    }
+}
+
 $csvName = 'IntuneConfigurationInventory_{0}_{1}.csv' -f $tenantNamePart, $fileStamp
 $csvPath = Join-Path -Path $runDirectory -ChildPath $csvName
 
@@ -2961,6 +3221,8 @@ $skipped = [System.Collections.Generic.List[string]]::new()
 $settingDefinitions = @{}
 # Run-wide count of .ps1/.sh files written beside the sidecars - see Expand-ScriptContent.
 $scriptFilesWritten = 0
+# RecordKeys exported with an incomplete payload or unresolved assignment names.
+$degradedRecords = [System.Collections.Generic.List[string]]::new()
 
 foreach ($definition in $policyDefinitions) {
     $baseUri = 'https://graph.microsoft.com/{0}/{1}' -f $definition.ApiVersion, $definition.Resource
@@ -2991,6 +3253,20 @@ foreach ($definition in $policyDefinitions) {
     }
     catch [System.Exception] {
         # Some resources reject $expand; retry flat and pull assignments per object instead.
+        # Only for a rejected query: after throttling or a 5xx the fallback would drop
+        # ExtraQuery from the payload - moving every hash in the area - and multiply the calls
+        # against a service that is already pushing back. Skip the area instead.
+        $failedStatus = 0
+        $failedResponse = $PSItem.Exception.PSObject.Properties['Response']
+        if ($null -ne $failedResponse -and $null -ne $failedResponse.Value) {
+            $failedStatus = [int]$failedResponse.Value.StatusCode
+        }
+        if ($failedStatus -notin @(400, 501)) {
+            Write-Warning ('{0}: skipped - {1}' -f $definition.Area, $PSItem.Exception.Message)
+            $skipped.Add($definition.Area)
+            $areaResults.Add((New-AreaResult -Definition $definition -Status 'skipped' -Reason $PSItem.Exception.Message))
+            continue
+        }
         Write-Warning ('{0}: expanded query failed ({1}). Retrying without $expand.' -f $definition.Area, $PSItem.Exception.Message)
         try {
             $items = Get-GraphCollection -Uri $baseUri
@@ -3035,6 +3311,7 @@ foreach ($definition in $policyDefinitions) {
         }
 
         $assignmentDetail = ConvertTo-AssignmentDetail -Assignment $assignments
+        $recordDegraded = $assignmentDetail.Degraded
 
         # Resolved here rather than just before the write: Expand-ScriptContent below needs the
         # sidecar's base name to name the .ps1/.sh beside it. Both are pure reads of $item, $id
@@ -3043,7 +3320,7 @@ foreach ($definition in $policyDefinitions) {
         if ([string]::IsNullOrWhiteSpace($displayName)) {
             $displayName = [string](Get-ObjectProperty -InputObject $item -Name 'displayName')
         }
-        $configFileName = New-ConfigurationFileName -DisplayName $displayName -Id $id -Stamp $fileStamp
+        $configFileName = New-ConfigurationFileName -DisplayName $displayName -Id $id
 
         # Build the configuration payload: the object itself minus noise, plus fetched detail.
         # largeIcon is a base64 PNG on Win32 apps - tens of kilobytes of payload that would
@@ -3077,6 +3354,7 @@ foreach ($definition in $policyDefinitions) {
                 }
                 catch [System.Exception] {
                     Write-Warning ('Application "{0}": could not read supersedence relationships - {1}' -f $id, $PSItem.Exception.Message)
+                    $recordDegraded = $true
                 }
             }
         }
@@ -3098,6 +3376,7 @@ foreach ($definition in $policyDefinitions) {
             }
             catch [System.Exception] {
                 Write-Warning ('{0} "{1}": could not read detail settings - {2}' -f $definition.Area, $id, $PSItem.Exception.Message)
+                $recordDegraded = $true
             }
         }
 
@@ -3116,6 +3395,7 @@ foreach ($definition in $policyDefinitions) {
             }
             catch [System.Exception] {
                 Write-Warning ('{0} "{1}": could not read script content - {2}' -f $definition.Area, $displayName, $PSItem.Exception.Message)
+                $recordDegraded = $true
             }
         }
 
@@ -3123,7 +3403,7 @@ foreach ($definition in $policyDefinitions) {
         # hash and every run looks like a change. Indented, not compressed: the whole point
         # of the sidecar is a diff a human or an agent can read line by line.
         $canonical = ConvertTo-CanonicalObject -InputObject $configuration
-        $configurationJson = ConvertTo-Json -InputObject $canonical -Depth $JsonDepth
+        $configurationJson = ConvertTo-StableJson -InputObject $canonical -Depth $JsonDepth
 
         Write-Utf8File -Path (Join-Path -Path $areaFolderPath -ChildPath $configFileName) -Content $configurationJson
 
@@ -3168,6 +3448,7 @@ foreach ($definition in $policyDefinitions) {
             ConfigurationFile    = $relativeConfigPath
             GraphResourceUri     = $resourceUri
         })
+        if ($recordDegraded) { $degradedRecords.Add($recordKey) }
     }
 
     $areaResults.Add((New-AreaResult -Definition $definition -Status 'exported' -ObjectCount @($items).Count))
@@ -3251,9 +3532,8 @@ if ($deviceInventoryRequested) {
 }
 
 # Deterministic row order - required for a meaningful line-by-line diff between runs.
-$inventory |
-    Sort-Object -Property PolicyArea, DisplayName, Id |
-    Export-Csv -Path $csvPath -NoTypeInformation -Delimiter $Delimiter -Encoding utf8BOM
+Export-StableCsv -Path $csvPath -Delimiter $Delimiter `
+    -InputObject (Get-OrdinalSortedRow -Row $inventory -Property PolicyArea, DisplayName, Id)
 
 # The per-area sidecar folders are packed into one archive at the end of the run - after the
 # comparison, so the current run is still diffed loose (see the archive block below). The
@@ -3275,12 +3555,16 @@ $manifest = [ordered]@{
     tenantDirectory          = $tenantNamePart
     runDirectory             = $folderStamp
     csvFile                  = $csvName
+    csvDelimiter             = $Delimiter
     jsonDepth                = $JsonDepth
     detailedSettingsIncluded = (-not $SkipDetailedSettings.IsPresent)
     totalPolicies            = $inventory.Count
     areasExported            = @($areaResults | Where-Object { $PSItem.status -eq 'exported' }).Count
     areasSkipped             = @($areaResults | Where-Object { $PSItem.status -eq 'skipped' }).Count
     exportComplete           = ($skipped.Count -eq 0)
+    # Exported, but with a payload or assignment names that a failed call left incomplete.
+    # A change on one of these is not evidence of a change in the tenant.
+    degradedRecords          = @([System.Collections.Generic.SortedSet[string]]::new([string[]]@($degradedRecords), [System.StringComparer]::Ordinal))
     # Requested-but-zero-rows is a real state (report unreachable, or the report knows none of
     # the apps) and must be visible without reading the warning stream, like areasSkipped.
     appInstallStatusRequested = $appInstallStatusRequested
@@ -3300,7 +3584,7 @@ $manifest = [ordered]@{
     areas                    = @($areaResults)
 }
 $manifestPath = Join-Path -Path $runDirectory -ChildPath ('_manifest_{0}.json' -f $fileStamp)
-Write-Utf8File -Path $manifestPath -Content (ConvertTo-Json -InputObject $manifest -Depth 6)
+Write-Utf8File -Path $manifestPath -Content (ConvertTo-StableJson -InputObject $manifest -Depth 6)
 
 # Run-wide Settings Catalog definitions, collected and deduplicated during the area loop and
 # already stripped out of every policy's configuration. Written even when empty, like
@@ -3315,7 +3599,7 @@ if ($IncludeSettingDefinitions) {
         definitionCount = $definitionList.Count
         definitions     = $definitionList
     }
-    Write-Utf8File -Path $settingDefinitionsPath -Content (ConvertTo-Json -InputObject $settingDefinitionsDocument -Depth 8)
+    Write-Utf8File -Path $settingDefinitionsPath -Content (ConvertTo-StableJson -InputObject $settingDefinitionsDocument -Depth 8)
     Write-Verbose ('Setting definitions: {0} -> {1}' -f $definitionList.Count, $settingDefinitionsPath)
 }
 
@@ -3325,9 +3609,8 @@ if ($IncludeSettingDefinitions) {
 $appInstallStatusPath = $null
 if ($IncludeAppInstallStatus -and $appInstallStatus.Count -gt 0) {
     $appInstallStatusPath = Join-Path -Path $runDirectory -ChildPath ('AppInstallStatus_{0}.csv' -f $fileStamp)
-    $appInstallStatus |
-        Sort-Object -Property DisplayName, Id |
-        Export-Csv -Path $appInstallStatusPath -NoTypeInformation -Delimiter $Delimiter -Encoding utf8BOM
+    Export-StableCsv -Path $appInstallStatusPath -Delimiter $Delimiter `
+        -InputObject (Get-OrdinalSortedRow -Row $appInstallStatus -Property DisplayName, Id)
     Write-Verbose ('Install status for {0} app(s): {1}' -f $appInstallStatus.Count, $appInstallStatusPath)
 }
 
@@ -3336,9 +3619,8 @@ if ($IncludeAppInstallStatus -and $appInstallStatus.Count -gt 0) {
 $deviceInventoryPath = $null
 if ($IncludeDeviceInventory -and $deviceInventory.Count -gt 0) {
     $deviceInventoryPath = Join-Path -Path $runDirectory -ChildPath ('DeviceInventory_{0}.csv' -f $fileStamp)
-    $deviceInventory |
-        Sort-Object -Property OperatingSystem, DeviceName, Id |
-        Export-Csv -Path $deviceInventoryPath -NoTypeInformation -Delimiter $Delimiter -Encoding utf8BOM
+    Export-StableCsv -Path $deviceInventoryPath -Delimiter $Delimiter `
+        -InputObject (Get-OrdinalSortedRow -Row $deviceInventory -Property OperatingSystem, DeviceName, Id)
     Write-Verbose ('Device inventory for {0} device(s): {1}' -f $deviceInventory.Count, $deviceInventoryPath)
 }
 
@@ -3359,7 +3641,7 @@ if ($IncludeAuditActor) {
             eventCount     = $auditProjection.Count
             events         = @($auditProjection)
         }
-        Write-Utf8File -Path $auditEventsPath -Content (ConvertTo-Json -InputObject $auditDocument -Depth 8)
+        Write-Utf8File -Path $auditEventsPath -Content (ConvertTo-StableJson -InputObject $auditDocument -Depth 8)
         Write-Verbose ('Audit events in window: {0} -> {1}' -f $auditProjection.Count, $auditEventsPath)
     }
     catch [System.Exception] {
@@ -3378,7 +3660,7 @@ if ($CompareWithPrevious) {
     try {
         # -SidecarArchiveName: the current run is not archived yet, so the name is passed in
         # rather than discovered, for the change set's sidecarArchive field.
-        $comparison = @(Invoke-InventoryComparison -TenantDirectory $tenantRoot -SidecarArchiveName $sidecarArchiveName)
+        $comparison = @(Invoke-InventoryComparison -TenantDirectory $tenantRoot -CurrentRunPath $runDirectory -SidecarArchiveName $sidecarArchiveName)
         if ($comparison.Count -gt 0) {
             $changeSetPath = $comparison[-1].ChangeSetPath
             Write-Verbose ('Change set: {0}' -f $changeSetPath)
@@ -3417,18 +3699,35 @@ try {
             Remove-Item -Path $sidecarArchivePath -Force
         }
 
-        # ZipFile::Open + CreateEntryFromFile, not CreateFromDirectory: the latter would
-        # sweep in the CSV, the manifest and every _*.json in the run root. Entry names are
-        # the path relative to the run folder with '/' separators, matching ConfigurationFile
-        # in the CSV and the change set. PS7 resolves the type without Add-Type.
+        # ZipFile::Open + explicit entries, not CreateFromDirectory: the latter would sweep in
+        # the CSV, the manifest and every _*.json in the run root. Entry names are the path
+        # relative to the run folder with '/' separators, matching ConfigurationFile in the
+        # CSV and the change set. PS7 resolves the type without Add-Type.
+        #
+        # Byte-identical between runs against an unchanged tenant: entries in ordinal name
+        # order (Get-ChildItem order depends on the filesystem), a fixed timestamp and no
+        # file-mode bits - CreateEntryFromFile would copy LastWriteTime and the Unix mode.
+        # 2000-01-01 rather than a "zero" date: the zip format cannot store years before 1980.
+        $entryTime = [System.DateTimeOffset]::new(2000, 1, 1, 0, 0, 0, [System.TimeSpan]::Zero)
+        $entries = [System.Collections.Generic.SortedDictionary[string, string]]::new([System.StringComparer]::Ordinal)
+        foreach ($file in $sidecarFiles) {
+            $entryName = [System.IO.Path]::GetRelativePath($runDirectory, $file.FullName).Replace(
+                [System.IO.Path]::DirectorySeparatorChar, '/')
+            $entries[$entryName] = $file.FullName
+        }
         $archive = [System.IO.Compression.ZipFile]::Open(
             $sidecarArchivePath, [System.IO.Compression.ZipArchiveMode]::Create)
         try {
-            foreach ($file in $sidecarFiles) {
-                $entryName = [System.IO.Path]::GetRelativePath($runDirectory, $file.FullName).Replace(
-                    [System.IO.Path]::DirectorySeparatorChar, '/')
-                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-                    $archive, $file.FullName, $entryName) | Out-Null
+            foreach ($pair in $entries.GetEnumerator()) {
+                $entry = $archive.CreateEntry($pair.Key, [System.IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = $entryTime
+                $entry.ExternalAttributes = 0
+                $stream = $entry.Open()
+                try {
+                    $bytes = [System.IO.File]::ReadAllBytes($pair.Value)
+                    $stream.Write($bytes, 0, $bytes.Length)
+                }
+                finally { $stream.Dispose() }
             }
         }
         finally {
@@ -3460,6 +3759,9 @@ catch [System.Exception] {
 # area as "everything in it was deleted".
 if ($skipped.Count -gt 0) {
     Write-Warning ('INCOMPLETE EXPORT - {0} area(s) skipped: {1}' -f $skipped.Count, ($skipped -join '; '))
+}
+if ($degradedRecords.Count -gt 0) {
+    Write-Warning ('{0} record(s) exported with an incomplete payload or unresolved assignment names - listed as degradedRecords in the manifest.' -f $degradedRecords.Count)
 }
 
 Write-Verbose ('Exported {0} policies from {1} area(s) in tenant {2}' -f

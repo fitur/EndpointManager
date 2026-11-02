@@ -291,7 +291,7 @@ Data/
       _manifest_2026-08-05_1216.json
       _changeset_vs_2026-07-31-11-25.json          ← only with -CompareWithPrevious
       Contoso-AB_2026-08-05_1216_sidecars.zip
-        Settings-Catalog/WIN-C-ES-SB-Windows-11_<id>_2026-08-05_1216.json
+        Settings-Catalog/WIN-C-ES-SB-Windows-11_<id>.json
         Compliance-Policy/...
 ```
 
@@ -303,6 +303,11 @@ ambiguous. A scheduled run on a UTC host will name its folder in UTC.
 
 Every run packs its per-area sidecar folders into a single `<Tenant>_<stamp>_sidecars.zip`
 in the run folder — one measured run went from 16 area folders and 229 files to one archive.
+Entry names carry no run stamp, and the entries are written in ordinal name order with a
+fixed timestamp and no file-mode bits, so two runs against an unchanged tenant produce the
+same archive bytes on the same platform. The stamp is in the run folder, the archive name and
+the manifest. (Archives from 1.14.0 and earlier have the stamp in each entry name; they are
+still read through the `ConfigurationFile` of their own CSV.)
 `ConfigurationFile` in the CSV, and `configurationFile` / `previousConfigurationFile` in the
 change set, are therefore **entry names inside that zip**, not loose paths: a consumer opens
 `<run>/<Tenant>_<stamp>_sidecars.zip` and reads the named entry. The change set's top-level
@@ -383,6 +388,13 @@ required. This is what lets a consumer tell **"this area was empty"** from **"we
 read this area"** — without it, a missing permission looks identical to someone having
 deleted every policy in a category.
 
+`degradedRecords` lists the `RecordKey`s that were exported with something a failed call left
+out: detail settings, a script body or supersedence relationships that could not be read after
+retries, or group or filter names that could not be resolved for a reason other than the group
+having been deleted. The area still counts as `exported`. A change on one of these records is
+not evidence of a change in the tenant, and the change set marks such a modified entry with
+`degraded: true`.
+
 `exportComplete: false` means at least one area was skipped and the run is not a complete
 picture.
 
@@ -402,7 +414,15 @@ exists so a reordered array does not read as "everything changed".
 
 Policies missing from an area that was **skipped** in either run are reported as
 `uncertain`, never as removed. Absence is not evidence of deletion when the area could not
-be read.
+be read. The same goes for an area that is in the baseline's manifest but not in the current
+one at all, for instance when `-IncludeConditionalAccess` was used for the baseline only.
+
+The change set's `reliable` field is `false`, and a warning is written, when an area was
+skipped or missing in either run, or when the two runs are not the same measurement.
+`unreliableAreas` lists the areas. `comparabilityNotes` lists the runs' differences in
+`detailedSettingsIncluded` or `jsonDepth` (for example a `-SkipDetailedSettings` run diffed
+against a full one, where every policy with settings would otherwise read as modified); it
+is empty when the runs can be compared.
 
 ### Audit actors
 
@@ -530,8 +550,11 @@ identity asked — including a delegated Global Admin token. If you see this, ch
 ## Data sensitivity
 
 The output contains the tenant's complete security configuration, including script bodies,
-BitLocker settings and security baselines. Nothing in the script protects it — the folder
-and the zip are unencrypted and inherit the permissions of `-OutputDirectory`.
+BitLocker settings and security baselines. The folder and the zip are unencrypted. On macOS
+and Linux the script sets the tenant folder and each run folder to owner-only (`700`), so
+other local accounts cannot read what is inside; on Windows nothing is set and the folders
+inherit the permissions of `-OutputDirectory`. Copying or zipping the files out of the
+folder drops that protection.
 
 Do not point `-OutputDirectory` at a synchronised folder unless that is a deliberate
 decision, and treat the zip as customer confidential material when handing it over.
@@ -580,6 +603,14 @@ before running it against one you care about, and start with `-TestPermissionOnl
   column were added in export 1.7.0. The first comparison after upgrading reports every
   application as added — set a new baseline deliberately rather than reading that as someone
   having published 300 apps overnight.
+- **Azure Functions is not tested.** When `FUNCTIONS_WORKER_RUNTIME` is set the script
+  requires `-OutputDirectory` (or `outputDirectory` in the customer file) and, with
+  `-CustomerConfigPath`, `-CustomerName`, and stops before the first Graph call if either is
+  missing. Beyond that: the default folder is read-only under run-from-package, a comparison
+  needs the previous run's folder on mounted storage (Azure Files), and a Consumption plan's
+  timeout is probably too short for several hundred policies with the per-policy calls, so a
+  Premium plan or a container job is the likelier fit. These are assumptions, not
+  measurements.
 - **Beta endpoints throughout.** Required for remediations, shell scripts, driver update
   profiles and intents. Beta can change without notice.
 - **N+1 request patterns** in two places: one call per unique group, and one per policy for
@@ -594,7 +625,9 @@ before running it against one you care about, and start with `-TestPermissionOnl
   there is no column to disambiguate if several customers' CSVs are loaded together.
 - **No retention.** Roughly 1.6 MB per run, uncompressed. Scheduled use needs a cleanup.
 - **Deleted assignment targets** appear as `<deleted-or-unresolved:guid>`. Deliberately
-  visible rather than hidden.
+  visible rather than hidden. A lookup that failed for another reason than 404 (for instance a
+  403 without `Group.Read.All`) leaves the same string, but the record is then listed in the
+  manifest's `degradedRecords`.
 
 ## License
 

@@ -1,0 +1,4 @@
+# Run output lands in this folder when -OutputDirectory is omitted ($PSScriptRoot).
+# It is the tenant's complete security configuration - never commit it.
+/*/
+customers.json
