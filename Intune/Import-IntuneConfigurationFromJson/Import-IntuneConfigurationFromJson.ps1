@@ -1697,9 +1697,9 @@ finally {
     }
 }
 
-$summary = $results | Group-Object -Property Status |
-    Sort-Object -Property Name |
-    ForEach-Object { '{0}={1}' -f $PSItem.Name, $PSItem.Count }
+# $totals is the report's own count, built in 'finally'; only the statuses that occurred are listed.
+$summary = @($totals.GetEnumerator() | Where-Object { $PSItem.Value -gt 0 } |
+    ForEach-Object { '{0}={1}' -f $PSItem.Key, $PSItem.Value })
 
 Write-Verbose ('Done. {0}' -f ($summary -join ', '))
 Write-Output $results
