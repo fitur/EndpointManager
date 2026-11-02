@@ -2886,7 +2886,9 @@ function Invoke-InventoryComparison {
         generatedUtc    = (Get-Date).ToUniversalTime().ToString('o')
         tenantName      = [string](Get-ObjectProperty -InputObject $current.Manifest -Name 'tenantName')
         tenantId        = [string](Get-ObjectProperty -InputObject $current.Manifest -Name 'tenantId')
-        tenantDirectory = $TenantDirectory
+        # Folder name only, like the manifest: an absolute path leaks the local user name and
+        # differs between machines.
+        tenantDirectory = (Split-Path -Path $TenantDirectory -Leaf)
         baselineRun     = $baselineFolder
         currentRun      = $currentFolder
         # configurationFile / previousConfigurationFile now point inside a per-run archive of
