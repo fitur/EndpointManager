@@ -179,7 +179,7 @@
 param(
     # Folder containing the area sub-folders to import from.
     [Parameter(Mandatory)]
-    [ValidateScript({ Test-Path -Path $PSItem -PathType Container })]
+    [ValidateScript({ Test-Path -LiteralPath $PSItem -PathType Container })]
     [string]$SourceDirectory,
 
     [string]$TenantId = $env:INTUNE_TENANT_ID,
@@ -221,7 +221,7 @@ param(
     # describes, mirroring where the export puts its _manifest_. Point it elsewhere when the
     # source sits in a synchronised folder: the report names the target tenant's ID and every
     # policy name that was created.
-    [ValidateScript({ Test-Path -Path $PSItem -PathType Container })]
+    [ValidateScript({ Test-Path -LiteralPath $PSItem -PathType Container })]
     [string]$ReportDirectory,
 
     # The -WhatIf report this run is bound to: a file, or a folder, in which case the newest
@@ -257,14 +257,14 @@ $script:TargetCustomerName = ''
 # empty until this block has populated the variables.
 if ($CustomerConfigPath) {
 
-    if (-not (Test-Path -Path $CustomerConfigPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $CustomerConfigPath -PathType Leaf)) {
         throw "Customer config '$CustomerConfigPath' does not exist or is not a file."
     }
-    $customerConfigResolved = (Resolve-Path -Path $CustomerConfigPath).Path
+    $customerConfigResolved = (Resolve-Path -LiteralPath $CustomerConfigPath).Path
 
     # Warn when the file is readable by more than its owner. UnixMode is not populated on Windows.
     if (-not $IsWindows) {
-        $configItem = Get-Item -Path $customerConfigResolved
+        $configItem = Get-Item -LiteralPath $customerConfigResolved
         if ($configItem.PSObject.Properties.Name -contains "UnixMode" -and
             $configItem.UnixMode.Substring(4) -match '[rwx]') {
             Write-Warning "'$customerConfigResolved' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$customerConfigResolved'"
@@ -272,7 +272,7 @@ if ($CustomerConfigPath) {
     }
 
     try {
-        $customerConfig = Get-Content -Path $customerConfigResolved -Raw -Encoding UTF8 |
+        $customerConfig = Get-Content -LiteralPath $customerConfigResolved -Raw -Encoding UTF8 |
             ConvertFrom-Json -AsHashtable -ErrorAction Stop
     }
     catch {
@@ -1217,7 +1217,7 @@ if ($useCertificate) {
         $script:AuthContext.Certificate.Thumbprint, $script:AuthContext.Certificate.NotAfter)
 }
 
-$sourceDirectoryResolved = (Resolve-Path -Path $SourceDirectory).Path
+$sourceDirectoryResolved = (Resolve-Path -LiteralPath $SourceDirectory).Path
 
 $folders = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -Directory | Sort-Object -Property Name)
 if ($folders.Count -eq 0) {
@@ -1227,7 +1227,7 @@ if ($folders.Count -eq 0) {
 # The '_' prefix is the export's convention for run-level files, and it is this script's
 # convention for its own report. Skipping them keeps a second run from warning about the
 # first run's _importreport_ and about the export's own _manifest_ / _changeset_ files.
-$looseFiles = @(Get-ChildItem -Path $sourceDirectoryResolved -File -Filter '*.json' |
+$looseFiles = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -File -Filter '*.json' |
     Where-Object { -not $PSItem.Name.StartsWith('_') })
 if ($looseFiles.Count -gt 0) {
     Write-Warning ('{0} JSON file(s) sit directly in the source root and were ignored - the area folder is what selects the endpoint.' -f $looseFiles.Count)
@@ -1287,11 +1287,11 @@ foreach ($blocked in $blockedAreas) {
 $script:SourceTenantId = ''
 $script:SourceTenantName = ''
 $script:SourceRun = ''
-$sourceManifest = @(Get-ChildItem -Path $sourceDirectoryResolved -File -Filter '_manifest_*.json' |
+$sourceManifest = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -File -Filter '_manifest_*.json' |
     Sort-Object -Property Name)
 if ($sourceManifest.Count -gt 0) {
     try {
-        $manifestData = Get-Content -Path $sourceManifest[-1].FullName -Raw -Encoding utf8 | ConvertFrom-Json
+        $manifestData = Get-Content -LiteralPath $sourceManifest[-1].FullName -Raw -Encoding utf8 | ConvertFrom-Json
         $script:SourceTenantId = [string](Get-ObjectProperty -InputObject $manifestData -Name 'tenantId')
         $script:SourceTenantName = [string](Get-ObjectProperty -InputObject $manifestData -Name 'tenantName')
         # ConvertFrom-Json turns the export's yyyy-MM-ddTHH:mm:ss into a [datetime], and a bare
@@ -1336,7 +1336,7 @@ foreach ($folder in $folders) {
 # The banner describes what will actually be attempted: -Area, the unsupported list and
 # unknown folder names all applied.
 $selectedFolders = @($folders | Where-Object { $folderClass[$PSItem.Name] -eq 'selected' })
-$selectedFileCount = @($selectedFolders | ForEach-Object { Get-ChildItem -Path $PSItem.FullName -File -Filter '*.json' }).Count
+$selectedFileCount = @($selectedFolders | ForEach-Object { Get-ChildItem -LiteralPath $PSItem.FullName -File -Filter '*.json' }).Count
 $sourceLabel = 'no export manifest'
 if ($script:SourceTenantId -or $script:SourceRun) {
     $sourceLabel = 'export {0}, {1} / {2}' -f $script:SourceRun, $script:SourceTenantName, $script:SourceTenantId
@@ -1434,7 +1434,7 @@ try {
         }
 
         $definition = $script:AreaMap[$areaName]
-        $files = @(Get-ChildItem -Path $folder.FullName -File -Filter '*.json' | Sort-Object -Property Name)
+        $files = @(Get-ChildItem -LiteralPath $folder.FullName -File -Filter '*.json' | Sort-Object -Property Name)
         if ($files.Count -eq 0) {
             Write-Verbose ('{0}: no JSON files.' -f $areaName)
             continue
