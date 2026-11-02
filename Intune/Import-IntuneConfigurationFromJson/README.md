@@ -1,26 +1,27 @@
 # Intune Configuration Import
 
 Takes the sidecar JSON files produced by `Export-IntuneConfigurationInventory.ps1` and creates
-those policies in a different Intune tenant, one `POST` per file, over Graph REST.
+those policies in a different Intune tenant, one `POST` per file, over Graph REST. Written for
+the case the export leaves open: you have customer A's configuration on disk and you want it
+in customer B's tenant without rebuilding it by hand in the portal.
 
-Written for the case the export leaves open: you have customer A's configuration on disk and
-you want it in customer B's tenant without rebuilding it by hand in the portal.
+One script, `Import-IntuneConfigurationFromJson.ps1`. The area folder name decides which Graph
+endpoint each file is posted to; the script never guesses an endpoint from a file's contents.
 
-Two things are true of every run and worth knowing before the first one:
+Three things are true of every run:
 
 - **Everything is created unassigned.** No groups, no filters, no assignment intent. Assigning
   is a deliberate second step in the portal, not something a bulk import should guess at.
 - **There is no rollback.** The script only ever creates. It cannot update, cannot delete, and
   cannot undo half a run. The import report is the only record of what was created — which is
   why it is written even when the run is aborted.
-
-One script, `Import-IntuneConfigurationFromJson.ps1`. The area folder name decides which Graph
-endpoint each file is posted to; the script never guesses an endpoint from a file's contents.
+- **Nothing is created that a `-WhatIf` run has not already shown.** See
+  [The hard requirement](#the-hard-requirement).
 
 ## Quick start
 
 Six steps from an export folder to policies in a target tenant. Every step has a fuller
-section further down.
+section further down; every parameter is in the [Parameters](#parameters) table.
 
 **1. Check PowerShell.** 7.5 or later.
 
@@ -29,17 +30,16 @@ $PSVersionTable.PSVersion
 ```
 
 **2. Unpack the export.** Run folders from export 1.12.0 and later hold the area folders inside
-`<Tenant>_<stamp>_sidecars.zip`, not loose. The import needs them unpacked.
+`<Tenant>_<stamp>_sidecars.zip`, not loose. The import needs them unpacked; the script says so
+if it finds no area folders, but it cannot read the archive itself yet.
 
 ```powershell
 Expand-Archive -Path './Contoso-AB_2026-08-20_0914_sidecars.zip' -DestinationPath ~/Import
 ```
 
-**3. Create an Entra ID app registration in the TARGET tenant** and grant admin consent for
-these *Application* permissions — Application, not Delegated, and `ReadWrite`, not `Read`:
-
-`DeviceManagementConfiguration.ReadWrite.All`, `DeviceManagementScripts.ReadWrite.All`,
-`DeviceManagementApps.ReadWrite.All`, `DeviceManagementServiceConfig.ReadWrite.All`
+**3. Create an Entra ID app registration in the TARGET tenant** and grant admin consent for the
+four *Application* permissions in the [Requirements](#requirements) table — Application, not
+Delegated, and `ReadWrite`, not `Read`.
 
 **4. Give the script a credential** for that app registration.
 
@@ -48,6 +48,10 @@ $env:INTUNE_TENANT_ID     = '<target-tenant-guid>'
 $env:INTUNE_CLIENT_ID     = '<app-guid>'
 $env:INTUNE_CLIENT_SECRET = '<secret>'
 ```
+
+More than one tenant? Skip this step and put the credentials in a file instead — see
+[Several customers](#several-customers). A certificate is preferred over a secret — see
+[Certificate authentication](#certificate-authentication).
 
 **5. Check the token before writing anything.**
 
@@ -61,22 +65,26 @@ This step reads nothing, writes nothing and posts nothing.
 **6. Dry run, then for real.**
 
 ```powershell
+# Dry run. Contacts Graph only to read existing names; writes the report with whatIf: true
 ./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -WhatIf -Verbose
+
+# For real, one area at a time. -PlanPath is the dry run's report (a file, or the folder it
+# sits in - the newest usable one is chosen); a real run without it throws
 ./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -PlanPath ~/Import -Area 'Assignment-Filter'
+
+# The rest, once the first area looks right in the portal - same plan
+./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -PlanPath ~/Import -Verbose
 ```
 
-A real run **needs `-PlanPath`**: the report of the dry run, as a file or as the folder it sits
-in (the newest usable one is picked). Do the real run one area at a time, at least the first
-time. Both runs write an `_importreport_<stamp>.json` into the source folder; `whatIf` in it
-tells them apart.
-
-**More than one tenant?** Skip step 4 and put the credentials in a file instead — see
-[Several customers](#several-customers).
+A real run **needs `-PlanPath`**. Do the real run one area at a time, at least the first time.
+Both runs write an `_importreport_<stamp>.json` into the source folder, and `whatIf` in it tells
+them apart — see [Output](#output). What a real run asks you before it writes is in
+[How a run works](#how-a-run-works).
 
 ## Requirements
 
-**PowerShell 7.5 or later.** Ternary operators, null-coalescing and `ConvertFrom-Json -DateKind`. Developed on macOS 7.6.5,
-run against production tenants.
+**PowerShell 7.5 or later.** Ternary operators, null-coalescing and
+`ConvertFrom-Json -DateKind`. Developed on macOS 7.6.5, run against production tenants.
 
 No modules. Graph is called directly with `Invoke-RestMethod` — no SDK to install and no
 version to pin. `Microsoft.PowerShell.SecretManagement` is imported only on the path where a
@@ -95,14 +103,17 @@ own Create page:
 
 Application, not Delegated — client credentials ignores delegated permissions entirely.
 
-**A `Read` scope does not satisfy a `ReadWrite` requirement.** It works the other way around,
-and only that way: `ReadWrite` covers `Read`, because Graph emits only one of the two claims.
-An app registration built for the export will authenticate here and then 403 on the first POST.
+Two traps:
 
-**Assignment filters are the trap.** The export *reads* `assignmentFilters` with
-`DeviceManagementServiceConfig.Read.All`, but creating one needs
-`DeviceManagementConfiguration.ReadWrite.All`. The scope table in the script was read off the
-Create documentation for exactly this reason rather than derived from the export's read scopes.
+- **A `Read` scope does not satisfy a `ReadWrite` requirement.** It works the other way around,
+  and only that way: `ReadWrite` covers `Read`, because Graph emits only one of the two claims.
+  An app registration built for the export will authenticate here and then 403 on the first
+  POST.
+- **Assignment filters.** The export *reads* `assignmentFilters` with
+  `DeviceManagementServiceConfig.Read.All`, but creating one needs
+  `DeviceManagementConfiguration.ReadWrite.All`. The scope table in the script was read off the
+  Create documentation for exactly this reason rather than derived from the export's read
+  scopes.
 
 Microsoft moved the three script endpoints from `DeviceManagementConfiguration.*` to
 `DeviceManagementScripts.ReadWrite.All` on 2025-07-31. Older documentation says otherwise.
@@ -157,7 +168,8 @@ a numbered console menu elsewhere.
 
 **It is the same file, the same field names and the same four precedence rules as the export**,
 so one `customers.json` serves both scripts. Use the export's `customers.sample.json` as the
-template.
+template. Add the filled-in copy to `.gitignore`, and `chmod 600` it — the script warns if it
+is readable beyond its owner.
 
 ```powershell
 ./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import `
@@ -173,7 +185,7 @@ entire point of the script, so the run banner makes both sides visible instead:
 Source : /Users/you/Import
          (export 2026-08-20T09:14:00, Contoso AB / 1111-…)
 Target : Fabrikam AB  (4444-…)   WRITE
-Areas  : 14 folder(s), 18 file(s)
+Areas  : 14 of 14 folder(s) selected, 18 file(s)
 ```
 
 The source line is filled in from the export's `_manifest_*.json` if one is sitting in the
@@ -183,67 +195,6 @@ source folder, and costs no extra Graph call. Without a manifest it shows the pa
 `outputDirectory`. It is the data being imported, not a property of the target tenant, and
 letting a customer entry supply it would make "which folder am I about to push into this
 tenant" depend on which customer was picked.
-
-Add the filled-in copy to `.gitignore`, and `chmod 600` it — the script warns if it is readable
-beyond its owner.
-
-## Usage
-
-The order matters. Each step is cheap and rules out the failure the next one would hit.
-
-```powershell
-# 1. Unpack the export's sidecar archive first - run folders from 1.12.0 and later
-#    keep the area folders inside the zip
-Expand-Archive -Path './Contoso-AB_2026-08-20_0914_sidecars.zip' -DestinationPath ~/Import
-
-# 2. Permission check. Reads nothing, writes nothing, posts nothing
-./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -TestPermissionOnly
-
-# 3. Dry run. Contacts Graph only to read existing names; writes the report with whatIf: true
-./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -WhatIf -Verbose
-
-# 4. For real, one area at a time. -PlanPath is the dry run's report (a file, or the folder
-#    it sits in - the newest usable one is chosen); a real run without it throws
-./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -PlanPath ~/Import -Area 'Assignment-Filter'
-
-# 5. The rest, once the first area looks right in the portal - same plan
-./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -PlanPath ~/Import -Verbose
-```
-
-A real run prints the banner and asks once for confirmation before the first write. `-Force`
-skips the prompt, which is what a scheduled run needs; a non-interactive session with no
-`-Force` refuses to write and stops before anything is created, rather than blocking on a
-`Read-Host` nobody will answer. Pass `-Force` for unattended runs.
-
-`-ReportDirectory` moves the report somewhere other than the source folder. Use it when the
-source sits in OneDrive or Dropbox — see [Data sensitivity](#data-sensitivity).
-
-`-Force` only skips the one confirmation before the first write; it does not turn off
-`ShouldProcess`. `-Force -Confirm` therefore still prompts once per object, and an answer of No
-is recorded as `declined` (a `-WhatIf` run records `whatif`).
-
-### The plan
-
-`-PlanPath` binds a real run to a dry run. It takes the `_importreport_*.json` of a `-WhatIf`
-run, or a folder, in which case the newest report in it that is a `-WhatIf` report for the
-same target tenant is used. The banner names the report that was chosen. The run is refused,
-before the confirmation prompt and before anything is written, when the plan:
-
-- is not a `-WhatIf` report (`whatIf: true`), or was made against another tenant than the
-  token's, or has `schemaVersion` below 2 (older reports carry no file hashes);
-- cannot be found in the folder at all — the message is "run `-WhatIf` first".
-
-A file is created only if the plan listed it as `whatif` **with the same area, file name and
-SHA-256 of its content**. Any other file — added since, edited since, or shown as something
-else in the plan — gets the status `not-in-plan`, a warning, and a count in `totals.notInPlan`;
-the run carries on with the rest. The plan decides what *may* be created, `-Area` what is
-created *now*: `-Area` can only narrow the selection, so one dry run over the whole source can
-be followed by a real run per area against the same plan. There is no maximum age; the content
-hash and the name check against the tenant are what keep a stale plan from doing harm.
-`-WhatIf` and `-TestPermissionOnly` need no plan.
-
-**Scheduled runs:** run `-WhatIf` first, then `-Force -PlanPath <that report>`. A scheduled
-real run without a plan throws before anything is created.
 
 ## The hard requirement
 
@@ -268,9 +219,52 @@ Two consequences that follow from the same constraint:
   service has already created the policy, so replaying it would create a second copy. 429 means
   the request was rejected before it was processed, which makes it the one status that is safe.
   `GET` keeps the export's wider retry set.
-- **One confirmation, before the first write, not one per object.** `ConfirmImpact = 'High'`
-  would ask eighteen times, and an operator clicking through eighteen prompts has stopped
-  reading by the third.
+- **One confirmation, before the first write, not one per object.** See
+  [How a run works](#how-a-run-works) and [Design notes](#design-notes).
+
+## How a run works
+
+A dry run, a plan, one confirmation, then a report.
+
+1. **`-WhatIf`** reads the existing names once per area, writes nothing, and writes the report
+   with `whatIf: true`.
+2. **`-PlanPath`** binds the real run to that report; see [The plan](#the-plan).
+3. **One confirmation.** A real run prints the banner and asks once, before the first write.
+   `-Force` skips that prompt, which is what a scheduled run needs; interactive runs should not
+   use it. A non-interactive session with no `-Force` refuses to write and stops before
+   anything is created, rather than blocking on a `Read-Host` nobody will answer.
+   `-Force` only skips this one prompt; it does not turn off `ShouldProcess`. `-Force -Confirm`
+   therefore still prompts once per object, and an answer of No is recorded as `declined` (a
+   `-WhatIf` run records `whatif`).
+4. **The report** is written whatever happens next; see [Output](#output). `-ReportDirectory`
+   moves it somewhere other than the source folder — use it when the source sits in OneDrive
+   or Dropbox, see [Data sensitivity](#data-sensitivity).
+
+**Scheduled runs:** run `-WhatIf` first, then `-Force -PlanPath <that report>`. A scheduled
+real run without a plan throws before anything is created.
+
+### The plan
+
+`-PlanPath` binds a real run to a dry run. It takes the `_importreport_*.json` of a `-WhatIf`
+run, or a folder, in which case the newest report in it that is a `-WhatIf` report for the
+same target tenant is used. The banner names the report that was chosen. The run is refused,
+before the confirmation prompt and before anything is written, when the plan:
+
+- is not a `-WhatIf` report (`whatIf: true`), or was made against another tenant than the
+  token's, or has `schemaVersion` below 2 (older reports carry no file hashes);
+- cannot be found in the folder at all — the message is "run `-WhatIf` first".
+
+A file is created only if the plan listed it as `whatif` **with the same area, file name and
+SHA-256 of its content**. Any other file — added since, edited since, or shown as something
+else in the plan — gets the status `not-in-plan`, a warning, and a count in `totals.notInPlan`;
+the run carries on with the rest.
+
+- The plan decides what *may* be created, `-Area` what is created *now*. `-Area` can only
+  narrow the selection, so one dry run over the whole source can be followed by a real run per
+  area against the same plan.
+- There is no maximum age; the content hash and the name check against the tenant are what
+  keep a stale plan from doing harm.
+- `-WhatIf` and `-TestPermissionOnly` need no plan.
 
 ## What it covers
 
@@ -298,13 +292,38 @@ the script so a run reports them with the reason rather than leaving you wonderi
 was ignored — see [Known limitations](#known-limitations).
 
 A sidecar is a record of what a policy looked like, not a request body. Three things happen to
-each file before it is posted: the service-owned properties are stripped, the double-wrapped
-`settings` array written by exports before 1.11.0 is flattened, and the required properties are
-checked up front so a file that cannot produce a valid policy is reported rather than
-half-created.
+each file before it is posted:
+
+- the service-owned properties are stripped;
+- the double-wrapped `settings` array written by exports before 1.11.0 is flattened;
+- the required properties are checked up front, so a file that cannot produce a valid policy is
+  reported rather than half-created.
 
 Duplicates are handled by reading the existing display names once per area. A file whose name
 matches something already in the target tenant is skipped and reported.
+
+## Parameters
+
+Read off the script's `param()` block. The script also supports the common `-WhatIf`,
+`-Confirm` and `-Verbose`.
+
+| Parameter | Type | Default | Purpose |
+|---|---|---|---|
+| `-SourceDirectory` | string, **required** | — | Folder containing the area sub-folders to import from. Must exist. Never read from the customer file. |
+| `-PlanPath` | string | — | The `-WhatIf` report a real run is bound to: a file, or a folder (newest usable report is chosen). **A real run throws without it**; `-WhatIf` and `-TestPermissionOnly` need none. See [The plan](#the-plan). |
+| `-Area` | string[] | empty = every folder found | Restrict the run to one or more area folders. Narrows the plan, never widens it. |
+| `-WhatIf` | switch | — | Dry run: reads existing names, creates nothing, writes the report with `whatIf: true`. |
+| `-TestPermissionOnly` | switch | — | Decode the token, report tenant, roles and the areas present in the source that it cannot create, then exit. Reads nothing and writes nothing. |
+| `-Force` | switch | — | Skip the one confirmation before the first write. See [How a run works](#how-a-run-works). |
+| `-ReportDirectory` | string | the source folder | Where the report is written. Must exist. Use it when the source is synchronised; see [Data sensitivity](#data-sensitivity). |
+| `-TenantId` | string | `INTUNE_TENANT_ID` | Target tenant. |
+| `-ClientId` | string | `INTUNE_CLIENT_ID` | App registration client ID. |
+| `-ClientSecret` | string | `INTUNE_CLIENT_SECRET` | App registration secret. Prefer the variable. |
+| `-CertificateThumbprint` | string | `INTUNE_CERT_THUMBPRINT` | Certificate in the CurrentUser store. |
+| `-CertificatePath` | string | `INTUNE_CERT_PATH` | PFX file on disk. |
+| `-CertificatePassword` | SecureString | `INTUNE_CERT_PASSWORD` | PFX password; see [Certificate authentication](#certificate-authentication). |
+| `-CustomerConfigPath` | string | — | Local JSON file with per-customer credentials; the customer selected is the **target**. See [Several customers](#several-customers). |
+| `-CustomerName` | string | — | Picks the target customer without prompting. Without it the run prompts; a non-interactive session stops instead. |
 
 ## Output
 
@@ -356,19 +375,18 @@ folder is not writable) the run stops with nothing created.
 }
 ```
 
-`totals` is built from a fixed key list, not from `Group-Object`. A status that did not occur
-reads as `0` rather than being absent, because "no rows" and "did not happen" are different
-states and both have to be legible without interpreting the warning stream.
-
-`runComplete` and `abortReason` are what tell an aborted run from a finished one. `detail`
-carries the reason a row got the status it has — for a failure, Graph's own `code` and
-`message`. `createdId` is its own field so `detail` never has to be both.
-
-A row is written *before* its POST leaves, as `indeterminate`, and becomes `created` or `failed`
-when the answer arrives. That is what lets an interrupted run (Ctrl+C, `runComplete: false`,
-`abortReason` saying so) still name the object that was in flight. A re-run is safe once the
-object is listable in the tenant, because the name check will then skip it; the name stays taken
-for the rest of the run, so a second file with the same name is not posted meanwhile.
+- `totals` is built from a fixed key list, not from `Group-Object`. A status that did not occur
+  reads as `0` rather than being absent, because "no rows" and "did not happen" are different
+  states and both have to be legible without interpreting the warning stream.
+- `runComplete` and `abortReason` are what tell an aborted run from a finished one.
+- `detail` carries the reason a row got the status it has — for a failure, Graph's own `code`
+  and `message`. `createdId` is its own field so `detail` never has to be both.
+- A row is written *before* its POST leaves, as `indeterminate`, and becomes `created` or
+  `failed` when the answer arrives. That is what lets an interrupted run (Ctrl+C,
+  `runComplete: false`, `abortReason` saying so) still name the object that was in flight. A
+  re-run is safe once the object is listable in the tenant, because the name check will then
+  skip it; the name stays taken for the rest of the run, so a second file with the same name
+  is not posted meanwhile.
 
 | `status` | Meaning |
 |---|---|
@@ -387,26 +405,19 @@ for the rest of the run, so a second file with the same name is not posted meanw
 
 ## Error semantics
 
-**403** means a missing scope for that one area. Intune names the scope it wants. When it
-comes on the area's name check, the script records one `blocked` row for the area and moves on
-to the next — not one row per file, since every file in it would fail identically. When it
-only comes on a POST, the `blocked` row names the file that was refused, every file after it in
-the area gets a `not-attempted` row, and the run moves on: a 403 can also be about one object,
-and the files before it may already have been created.
+| Error | What the script does |
+|---|---|
+| **403** on an area's name check | One `blocked` row for the area, no file named — every file in it would fail identically — then the next area. Intune names the scope it wants. |
+| **403** on a POST | The `blocked` row names the file that was refused, every file after it in the area gets a `not-attempted` row, and the run moves on. A 403 can also be about one object, and the files before it may already have been created. |
+| **Any other error** reading an area's existing names (a 400, a 5xx that outlasts the retries) | Skips that area with one `failed` row and goes on to the next. Nothing is posted into an area whose names could not be read, since there would be no duplicate check. |
+| **401** | Global: the token itself is not accepted. One automatic refresh covers a genuinely stale token; a second 401 aborts the run. The report is still written, with `runComplete: false`. |
+| **401 with a generic message that names no scope** | Not a permission problem; see below. |
+| **400** | The report gets the full response body; see below. |
 
-**Any other error reading an area's existing names** (a 400, a 5xx that outlasts the retries)
-skips that area with one `failed` row and goes on to the next. Nothing is posted into an area
-whose names could not be read, since there would be no duplicate check.
-
-**401** is global: the token itself is not accepted. One automatic refresh covers a genuinely
-stale token; a second 401 aborts the run. The report is still written, with
-`runComplete: false`.
-
-**401 with a generic message that names no scope** is not a permission problem at all. Graph
-wraps an Intune-side rejection this way, and on a developer tenant it usually means an expired
-Intune licence: Entra ID keeps working, `/groups` answers fine, and every `deviceManagement`
-endpoint returns 401 no matter who asks. Check `GET /v1.0/subscribedSkus` before touching the
-app registration.
+**A 401 that names no scope** is not a permission problem at all. Graph wraps an Intune-side
+rejection this way, and on a developer tenant it usually means an expired Intune licence: Entra
+ID keeps working, `/groups` answers fine, and every `deviceManagement` endpoint returns 401 no
+matter who asks. Check `GET /v1.0/subscribedSkus` before touching the app registration.
 
 **400** is the interesting one, and the reason `Get-GraphErrorDetail` exists. `Invoke-RestMethod`
 puts the response body in `ErrorDetails.Message` and its own exception says only
@@ -438,15 +449,15 @@ to be forked to unpack an Intune-internal blob.
 - **Template-bound Settings Catalog policies may not be portable.** A policy whose
   `templateReference.templateFamily` is anything other than `none` — security baselines, and
   Endpoint Security in the newer `configurationPolicies` model — is validated against the
-  *target* tenant's revision of that template. Every setting carries a
-  `settingInstanceTemplateReference`, and one the target does not recognise fails the whole
-  POST, not just that setting. Measured: a Windows 11 baseline of 326 settings rejected on a
-  single reference, `deviceguard_machineidentityisolation`. This is the same problem that makes
-  `Endpoint-Security-Intent` unimportable, except it arrives in an area folder that looks
-  ordinary. Stripping the template references would create the policy as a plain configuration
-  profile instead of a baseline — a different object in a different part of the portal — so the
-  script does not do it silently. The script warns before the POST when it sees one.
-
+  *target* tenant's revision of that template.
+  - Every setting carries a `settingInstanceTemplateReference`, and one the target does not
+    recognise fails the whole POST, not just that setting. Measured: a Windows 11 baseline of
+    326 settings rejected on a single reference, `deviceguard_machineidentityisolation`.
+  - This is the same problem that makes `Endpoint-Security-Intent` unimportable, except it
+    arrives in an area folder that looks ordinary.
+  - Stripping the template references would create the policy as a plain configuration profile
+    instead of a baseline — a different object in a different part of the portal — so the
+    script does not do it silently. The script warns before the POST when it sees one.
 - **The three script areas are not importable yet, and that is the export's gap.** The
   collection GET returns an empty `scriptContent` / `detectionScriptContent`, and those areas
   have no `DetailResourceFormat` in the export's `$policyDefinitions`, so nothing ever fetches
@@ -468,11 +479,12 @@ to be forked to unpack an Intune-internal blob.
   second, writing call and is not done.
 - **Compliance notification templates are not carried over.** A scheduled action's
   `notificationTemplateId` points at a template in the source tenant. It is cleared, with a
-  warning naming the policy, so no notification is sent until a template is chosen in the portal.
+  warning naming the policy, so no notification is sent until a template is chosen in the
+  portal.
 - **Device configuration profiles with secrets are rejected as `invalid`.** An encrypted OMA-URI
-  value (`isEncrypted: true`) or a `secretReferenceValueId` is masked or referenced to the source
-  tenant in the export, so posting it would fail or create a profile with a placeholder instead
-  of the secret. Create those in the portal.
+  value (`isEncrypted: true`) or a `secretReferenceValueId` is masked or referenced to the
+  source tenant in the export, so posting it would fail or create a profile with a placeholder
+  instead of the secret. Create those in the portal.
 - **Everything is created unassigned.** Assignments are never imported.
 - **File order is ordinal, and `._*` files are skipped.** Folders and files are processed in
   byte order of their names, the same on every host, because the order decides which of two
@@ -480,8 +492,8 @@ to be forked to unpack an Intune-internal blob.
   that SMB and exFAT shares add are ignored. Without `-CustomerName` a non-interactive session
   stops instead of asking which customer to use.
 - **The duplicate check is name-based.** Names are compared case-insensitively after trimming
-  surrounding whitespace and normalising Unicode to NFC; the name that is posted is unchanged. An object renamed in the
-  target tenant is not recognised and gets created a second time.
+  surrounding whitespace and normalising Unicode to NFC; the name that is posted is unchanged.
+  An object renamed in the target tenant is not recognised and gets created a second time.
 - **No updates.** Creation only. A name that already exists is skipped, never patched — there
   is no `PATCH` path and no rollback.
 - **Beta endpoints throughout.** Required for remediations, shell scripts and driver update
@@ -506,7 +518,17 @@ a synchronised source folder means in Contoso's OneDrive.
 That is the same sensitivity class as the export's own output. Use `-ReportDirectory` to send
 the report somewhere that belongs to the target customer, or somewhere that belongs to neither.
 
-## On the code itself
+## Design notes
+
+Why the script is shaped the way it is. Nothing here is needed to run it.
+
+### One confirmation, not one per object
+
+`ConfirmImpact = 'High'` would ask eighteen times, and an operator clicking through eighteen
+prompts has stopped reading by the third. One gate before the first write, after the banner
+that shows both sides, is the one an operator actually reads.
+
+### On the code itself
 
 This was written with heavy AI assistance, over days rather than a long slow burn. Worth saying
 plainly rather than leaving to be discovered.
