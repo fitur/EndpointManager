@@ -507,6 +507,9 @@ against a tenant you care about, and start with `-TestPermissionOnly` and `-What
   (201) but protects or configures no app until `targetApps` is set in the portal. The script
   warns once per created policy in those areas. Setting the apps from the script would be a
   second, writing call and is not done.
+- **Compliance notification templates are not carried over.** A scheduled action's
+  `notificationTemplateId` points at a template in the source tenant. It is cleared, with a
+  warning naming the policy, so no notification is sent until a template is chosen in the portal.
 - **Everything is created unassigned.** Assignments are never imported.
 - **The duplicate check is name-based.** Names are compared case-insensitively after trimming
   surrounding whitespace and normalising Unicode to NFC; the name that is posted is unchanged. An object renamed in the

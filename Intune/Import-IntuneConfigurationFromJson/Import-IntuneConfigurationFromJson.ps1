@@ -973,7 +973,14 @@ function ConvertTo-CreationBody {
             $rule.Remove('id')
             if (-not $rule.ContainsKey('scheduledActionConfigurations')) { continue }
             foreach ($action in @($rule['scheduledActionConfigurations'])) {
-                if ($action -is [System.Collections.IDictionary]) { $action.Remove('id') }
+                if ($action -isnot [System.Collections.IDictionary]) { continue }
+                $action.Remove('id')
+                # A notification template lives in the SOURCE tenant; its id means nothing here.
+                $templateId = $action.ContainsKey('notificationTemplateId') ? [string]$action['notificationTemplateId'] : ''
+                if (-not [string]::IsNullOrWhiteSpace($templateId) -and $templateId -ne [guid]::Empty.ToString()) {
+                    Write-Warning ('Compliance policy "{0}": notification template {1} belongs to the source tenant and was cleared - no notification will be sent until one is chosen in the portal.' -f $body['displayName'], $templateId)
+                    $action['notificationTemplateId'] = ''
+                }
             }
         }
     }
