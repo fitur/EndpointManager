@@ -508,8 +508,9 @@ against a tenant you care about, and start with `-TestPermissionOnly` and `-What
   warns once per created policy in those areas. Setting the apps from the script would be a
   second, writing call and is not done.
 - **Everything is created unassigned.** Assignments are never imported.
-- **The duplicate check is name-based.** An object renamed in the target tenant is not
-  recognised and gets created a second time.
+- **The duplicate check is name-based.** Names are compared case-insensitively after trimming
+  surrounding whitespace and normalising Unicode to NFC; the name that is posted is unchanged. An object renamed in the
+  target tenant is not recognised and gets created a second time.
 - **No updates.** Creation only. A name that already exists is skipped, never patched — there
   is no `PATCH` path and no rollback.
 - **Beta endpoints throughout.** Required for remediations, shell scripts and driver update

@@ -1068,6 +1068,17 @@ function Resolve-ImportPlan {
         $item.FullName, ($rejected.Count -gt 0 ? ([System.Environment]::NewLine + ($rejected -join [System.Environment]::NewLine)) : ''))
 }
 
+function Get-NameKey {
+    # The duplicate check compares this, never the raw name. Trim and NFC make the check
+    # stricter - a name typed on macOS in NFD, or with a stray space, now matches the tenant's
+    # NFC one - so it can only report more duplicates, never fewer. The name that is POSTed is
+    # not changed.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowEmptyString()][string]$Name)
+    return $Name.Trim().Normalize([System.Text.NormalizationForm]::FormC)
+}
+
 function Get-ExistingName {
     <#
         One call per area rather than one per file: a tenant has at most a few hundred
@@ -1100,7 +1111,7 @@ function Get-ExistingName {
                 # A name is always a scalar string, so the unrolling caveat above does not apply.
                 $name = [string](Get-ObjectProperty -InputObject $item -Name $NameProperty)
                 if (-not [string]::IsNullOrWhiteSpace($name)) {
-                    [void]$names.Add($name)
+                    [void]$names.Add((Get-NameKey -Name $name))
                 }
             }
         }
@@ -1520,6 +1531,7 @@ try {
 
         foreach ($file in $files) {
             $displayName = ''
+            $nameKey = ''
             $fileHash = ''
             $pendingRow = $null
             try {
@@ -1532,6 +1544,7 @@ try {
 
                 $body = ConvertTo-CreationBody -Sidecar $sidecar -Definition $definition -AreaName $areaName
                 $displayName = $body.ContainsKey($definition.NameProperty) ? [string]$body[$definition.NameProperty] : ''
+                $nameKey = Get-NameKey -Name $displayName
 
                 $problem = Test-CreationBody -Body $body -Definition $definition
                 if ($problem) {
@@ -1540,7 +1553,7 @@ try {
                     continue
                 }
 
-                if ($existing.Contains($displayName)) {
+                if ($existing.Contains($nameKey)) {
                     Write-Verbose ('{0}: "{1}" already exists in the tenant, skipping.' -f $areaName, $displayName)
                     Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'duplicate' -Detail 'a policy with this name already exists' -Sha256 $fileHash
                     continue
@@ -1559,7 +1572,7 @@ try {
                 if (-not $PSCmdlet.ShouldProcess(('{0} "{1}"' -f $areaName, $displayName), 'Create in tenant')) {
                     # Claimed in the dry run too, so a second file with the same name shows as
                     # 'duplicate' here exactly as it will in the real run.
-                    [void]$existing.Add($displayName)
+                    [void]$existing.Add($nameKey)
                     Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status ($WhatIfPreference ? 'whatif' : 'declined') -Detail $definition.Resource -Sha256 $fileHash
                     continue
                 }
@@ -1574,7 +1587,7 @@ try {
                 Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'indeterminate' `
                     -Detail 'POST sent, no response recorded' -Sha256 $fileHash
                 $pendingRow = $results[$results.Count - 1]
-                [void]$existing.Add($displayName)
+                [void]$existing.Add($nameKey)
 
                 $created = Invoke-GraphRequest -Uri $targetUri -Method 'POST' -Body $json
                 $pendingRow.Status = 'created'
@@ -1631,7 +1644,7 @@ try {
                 # 408 is a request timeout, which can follow a processed request: not a refusal.
                 if ($statusCode -ge 400 -and $statusCode -lt 500 -and $statusCode -ne 408) {
                     $pendingRow.Status = 'failed'
-                    [void]$existing.Remove($displayName)
+                    [void]$existing.Remove($nameKey)
                 }
                 $pendingRow.Detail = $message
                 Write-Warning ('{0}: {1} - {2}' -f $file.Name, $pendingRow.Status, $message)
