@@ -40,9 +40,9 @@
       Application                         needs content upload, not a JSON body
 
 .NOTES
-    Version:        1.1.1
+    Version:        1.2.0
     Creation Date:  2026-09-01
-    Last Updated:   2026-09-01
+    Last Updated:   2026-11-02
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -71,6 +71,39 @@
     This writes to a customer tenant. Run it with -WhatIf first, every time.
 
     CHANGELOG
+
+        1.2.0 - 2026-11-02
+            BREAKING: a real run now needs -PlanPath. Without it the script throws before
+            anything is created. A -WhatIf or -TestPermissionOnly run is unchanged. The import
+            report's schemaVersion is 2: every file row carries sha256, and there are four new
+            statuses (indeterminate, not-in-plan, declined, not-attempted) with matching totals
+            keys. The report file name has seconds: _importreport_yyyy-MM-dd_HHmmss.json.
+
+            Hard requirement, now enforced in code. -PlanPath takes a -WhatIf report, or a
+            folder, in which case the newest usable one is chosen. A real run creates only the
+            files that report listed as 'whatif' with the same area, file name and SHA-256 of
+            the content, against the same tenant; any other file is 'not-in-plan'. The file is
+            read once, so the hash and the posted body are the same bytes.
+
+            Nothing is created that cannot be accounted for in the report:
+              - the report file is reserved (CreateNew) before the first POST, so two runs
+                cannot overwrite each other and an unwritable folder stops the run with nothing
+                created; a failed write in 'finally' falls back to the temp folder
+              - each POST has its row written first, as 'indeterminate'; it becomes 'created'
+                or 'failed' on the answer. A timeout, a 5xx or Ctrl+C leaves it indeterminate
+                (the object may exist) and its name stays taken for the run. abortReason says
+                so after a Ctrl+C
+              - a non-interactive session without -Force refuses to write instead of warning
+              - -WhatIf simulates in-run duplicates, so the plan matches the run row for row
+              - a 403 on a POST names the refused file and reports the rest of the area as
+                'not-attempted'; a No to -Confirm is 'declined', not 'whatif'
+
+            Also: one area folder in the source no longer crashes the run; a failed name read
+            skips the area instead of aborting; Retry-After is capped at 300 s (POST is still
+            retried on 429 only); user-supplied paths use -LiteralPath; an empty 'settings' or
+            scheduledActionsForRule is treated as missing; app protection/config policies warn
+            that they have no target apps; PSScriptAnalyzer is clean (two findings suppressed
+            with a reason; New-ClientAssertion's copy here only, see SHARED CODE).
 
         1.1.1 - 2026-09-01
             Fixes from the first real run. No new parameter, no changed parameter.
@@ -1654,7 +1687,7 @@ finally {
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
         timeZone           = [System.TimeZoneInfo]::Local.Id
-        scriptVersion      = '1.1.1'
+        scriptVersion      = '1.2.0'
         whatIf             = [bool]$WhatIfPreference
         targetTenantId     = $tokenTenantId
         targetCustomerName = $script:TargetCustomerName
