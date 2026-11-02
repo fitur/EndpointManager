@@ -302,10 +302,17 @@ if ($CustomerConfigPath) {
     # Warn when the file is readable by more than its owner. UnixMode is not populated on Windows.
     if (-not $IsWindows) {
         $configItem = Get-Item -LiteralPath $customerConfigResolved
+        # A symlink's own mode is always lrwxr-xr-x; the file that holds the secrets is its target.
+        if ($null -ne $configItem.ResolvedTarget -and $configItem.ResolvedTarget -ne $configItem.FullName) {
+            $configItem = Get-Item -LiteralPath $configItem.ResolvedTarget
+        }
         if ($configItem.PSObject.Properties.Name -contains "UnixMode" -and
             $configItem.UnixMode.Substring(4) -match '[rwx]') {
-            Write-Warning "'$customerConfigResolved' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$customerConfigResolved'"
+            Write-Warning "'$($configItem.FullName)' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$($configItem.FullName)'"
         }
+    }
+    else {
+        Write-Verbose 'Windows: the access rights on the customer config file are not checked - keep it in a folder only you can read.'
     }
 
     try {
