@@ -726,6 +726,7 @@ function Invoke-GraphRequest {
         catch [System.Exception] {
             $statusCode = 0
             $retryAfterSeconds = $null
+            $retryAfterCapped = $false
             $detail = Get-GraphErrorDetail -ErrorRecord $PSItem
 
             $response = $PSItem.Exception.PSObject.Properties['Response']
@@ -733,11 +734,18 @@ function Invoke-GraphRequest {
                 $statusCode = [int]$response.Value.StatusCode
                 $retryHeader = $response.Value.Headers.RetryAfter
                 if ($null -ne $retryHeader) {
+                    $headerSeconds = $null
                     if ($null -ne $retryHeader.Delta) {
-                        $retryAfterSeconds = [int]$retryHeader.Delta.TotalSeconds
+                        $headerSeconds = $retryHeader.Delta.TotalSeconds
                     }
                     elseif ($null -ne $retryHeader.Date) {
-                        $retryAfterSeconds = [int]([datetimeoffset]$retryHeader.Date - [datetimeoffset]::UtcNow).TotalSeconds
+                        $headerSeconds = ([datetimeoffset]$retryHeader.Date - [datetimeoffset]::UtcNow).TotalSeconds
+                    }
+                    if ($null -ne $headerSeconds) {
+                        # Capped before the [int] cast: an absurd value would overflow it and throw
+                        # from inside this catch block.
+                        $retryAfterCapped = $headerSeconds -gt 300
+                        $retryAfterSeconds = [int][math]::Min($headerSeconds, 300)
                     }
                 }
             }
@@ -777,6 +785,7 @@ function Invoke-GraphRequest {
 
             # Retry-After wins over backoff: Graph knows the actual throttle window, we don't.
             $delay = $retryAfterSeconds ?? [int][math]::Min([math]::Pow(2, $attempt), 60)
+            if ($retryAfterCapped) { Write-Warning 'Retry-After exceeds 300s - waiting 300s instead.' }
             Write-Warning ('Graph {0} on attempt {1}/{2}, waiting {3}s: {4}' -f $statusCode, $attempt, $MaxAttempt, $delay, $Uri)
             Start-Sleep -Seconds ([math]::Max($delay, 1))
         }
