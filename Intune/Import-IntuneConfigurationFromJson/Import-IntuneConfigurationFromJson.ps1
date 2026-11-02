@@ -348,6 +348,11 @@ if ($CustomerConfigPath) {
         $customerNames = $customers | ForEach-Object { $_["name"] }
         $customer      = $null
 
+        # Nobody to ask: stop here instead of hanging in Read-Host or throwing from it.
+        if (-not ([Environment]::UserInteractive -and -not [System.Console]::IsInputRedirected)) {
+            throw "No -CustomerName given and the session is not interactive, so the customer cannot be chosen. Available: $($customerNames -join ', ')"
+        }
+
         # Native picker on macOS, console menu everywhere else and on cancel/failure
         if ($IsMacOS) {
             $quotedNames  = ($customerNames | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ", "
@@ -1117,6 +1122,28 @@ function Get-DisplayText {
     return [regex]::Replace($Text, '\p{Cc}', '')
 }
 
+function Get-OrdinalSortedItem {
+    # Sort-Object -Property Name follows the host's culture, so two machines can disagree on
+    # the order of the same folder - and the order decides which of two same-named files wins.
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param([AllowEmptyCollection()][object[]]$Item)
+    $sorted = [System.Collections.Generic.List[object]]::new(@($Item))
+    $sorted.Sort([Comparison[object]]{ param($x, $y) [string]::CompareOrdinal($x.Name, $y.Name) })
+    return $sorted.ToArray()
+}
+
+function Get-SidecarFile {
+    # One definition of "the files of an area", used by the banner count and by the loop. The
+    # '._' files are AppleDouble resource forks that SMB and exFAT shares add next to every
+    # real file; they are not JSON and would only show up as failed rows.
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param([Parameter(Mandatory)][string]$Path)
+    $found = @(Get-ChildItem -LiteralPath $Path -File -Filter '*.json' | Where-Object { -not $PSItem.Name.StartsWith('._') })
+    return Get-OrdinalSortedItem -Item $found
+}
+
 function Get-NameKey {
     # The duplicate check compares this, never the raw name. Trim and NFC make the check
     # stricter - a name typed on macOS in NFD, or with a stray space, now matches the tenant's
@@ -1329,7 +1356,7 @@ if ($useCertificate) {
 
 $sourceDirectoryResolved = (Resolve-Path -LiteralPath $SourceDirectory).Path
 
-$folders = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -Directory | Sort-Object -Property Name)
+$folders = @(Get-OrdinalSortedItem -Item @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -Directory))
 if ($folders.Count -eq 0) {
     throw ('No area sub-folders in "{0}". Copy the export''s area folders, not loose JSON files. If this is an export run folder from 1.12.0 or later, unpack <Tenant>_<stamp>_sidecars.zip first - the area folders live inside the archive.' -f $sourceDirectoryResolved)
 }
@@ -1397,8 +1424,7 @@ foreach ($blocked in $blockedAreas) {
 $script:SourceTenantId = ''
 $script:SourceTenantName = ''
 $script:SourceRun = ''
-$sourceManifest = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -File -Filter '_manifest_*.json' |
-    Sort-Object -Property Name)
+$sourceManifest = @(Get-OrdinalSortedItem -Item @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -File -Filter '_manifest_*.json'))
 if ($sourceManifest.Count -gt 0) {
     try {
         $manifestData = Get-Content -LiteralPath $sourceManifest[-1].FullName -Raw -Encoding utf8 | ConvertFrom-Json
@@ -1446,7 +1472,7 @@ foreach ($folder in $folders) {
 # The banner describes what will actually be attempted: -Area, the unsupported list and
 # unknown folder names all applied.
 $selectedFolders = @($folders | Where-Object { $folderClass[$PSItem.Name] -eq 'selected' })
-$selectedFileCount = @($selectedFolders | ForEach-Object { Get-ChildItem -LiteralPath $PSItem.FullName -File -Filter '*.json' }).Count
+$selectedFileCount = @($selectedFolders | ForEach-Object { Get-SidecarFile -Path $PSItem.FullName }).Count
 $sourceLabel = 'no export manifest'
 if ($script:SourceTenantId -or $script:SourceRun) {
     $sourceLabel = 'export {0}, {1} / {2}' -f $script:SourceRun, (Get-DisplayText -Text $script:SourceTenantName), $script:SourceTenantId
@@ -1550,7 +1576,7 @@ try {
         }
 
         $definition = $script:AreaMap[$areaName]
-        $files = @(Get-ChildItem -LiteralPath $folder.FullName -File -Filter '*.json' | Sort-Object -Property Name)
+        $files = @(Get-SidecarFile -Path $folder.FullName)
         if ($files.Count -eq 0) {
             Write-Verbose ('{0}: no JSON files.' -f $areaName)
             continue
@@ -1748,12 +1774,19 @@ finally {
         if ($statusKeyByStatus.Contains($row.Status)) { $totals[$statusKeyByStatus[$row.Status]]++ }
     }
 
+    # Windows reports its own ids ("W. Europe Standard Time"); the export's convention is IANA.
+    $reportTimeZone = [System.TimeZoneInfo]::Local.Id
+    $ianaTimeZone = $null
+    if ($IsWindows -and [System.TimeZoneInfo]::TryConvertWindowsIdToIanaId($reportTimeZone, [ref]$ianaTimeZone)) {
+        $reportTimeZone = $ianaTimeZone
+    }
+
     $report = [ordered]@{
         schemaVersion      = 2
         runTimestampUtc    = $runUtc.ToString('o')
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
-        timeZone           = [System.TimeZoneInfo]::Local.Id
+        timeZone           = $reportTimeZone
         scriptVersion      = '1.2.0'
         whatIf             = [bool]$WhatIfPreference
         targetTenantId     = $tokenTenantId

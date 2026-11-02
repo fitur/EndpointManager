@@ -515,6 +515,11 @@ against a tenant you care about, and start with `-TestPermissionOnly` and `-What
   tenant in the export, so posting it would fail or create a profile with a placeholder instead
   of the secret. Create those in the portal.
 - **Everything is created unassigned.** Assignments are never imported.
+- **File order is ordinal, and `._*` files are skipped.** Folders and files are processed in
+  byte order of their names, the same on every host, because the order decides which of two
+  files with the same policy name is created and which is a duplicate. `._*` AppleDouble files
+  that SMB and exFAT shares add are ignored. Without `-CustomerName` a non-interactive session
+  stops instead of asking which customer to use.
 - **The duplicate check is name-based.** Names are compared case-insensitively after trimming
   surrounding whitespace and normalising Unicode to NFC; the name that is posted is unchanged. An object renamed in the
   target tenant is not recognised and gets created a second time.
