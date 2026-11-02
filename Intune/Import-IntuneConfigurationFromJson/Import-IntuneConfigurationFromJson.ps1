@@ -64,6 +64,10 @@
     over it, or its copy over this one, silently changes behaviour in a credential path.
     Change the copy you are actually working on, and record what you changed here.
 
+    Changed in THIS file's copy only: New-ClientAssertion carries a SuppressMessage for
+    PSUseShouldProcessForStateChangingFunctions (1.2.0). Adding ShouldProcess instead would
+    break the token request under -WhatIf. The export and win32 copies are untouched.
+
     This writes to a customer tenant. Run it with -WhatIf first, every time.
 
     CHANGELOG
@@ -609,6 +613,9 @@ function ConvertTo-Base64Url {
 
 function New-ClientAssertion {
     [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'It only builds and signs a string. ShouldProcess would return false under -WhatIf, no assertion would be built and the token request that a dry run needs would fail.')]
     [OutputType([string])]
     param(
         [Parameter(Mandatory)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
@@ -1027,6 +1034,9 @@ function Get-ExistingName {
         policies per area, and the duplicate check is the only reason we read at all.
     #>
     [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseOutputTypeCorrectly', '',
+        Justification = 'False positive: the comma guard on the return wraps the HashSet in an Object[], which PowerShell unrolls on the way out, so the caller receives the HashSet.')]
     [OutputType([System.Collections.Generic.HashSet[string]])]
     param(
         [Parameter(Mandatory)][string]$Resource,
