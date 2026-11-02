@@ -334,7 +334,7 @@ folder is not writable) the run stops with nothing created.
   "runTimestampLocal": "2026-09-01T12:04:54",
   "utcOffset": "02:00:00",
   "timeZone": "Europe/Stockholm",
-  "scriptVersion": "1.2.0",
+  "scriptVersion": "1.3.0",
   "whatIf": true,
   "targetTenantId": "4444-…",
   "targetCustomerName": "Fabrikam AB",

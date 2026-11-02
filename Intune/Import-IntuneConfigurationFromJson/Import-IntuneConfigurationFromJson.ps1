@@ -40,7 +40,7 @@
       Application                         needs content upload, not a JSON body
 
 .NOTES
-    Version:        1.2.0
+    Version:        1.3.0
     Creation Date:  2026-09-01
     Last Updated:   2026-11-02
     Author:         Peter Olausson
@@ -71,6 +71,33 @@
     This writes to a customer tenant. Run it with -WhatIf first, every time.
 
     CHANGELOG
+
+        1.3.0 - 2026-11-02
+            Follow-up to 1.2.0 from the same review. No new parameter; the report's
+            schemaVersion stays 2. The minimum PowerShell version moves from 7.4 to 7.5.
+
+            Stricter, never looser:
+              - the duplicate check compares names after Trim and Unicode NFC, so a name typed
+                in NFD (macOS) or with stray spaces matches the tenant's (the posted name is not
+                changed)
+              - a device configuration holding an encrypted or secret-referenced value
+                (isEncrypted, secretReferenceValueId) is 'invalid' - the export cannot carry the
+                secret
+              - a 408 on POST is 'indeterminate', not 'failed' (it can follow a processed request)
+              - the compliance notificationTemplateId, which points into the source tenant, is
+                cleared with a warning
+
+            Same result on every host: folders, files and the manifest are sorted ordinally
+            instead of by the host's culture, which decided which of two same-named files was
+            created; sidecars are parsed with ConvertFrom-Json -DateKind String (needs 7.5), so
+            an offset date string is posted as written instead of in the host's time zone; ._*
+            AppleDouble files are skipped, and the banner count and the loop share one file
+            list; the report's timeZone is an IANA id on Windows.
+
+            Hardening: the report is owner-only (600) on non-Windows and a row's detail is cut at
+            2000 characters; the customers.json mode check follows a symlink; control characters
+            are stripped from names shown in the banner and the confirmation text; without
+            -CustomerName a non-interactive session stops instead of hanging in Read-Host.
 
         1.2.0 - 2026-11-02
             BREAKING: a real run now needs -PlanPath. Without it the script throws before
@@ -1790,7 +1817,7 @@ finally {
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
         timeZone           = $reportTimeZone
-        scriptVersion      = '1.2.0'
+        scriptVersion      = '1.3.0'
         whatIf             = [bool]$WhatIfPreference
         targetTenantId     = $tokenTenantId
         targetCustomerName = $script:TargetCustomerName
