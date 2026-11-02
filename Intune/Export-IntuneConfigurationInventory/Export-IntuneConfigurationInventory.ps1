@@ -2156,6 +2156,42 @@ function Get-RunContext {
     }
 }
 
+function Get-LatestRunFolder {
+    # The newest run folder that holds a manifest, ordered by the manifest's own
+    # runTimestampUtc. Folder names are local time, so at the end of daylight saving (02:00-03:00
+    # twice) or with hosts in different time zones the last name is not always the last run,
+    # and a run that died before writing its manifest is not a baseline at all.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TenantDirectory,
+        [string]$ExcludeName
+    )
+
+    if (-not (Test-Path -Path $TenantDirectory -PathType Container)) { return $null }
+
+    $candidates = foreach ($folder in @(Get-ChildItem -Path $TenantDirectory -Directory)) {
+        if ($folder.Name -ceq $ExcludeName) { continue }
+        $manifestFile = @(Get-ChildItem -Path $folder.FullName -Filter '_manifest_*.json' -File |
+            Sort-Object Name) | Select-Object -Last 1
+        if ($null -eq $manifestFile) { continue }
+        try {
+            $manifest = Get-Content -Path $manifestFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
+            $parsed = [datetimeoffset]::MinValue
+            $stamp = [string](Get-ObjectProperty -InputObject $manifest -Name 'runTimestampUtc')
+            if (-not [datetimeoffset]::TryParse($stamp, [cultureinfo]::InvariantCulture,
+                    [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsed)) { continue }
+            [pscustomobject]@{ Folder = $folder; RunUtc = $parsed.UtcDateTime }
+        }
+        catch [System.Exception] {
+            Write-Verbose ('Run folder "{0}" skipped as baseline: {1}' -f $folder.Name, $PSItem.Exception.Message)
+        }
+    }
+
+    $latest = @($candidates | Sort-Object -Property RunUtc, @{ Expression = { $PSItem.Folder.Name } }) |
+        Select-Object -Last 1
+    return ($null -eq $latest) ? $null : $latest.Folder
+}
+
 function Get-SidecarPlatform {
     # Some areas carry a singular 'platform' or 'platformType' that the exporter's
     # Get-PolicyPlatform (which looks for 'platforms') never sees.
@@ -2454,8 +2490,8 @@ function Invoke-InventoryComparison {
     # (the current run is always the one just produced), the taxonomy reads are
     # $script:-qualified, and the trailing Write-Output stays as the return path.
     #
-    # Only -TenantDirectory and -SidecarArchiveName are ever set by the in-script caller; the
-    # other four are not dead. -BaselineRun and -OutputPath are the seam that let the 1.9.0
+    # Only -TenantDirectory, -CurrentRunPath and -SidecarArchiveName are ever set by the
+    # in-script caller; the other four are not dead. -BaselineRun and -OutputPath are the seam that let the 1.9.0
     # merge be proven byte-identical against the old standalone script - run the comparison
     # over a chosen pair of runs and write the change set outside the run folder, the only way
     # to verify a change to this function without writing into a customer's data. -NoPlatformSplit
@@ -2465,6 +2501,8 @@ function Invoke-InventoryComparison {
     param(
         [Parameter(Mandatory)][string]$TenantDirectory,
         [string]$BaselineRun,
+        # The run just produced. Without it the last folder by name is taken as current.
+        [string]$CurrentRunPath,
         [string]$OutputPath,
         # Filename of the current run's sidecar archive, echoed into the change set so a
         # consumer knows configurationFile now points inside a zip. Discovered from the
@@ -2480,7 +2518,7 @@ function Invoke-InventoryComparison {
         throw ('No run folders found under "{0}".' -f $TenantDirectory)
     }
 
-    $currentFolder = $runFolders[-1].Name
+    $currentFolder = [string]::IsNullOrWhiteSpace($CurrentRunPath) ? $runFolders[-1].Name : (Split-Path -Path $CurrentRunPath -Leaf)
     $current = Get-RunContext -Path (Join-Path -Path $TenantDirectory -ChildPath $currentFolder)
 
     $baselineFolder = $null
@@ -2488,7 +2526,8 @@ function Invoke-InventoryComparison {
         $baselineFolder = $BaselineRun
     }
     elseif ($runFolders.Count -ge 2) {
-        $baselineFolder = @($runFolders | Where-Object { $PSItem.Name -ne $currentFolder })[-1].Name
+        $latestOther = Get-LatestRunFolder -TenantDirectory $TenantDirectory -ExcludeName $currentFolder
+        if ($null -ne $latestOther) { $baselineFolder = $latestOther.Name }
     }
 
     $isBaselineMode = [string]::IsNullOrWhiteSpace($baselineFolder)
@@ -3063,8 +3102,7 @@ if (Test-Path -Path $runDirectory) {
 $auditSince = $null
 if ($IncludeAuditActor) {
     $auditSince = (Get-Date).ToUniversalTime().AddDays(-30)
-    $priorRun = @(Get-ChildItem -Path $tenantRoot -Directory -ErrorAction SilentlyContinue |
-        Sort-Object -Property Name) | Select-Object -Last 1
+    $priorRun = Get-LatestRunFolder -TenantDirectory $tenantRoot
     if ($null -ne $priorRun) {
         try {
             $priorStamp = [string](Get-ObjectProperty -InputObject (Get-RunContext -Path $priorRun.FullName).Manifest -Name 'runTimestampUtc')
@@ -3533,7 +3571,7 @@ if ($CompareWithPrevious) {
     try {
         # -SidecarArchiveName: the current run is not archived yet, so the name is passed in
         # rather than discovered, for the change set's sidecarArchive field.
-        $comparison = @(Invoke-InventoryComparison -TenantDirectory $tenantRoot -SidecarArchiveName $sidecarArchiveName)
+        $comparison = @(Invoke-InventoryComparison -TenantDirectory $tenantRoot -CurrentRunPath $runDirectory -SidecarArchiveName $sidecarArchiveName)
         if ($comparison.Count -gt 0) {
             $changeSetPath = $comparison[-1].ChangeSetPath
             Write-Verbose ('Change set: {0}' -f $changeSetPath)
