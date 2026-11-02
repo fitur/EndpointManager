@@ -279,6 +279,10 @@ skips the prompt, which is what a scheduled run needs; a non-interactive session
 `-ReportDirectory` moves the report somewhere other than the source folder. Use it when the
 source sits in OneDrive or Dropbox — see [Data sensitivity](#data-sensitivity).
 
+`-Force` only skips the one confirmation before the first write; it does not turn off
+`ShouldProcess`. `-Force -Confirm` therefore still prompts once per object, and an answer of No
+is recorded as `declined` (a `-WhatIf` run records `whatif`).
+
 ### The plan
 
 `-PlanPath` binds a real run to a dry run. It takes the `_importreport_*.json` of a `-WhatIf`
@@ -342,7 +346,7 @@ folder is not writable) the run stops with nothing created.
   "runComplete": true,
   "abortReason": "",
   "totals": { "created": 0, "duplicate": 0, "invalid": 1, "failed": 0, "indeterminate": 0,
-              "whatif": 2, "notInPlan": 0, "unsupported": 1, "unknownArea": 1, "blocked": 0,
+              "whatif": 2, "declined": 0, "notInPlan": 0, "unsupported": 1, "unknownArea": 1, "blocked": 0,
               "notAttempted": 0 },
   "results": [
     { "area": "Settings-Catalog", "file": "a.json", "name": "SC test",
@@ -374,6 +378,7 @@ for the rest of the run, so a second file with the same name is not posted meanw
 | `failed` | Graph refused the POST with a 4xx, so nothing was created; `detail` has the service's message |
 | `indeterminate` | The POST was sent but no answer was recorded - a timeout, a dropped connection, a 5xx, or the run was interrupted. **The object may exist.** Check the target tenant before re-running |
 | `whatif` | Would have been created; `sha256` is the hash of the file that was planned |
+| `declined` | A real run where the answer to a per-object `-Confirm` prompt was No; nothing was posted |
 | `not-in-plan` | A real run skipped it: the plan did not list it as `whatif`, or the file has changed since |
 | `unsupported` | The area cannot be created from a single POST |
 | `unknown-area` | Folder name does not match a known export area |

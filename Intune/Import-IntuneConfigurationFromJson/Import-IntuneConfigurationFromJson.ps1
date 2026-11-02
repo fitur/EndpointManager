@@ -1492,7 +1492,7 @@ try {
                     # Claimed in the dry run too, so a second file with the same name shows as
                     # 'duplicate' here exactly as it will in the real run.
                     [void]$existing.Add($displayName)
-                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'whatif' -Detail $definition.Resource -Sha256 $fileHash
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status ($WhatIfPreference ? 'whatif' : 'declined') -Detail $definition.Resource -Sha256 $fileHash
                     continue
                 }
 
@@ -1596,6 +1596,7 @@ finally {
         'failed'       = 'failed'
         'indeterminate' = 'indeterminate'
         'whatif'      = 'whatif'
+        'declined'    = 'declined'
         'not-in-plan' = 'notInPlan'
         'unsupported'  = 'unsupported'
         'unknown-area' = 'unknownArea'
