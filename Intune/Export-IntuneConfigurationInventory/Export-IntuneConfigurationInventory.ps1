@@ -2481,6 +2481,30 @@ function Invoke-InventoryComparison {
         @($current.Unreliable) + ($isBaselineMode ? @() : @($baseline.Unreliable)) |
             Sort-Object -Unique
     )
+
+    # An area present in only one manifest was not read at all in the other run - typically
+    # -IncludeConditionalAccess toggled between runs, or a baseline from an older version.
+    # Its absence proves deletion no more than a skipped area does.
+    $comparabilityNotes = [System.Collections.Generic.List[string]]::new()
+    if (-not $isBaselineMode) {
+        $currentAreas = @(@(Get-ObjectProperty -InputObject $current.Manifest -Name 'areas') | ForEach-Object { [string]$PSItem.area })
+        $baselineAreas = @(@(Get-ObjectProperty -InputObject $baseline.Manifest -Name 'areas') | ForEach-Object { [string]$PSItem.area })
+        $oneSided = @($baselineAreas | Where-Object { $PSItem -cnotin $currentAreas })
+        $unreliableAreas = @(@($unreliableAreas) + $oneSided | Sort-Object -Unique)
+
+        # A hash taken with and without detail settings, or at another depth, is not the same
+        # measurement - every policy with detail would read as modified.
+        foreach ($setting in @('detailedSettingsIncluded', 'jsonDepth')) {
+            $oldSetting = [string](Get-ObjectProperty -InputObject $baseline.Manifest -Name $setting)
+            $newSetting = [string](Get-ObjectProperty -InputObject $current.Manifest -Name $setting)
+            if ($oldSetting -cne $newSetting) {
+                $comparabilityNotes.Add(('{0} differs: {1} -> {2}' -f $setting, $oldSetting, $newSetting))
+            }
+        }
+        foreach ($note in $comparabilityNotes) {
+            Write-Warning ('Runs are not comparable - {0}. Configuration changes in this change set are not trustworthy.' -f $note)
+        }
+    }
     if ($unreliableAreas.Count -gt 0) {
         Write-Warning ('{0} area(s) were skipped in one or both runs - removals there are reported as uncertain: {1}' -f
             $unreliableAreas.Count, ($unreliableAreas -join '; '))
@@ -2778,8 +2802,11 @@ function Invoke-InventoryComparison {
         platformSplit   = (-not $NoPlatformSplit.IsPresent)
         # False means at least one area is unreadable in one of the runs, so the change set is
         # not a complete picture and deletions in those areas are unproven.
-        reliable        = ($unreliableAreas.Count -eq 0)
+        reliable        = ($unreliableAreas.Count -eq 0 -and $comparabilityNotes.Count -eq 0)
         unreliableAreas = @($unreliableAreas)
+        # Why two runs cannot be compared field for field (different jsonDepth or detail
+        # settings). Empty when they can.
+        comparabilityNotes = @($comparabilityNotes)
         totals          = $totals
         platformTotals  = $platformTotals
         pages           = @($pages)

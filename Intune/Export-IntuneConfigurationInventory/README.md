@@ -407,7 +407,15 @@ exists so a reordered array does not read as "everything changed".
 
 Policies missing from an area that was **skipped** in either run are reported as
 `uncertain`, never as removed. Absence is not evidence of deletion when the area could not
-be read.
+be read. The same goes for an area that is in the baseline's manifest but not in the current
+one at all, for instance when `-IncludeConditionalAccess` was used for the baseline only.
+
+The change set's `reliable` field is `false`, and a warning is written, when an area was
+skipped or missing in either run, or when the two runs are not the same measurement.
+`unreliableAreas` lists the areas. `comparabilityNotes` lists the runs' differences in
+`detailedSettingsIncluded` or `jsonDepth` (for example a `-SkipDetailedSettings` run diffed
+against a full one, where every policy with settings would otherwise read as modified); it
+is empty when the runs can be compared.
 
 ### Audit actors
 
