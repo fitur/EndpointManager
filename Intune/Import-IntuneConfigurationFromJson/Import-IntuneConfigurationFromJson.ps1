@@ -1075,6 +1075,15 @@ function Resolve-ImportPlan {
         $item.FullName, ($rejected.Count -gt 0 ? ([System.Environment]::NewLine + ($rejected -join [System.Environment]::NewLine)) : ''))
 }
 
+function Get-DisplayText {
+    # Names come from the source tenant's export and are printed in the banner the operator
+    # reads before typing YES. A control character - an ANSI escape - could redraw that line.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowEmptyString()][string]$Text)
+    return [regex]::Replace($Text, '\p{Cc}', '')
+}
+
 function Get-NameKey {
     # The duplicate check compares this, never the raw name. Trim and NFC make the check
     # stricter - a name typed on macOS in NFD, or with a stray space, now matches the tenant's
@@ -1407,15 +1416,15 @@ $selectedFolders = @($folders | Where-Object { $folderClass[$PSItem.Name] -eq 's
 $selectedFileCount = @($selectedFolders | ForEach-Object { Get-ChildItem -LiteralPath $PSItem.FullName -File -Filter '*.json' }).Count
 $sourceLabel = 'no export manifest'
 if ($script:SourceTenantId -or $script:SourceRun) {
-    $sourceLabel = 'export {0}, {1} / {2}' -f $script:SourceRun, $script:SourceTenantName, $script:SourceTenantId
+    $sourceLabel = 'export {0}, {1} / {2}' -f $script:SourceRun, (Get-DisplayText -Text $script:SourceTenantName), $script:SourceTenantId
 }
 $targetLabel = $tokenTenantId
 if (-not [string]::IsNullOrWhiteSpace($script:TargetCustomerName)) {
-    $targetLabel = '{0}  ({1})' -f $script:TargetCustomerName, $tokenTenantId
+    $targetLabel = '{0}  ({1})' -f (Get-DisplayText -Text $script:TargetCustomerName), $tokenTenantId
 }
 
 Write-Host ''
-Write-Host ('Source : {0}' -f $sourceDirectoryResolved) -ForegroundColor Cyan
+Write-Host ('Source : {0}' -f (Get-DisplayText -Text $sourceDirectoryResolved)) -ForegroundColor Cyan
 Write-Host ('         ({0})' -f $sourceLabel)
 Write-Host ('Target : {0}' -f $targetLabel) -ForegroundColor Yellow -NoNewline
 Write-Host ($WhatIfPreference ? '   DRY RUN' : '   WRITE') -ForegroundColor ($WhatIfPreference ? 'Green' : 'Red')
@@ -1580,7 +1589,7 @@ try {
                     continue
                 }
 
-                if (-not $PSCmdlet.ShouldProcess(('{0} "{1}"' -f $areaName, $displayName), 'Create in tenant')) {
+                if (-not $PSCmdlet.ShouldProcess((Get-DisplayText -Text ('{0} "{1}"' -f $areaName, $displayName)), 'Create in tenant')) {
                     # Claimed in the dry run too, so a second file with the same name shows as
                     # 'duplicate' here exactly as it will in the real run.
                     [void]$existing.Add($nameKey)
