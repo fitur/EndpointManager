@@ -1210,8 +1210,8 @@ if ($useCertificate) {
 
 $sourceDirectoryResolved = (Resolve-Path -Path $SourceDirectory).Path
 
-$folders = Get-ChildItem -Path $sourceDirectoryResolved -Directory | Sort-Object -Property Name
-if (@($folders).Count -eq 0) {
+$folders = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -Directory | Sort-Object -Property Name)
+if ($folders.Count -eq 0) {
     throw ('No area sub-folders in "{0}". Copy the export''s area folders, not loose JSON files. If this is an export run folder from 1.12.0 or later, unpack <Tenant>_<stamp>_sidecars.zip first - the area folders live inside the archive.' -f $sourceDirectoryResolved)
 }
 
