@@ -62,11 +62,13 @@ This step reads nothing, writes nothing and posts nothing.
 
 ```powershell
 ./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -WhatIf -Verbose
-./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -Area 'Assignment-Filter'
+./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -PlanPath ~/Import -Area 'Assignment-Filter'
 ```
 
-Do the real run one area at a time, at least the first time. Both runs write an
-`_importreport_<stamp>.json` into the source folder; `whatIf` in it tells them apart.
+A real run **needs `-PlanPath`**: the report of the dry run, as a file or as the folder it sits
+in (the newest usable one is picked). Do the real run one area at a time, at least the first
+time. Both runs write an `_importreport_<stamp>.json` into the source folder; `whatIf` in it
+tells them apart.
 
 **More than one tenant?** Skip step 4 and put the credentials in a file instead — see
 [Several customers](#several-customers).
@@ -75,6 +77,10 @@ Do the real run one area at a time, at least the first time. Both runs write an
 
 **Nothing is created that a `-WhatIf` run has not already shown, and everything that is
 created is on disk before the process can exit.**
+
+The first half is enforced by the code, not by discipline: a real run needs `-PlanPath`, the
+report of a `-WhatIf` run against the same tenant, and creates only the files that report
+listed as `whatif` with the same content hash. See [The plan](#the-plan).
 
 There is no rollback. When half a run fails, the import report is all that is left, so it is
 written from a `finally` block rather than after the loop — the case that needs it most is the
@@ -257,20 +263,48 @@ Expand-Archive -Path './Contoso-AB_2026-08-20_0914_sidecars.zip' -DestinationPat
 # 3. Dry run. Contacts Graph only to read existing names; writes the report with whatIf: true
 ./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -WhatIf -Verbose
 
-# 4. For real, one area at a time
-./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -Area 'Assignment-Filter'
+# 4. For real, one area at a time. -PlanPath is the dry run's report (a file, or the folder
+#    it sits in - the newest usable one is chosen); a real run without it throws
+./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -PlanPath ~/Import -Area 'Assignment-Filter'
 
-# 5. The rest, once the first area looks right in the portal
-./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -Verbose
+# 5. The rest, once the first area looks right in the portal - same plan
+./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -PlanPath ~/Import -Verbose
 ```
 
 A real run prints the banner and asks once for confirmation before the first write. `-Force`
 skips the prompt, which is what a scheduled run needs; a non-interactive session with no
-`-Force` warns that the prompt was skipped rather than blocking on a `Read-Host` nobody will
-answer.
+`-Force` refuses to write and stops before anything is created, rather than blocking on a
+`Read-Host` nobody will answer. Pass `-Force` for unattended runs.
 
 `-ReportDirectory` moves the report somewhere other than the source folder. Use it when the
 source sits in OneDrive or Dropbox — see [Data sensitivity](#data-sensitivity).
+
+`-Force` only skips the one confirmation before the first write; it does not turn off
+`ShouldProcess`. `-Force -Confirm` therefore still prompts once per object, and an answer of No
+is recorded as `declined` (a `-WhatIf` run records `whatif`).
+
+### The plan
+
+`-PlanPath` binds a real run to a dry run. It takes the `_importreport_*.json` of a `-WhatIf`
+run, or a folder, in which case the newest report in it that is a `-WhatIf` report for the
+same target tenant is used. The banner names the report that was chosen. The run is refused,
+before the confirmation prompt and before anything is written, when the plan:
+
+- is not a `-WhatIf` report (`whatIf: true`), or was made against another tenant than the
+  token's, or has `schemaVersion` below 2 (older reports carry no file hashes);
+- cannot be found in the folder at all — the message is "run `-WhatIf` first".
+
+A file is created only if the plan listed it as `whatif` **with the same area, file name and
+SHA-256 of its content**. Any other file — added since, edited since, or shown as something
+else in the plan — gets the status `not-in-plan`, a warning, and a count in `totals.notInPlan`;
+the run carries on with the rest. The plan decides what *may* be created, `-Area` what is
+created *now*: `-Area` can only narrow the selection, so one dry run over the whole source can
+be followed by a real run per area against the same plan. There is no maximum age; the content
+hash and the name check against the tenant are what keep a stale plan from doing harm.
+`-WhatIf` and `-TestPermissionOnly` need no plan.
+
+**Scheduled runs:** run `-WhatIf` first, then `-Force -PlanPath <that report>`. A scheduled
+real run without a plan throws before anything is created.
 
 ## Output
 
@@ -283,22 +317,24 @@ about the first run's report.
 ```
 Import/
   _manifest_2026-08-20_0914.json          ← the export's, if you kept it
-  _importreport_2026-09-01_1204.json      ← this script's
+  _importreport_2026-09-01_120437.json    ← this script's
   Settings-Catalog/
   Compliance-Policy/
 ```
 
-The file name uses local time so a run is easy to identify while browsing; the report records
-the same instant in UTC, in local time, and with the offset.
+The file name uses local time, to the second, so a run is easy to identify while browsing; the
+report records the same instant in UTC, in local time, and with the offset. The file is created
+before the first write and is never overwritten: if it cannot be created (it exists, or the
+folder is not writable) the run stops with nothing created.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "runTimestampUtc": "2026-09-01T10:04:54.0274400Z",
   "runTimestampLocal": "2026-09-01T12:04:54",
   "utcOffset": "02:00:00",
   "timeZone": "Europe/Stockholm",
-  "scriptVersion": "1.1.0",
+  "scriptVersion": "1.2.0",
   "whatIf": true,
   "targetTenantId": "4444-…",
   "targetCustomerName": "Fabrikam AB",
@@ -309,12 +345,13 @@ the same instant in UTC, in local time, and with the offset.
   "areasSelected": "",
   "runComplete": true,
   "abortReason": "",
-  "totals": { "created": 0, "duplicate": 0, "invalid": 1, "failed": 0,
-              "whatif": 2, "unsupported": 1, "unknownArea": 1, "blocked": 0 },
+  "totals": { "created": 0, "duplicate": 0, "invalid": 1, "failed": 0, "indeterminate": 0,
+              "whatif": 2, "declined": 0, "notInPlan": 0, "unsupported": 1, "unknownArea": 1, "blocked": 0,
+              "notAttempted": 0 },
   "results": [
     { "area": "Settings-Catalog", "file": "a.json", "name": "SC test",
       "status": "whatif", "detail": "deviceManagement/configurationPolicies",
-      "createdId": "" }
+      "createdId": "", "sha256": "9F2C…" }
   ]
 }
 ```
@@ -327,22 +364,39 @@ states and both have to be legible without interpreting the warning stream.
 carries the reason a row got the status it has — for a failure, Graph's own `code` and
 `message`. `createdId` is its own field so `detail` never has to be both.
 
+A row is written *before* its POST leaves, as `indeterminate`, and becomes `created` or `failed`
+when the answer arrives. That is what lets an interrupted run (Ctrl+C, `runComplete: false`,
+`abortReason` saying so) still name the object that was in flight. A re-run is safe once the
+object is listable in the tenant, because the name check will then skip it; the name stays taken
+for the rest of the run, so a second file with the same name is not posted meanwhile.
+
 | `status` | Meaning |
 |---|---|
 | `created` | Posted successfully; `createdId` holds the new object's id |
 | `duplicate` | A policy with that name already exists in the target tenant |
 | `invalid` | The sidecar cannot produce a valid body; nothing was posted |
-| `failed` | Graph rejected the POST; `detail` has the service's message |
-| `whatif` | Would have been created |
+| `failed` | Graph refused the POST with a 4xx, so nothing was created; `detail` has the service's message |
+| `indeterminate` | The POST was sent but no answer was recorded - a timeout, a dropped connection, a 5xx, or the run was interrupted. **The object may exist.** Check the target tenant before re-running |
+| `whatif` | Would have been created; `sha256` is the hash of the file that was planned |
+| `declined` | A real run where the answer to a per-object `-Confirm` prompt was No; nothing was posted |
+| `not-in-plan` | A real run skipped it: the plan did not list it as `whatif`, or the file has changed since |
 | `unsupported` | The area cannot be created from a single POST |
 | `unknown-area` | Folder name does not match a known export area |
-| `blocked` | 403 on the area — the token lacks the scope; one row, not one per file |
+| `blocked` | 403 — the token lacks the scope. On the area's name check the row has no file; on a POST it names the file that was refused |
+| `not-attempted` | A file left in an area after a 403 on a POST stopped it; nothing was sent for it |
 
 ## Error semantics
 
-**403** means a missing scope for that one area. Intune names the scope it wants. The script
-records one `blocked` row for the area and moves on to the next — not one row per file, since
-every file in it would fail identically.
+**403** means a missing scope for that one area. Intune names the scope it wants. When it
+comes on the area's name check, the script records one `blocked` row for the area and moves on
+to the next — not one row per file, since every file in it would fail identically. When it
+only comes on a POST, the `blocked` row names the file that was refused, every file after it in
+the area gets a `not-attempted` row, and the run moves on: a 403 can also be about one object,
+and the files before it may already have been created.
+
+**Any other error reading an area's existing names** (a 400, a 5xx that outlasts the retries)
+skips that area with one `failed` row and goes on to the next. Nothing is posted into an area
+whose names could not be read, since there would be no duplicate check.
 
 **401** is global: the token itself is not accepted. One automatic refresh covers a genuinely
 stale token; a second 401 aborts the run. The report is still written, with
@@ -447,6 +501,12 @@ against a tenant you care about, and start with `-TestPermissionOnly` and `-What
   0 hours** and warns. **Review the grace period in the portal afterwards.**
 - **Area folders live in a zip** in export run folders from 1.12.0 onwards. Unpack first. The
   script says so if it finds no area folders, but it cannot read the archive itself yet.
+- **App protection and app configuration policies are created without target apps.** The
+  export does not expand `apps` for `App-Protection-Policy-iOS`, `App-Protection-Policy-Android`
+  and `App-Configuration-Managed-Apps`, and the import drops the key, so the policy is created
+  (201) but protects or configures no app until `targetApps` is set in the portal. The script
+  warns once per created policy in those areas. Setting the apps from the script would be a
+  second, writing call and is not done.
 - **Everything is created unassigned.** Assignments are never imported.
 - **The duplicate check is name-based.** An object renamed in the target tenant is not
   recognised and gets created a second time.

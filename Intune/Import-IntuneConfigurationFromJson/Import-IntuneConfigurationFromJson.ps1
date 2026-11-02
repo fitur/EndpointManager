@@ -40,9 +40,9 @@
       Application                         needs content upload, not a JSON body
 
 .NOTES
-    Version:        1.1.1
+    Version:        1.2.0
     Creation Date:  2026-09-01
-    Last Updated:   2026-09-01
+    Last Updated:   2026-11-02
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -64,9 +64,46 @@
     over it, or its copy over this one, silently changes behaviour in a credential path.
     Change the copy you are actually working on, and record what you changed here.
 
+    Changed in THIS file's copy only: New-ClientAssertion carries a SuppressMessage for
+    PSUseShouldProcessForStateChangingFunctions (1.2.0). Adding ShouldProcess instead would
+    break the token request under -WhatIf. The export and win32 copies are untouched.
+
     This writes to a customer tenant. Run it with -WhatIf first, every time.
 
     CHANGELOG
+
+        1.2.0 - 2026-11-02
+            BREAKING: a real run now needs -PlanPath. Without it the script throws before
+            anything is created. A -WhatIf or -TestPermissionOnly run is unchanged. The import
+            report's schemaVersion is 2: every file row carries sha256, and there are four new
+            statuses (indeterminate, not-in-plan, declined, not-attempted) with matching totals
+            keys. The report file name has seconds: _importreport_yyyy-MM-dd_HHmmss.json.
+
+            Hard requirement, now enforced in code. -PlanPath takes a -WhatIf report, or a
+            folder, in which case the newest usable one is chosen. A real run creates only the
+            files that report listed as 'whatif' with the same area, file name and SHA-256 of
+            the content, against the same tenant; any other file is 'not-in-plan'. The file is
+            read once, so the hash and the posted body are the same bytes.
+
+            Nothing is created that cannot be accounted for in the report:
+              - the report file is reserved (CreateNew) before the first POST, so two runs
+                cannot overwrite each other and an unwritable folder stops the run with nothing
+                created; a failed write in 'finally' falls back to the temp folder
+              - each POST has its row written first, as 'indeterminate'; it becomes 'created'
+                or 'failed' on the answer. A timeout, a 5xx or Ctrl+C leaves it indeterminate
+                (the object may exist) and its name stays taken for the run. abortReason says
+                so after a Ctrl+C
+              - a non-interactive session without -Force refuses to write instead of warning
+              - -WhatIf simulates in-run duplicates, so the plan matches the run row for row
+              - a 403 on a POST names the refused file and reports the rest of the area as
+                'not-attempted'; a No to -Confirm is 'declined', not 'whatif'
+
+            Also: one area folder in the source no longer crashes the run; a failed name read
+            skips the area instead of aborting; Retry-After is capped at 300 s (POST is still
+            retried on 429 only); user-supplied paths use -LiteralPath; an empty 'settings' or
+            scheduledActionsForRule is treated as missing; app protection/config policies warn
+            that they have no target apps; PSScriptAnalyzer is clean (two findings suppressed
+            with a reason; New-ClientAssertion's copy here only, see SHARED CODE).
 
         1.1.1 - 2026-09-01
             Fixes from the first real run. No new parameter, no changed parameter.
@@ -149,9 +186,10 @@
         -ClientId <guid> -WhatIf
 
 .EXAMPLE
-    # Only the Settings Catalog folder, for real.
+    # Only the Settings Catalog folder, for real. -PlanPath is the -WhatIf run's report (here
+    # the folder it was written to); the run creates only what that report listed.
     .\Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -TenantId <guid> `
-        -ClientId <guid> -Area 'Settings-Catalog' -Verbose
+        -ClientId <guid> -PlanPath ~/Import -Area 'Settings-Catalog' -Verbose
 
 .EXAMPLE
     # Pick the TARGET tenant from the same customers.json the export uses. Omit
@@ -178,7 +216,7 @@
 param(
     # Folder containing the area sub-folders to import from.
     [Parameter(Mandatory)]
-    [ValidateScript({ Test-Path -Path $PSItem -PathType Container })]
+    [ValidateScript({ Test-Path -LiteralPath $PSItem -PathType Container })]
     [string]$SourceDirectory,
 
     [string]$TenantId = $env:INTUNE_TENANT_ID,
@@ -220,8 +258,15 @@ param(
     # describes, mirroring where the export puts its _manifest_. Point it elsewhere when the
     # source sits in a synchronised folder: the report names the target tenant's ID and every
     # policy name that was created.
-    [ValidateScript({ Test-Path -Path $PSItem -PathType Container })]
-    [string]$ReportDirectory
+    [ValidateScript({ Test-Path -LiteralPath $PSItem -PathType Container })]
+    [string]$ReportDirectory,
+
+    # The -WhatIf report this run is bound to: a file, or a folder, in which case the newest
+    # usable _importreport_*.json is chosen. A real run creates only what that report listed
+    # as 'whatif' - same area, same file name, same content hash, same target tenant - and
+    # throws without it. A -WhatIf or -TestPermissionOnly run needs none.
+    [ValidateScript({ Test-Path -LiteralPath $PSItem })]
+    [string]$PlanPath
 )
 
 Set-StrictMode -Version Latest
@@ -249,14 +294,14 @@ $script:TargetCustomerName = ''
 # empty until this block has populated the variables.
 if ($CustomerConfigPath) {
 
-    if (-not (Test-Path -Path $CustomerConfigPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $CustomerConfigPath -PathType Leaf)) {
         throw "Customer config '$CustomerConfigPath' does not exist or is not a file."
     }
-    $customerConfigResolved = (Resolve-Path -Path $CustomerConfigPath).Path
+    $customerConfigResolved = (Resolve-Path -LiteralPath $CustomerConfigPath).Path
 
     # Warn when the file is readable by more than its owner. UnixMode is not populated on Windows.
     if (-not $IsWindows) {
-        $configItem = Get-Item -Path $customerConfigResolved
+        $configItem = Get-Item -LiteralPath $customerConfigResolved
         if ($configItem.PSObject.Properties.Name -contains "UnixMode" -and
             $configItem.UnixMode.Substring(4) -match '[rwx]') {
             Write-Warning "'$customerConfigResolved' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$customerConfigResolved'"
@@ -264,7 +309,7 @@ if ($CustomerConfigPath) {
     }
 
     try {
-        $customerConfig = Get-Content -Path $customerConfigResolved -Raw -Encoding UTF8 |
+        $customerConfig = Get-Content -LiteralPath $customerConfigResolved -Raw -Encoding UTF8 |
             ConvertFrom-Json -AsHashtable -ErrorAction Stop
     }
     catch {
@@ -601,6 +646,9 @@ function ConvertTo-Base64Url {
 
 function New-ClientAssertion {
     [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'It only builds and signs a string. ShouldProcess would return false under -WhatIf, no assertion would be built and the token request that a dry run needs would fail.')]
     [OutputType([string])]
     param(
         [Parameter(Mandatory)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
@@ -718,6 +766,7 @@ function Invoke-GraphRequest {
         catch [System.Exception] {
             $statusCode = 0
             $retryAfterSeconds = $null
+            $retryAfterCapped = $false
             $detail = Get-GraphErrorDetail -ErrorRecord $PSItem
 
             $response = $PSItem.Exception.PSObject.Properties['Response']
@@ -725,11 +774,18 @@ function Invoke-GraphRequest {
                 $statusCode = [int]$response.Value.StatusCode
                 $retryHeader = $response.Value.Headers.RetryAfter
                 if ($null -ne $retryHeader) {
+                    $headerSeconds = $null
                     if ($null -ne $retryHeader.Delta) {
-                        $retryAfterSeconds = [int]$retryHeader.Delta.TotalSeconds
+                        $headerSeconds = $retryHeader.Delta.TotalSeconds
                     }
                     elseif ($null -ne $retryHeader.Date) {
-                        $retryAfterSeconds = [int]([datetimeoffset]$retryHeader.Date - [datetimeoffset]::UtcNow).TotalSeconds
+                        $headerSeconds = ([datetimeoffset]$retryHeader.Date - [datetimeoffset]::UtcNow).TotalSeconds
+                    }
+                    if ($null -ne $headerSeconds) {
+                        # Capped before the [int] cast: an absurd value would overflow it and throw
+                        # from inside this catch block.
+                        $retryAfterCapped = $headerSeconds -gt 300
+                        $retryAfterSeconds = [int][math]::Min($headerSeconds, 300)
                     }
                 }
             }
@@ -769,6 +825,7 @@ function Invoke-GraphRequest {
 
             # Retry-After wins over backoff: Graph knows the actual throttle window, we don't.
             $delay = $retryAfterSeconds ?? [int][math]::Min([math]::Pow(2, $attempt), 60)
+            if ($retryAfterCapped) { Write-Warning 'Retry-After exceeds 300s - waiting 300s instead.' }
             Write-Warning ('Graph {0} on attempt {1}/{2}, waiting {3}s: {4}' -f $statusCode, $attempt, $MaxAttempt, $delay, $Uri)
             Start-Sleep -Seconds ([math]::Max($delay, 1))
         }
@@ -868,8 +925,11 @@ function ConvertTo-CreationBody {
     # fell back to a flat one, do not - and those are the ones this fills in. A block action
     # with no grace period is the least surprising default, but it is still a decision the
     # script is making on the operator's behalf.
+    # An empty array or null counts as absent: it fails the POST the same way.
     if ($Definition.Resource -eq 'deviceManagement/deviceCompliancePolicies' -and
-        -not $body.ContainsKey('scheduledActionsForRule')) {
+        (-not $body.ContainsKey('scheduledActionsForRule') -or
+         $null -eq $body['scheduledActionsForRule'] -or
+         @($body['scheduledActionsForRule']).Count -eq 0)) {
         Write-Warning ('Compliance policy "{0}": no scheduled actions in the sidecar - creating with block after 0 hours. Review the grace period in the portal, and see "Known limitations" in README.md.' -f $body['displayName'])
         $body['scheduledActionsForRule'] = @(
             @{
@@ -929,8 +989,83 @@ function Test-CreationBody {
         if ($value -is [string] -and [string]::IsNullOrWhiteSpace($value)) {
             return ('required property "{0}" is empty' -f $property)
         }
+        # An empty 'settings' array would create a Settings Catalog policy with no settings (201).
+        if ($value -is [System.Collections.IList] -and $value.Count -eq 0) {
+            return ('required property "{0}" is empty' -f $property)
+        }
     }
     return ''
+}
+
+function Read-ImportPlanFile {
+    # One candidate plan. Returns the rejection reason, or '' with the planned keys filled in.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$TenantId
+    )
+
+    $keys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    try {
+        $plan = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json
+    }
+    catch [System.Exception] {
+        return @{ Reason = ('is not readable JSON ({0})' -f $PSItem.Exception.Message); Keys = $keys }
+    }
+    if ($null -eq $plan -or $plan -isnot [pscustomobject]) {
+        return @{ Reason = 'is not an import report'; Keys = $keys }
+    }
+    if (-not (Get-ObjectProperty -InputObject $plan -Name 'whatIf')) {
+        return @{ Reason = 'is not a -WhatIf report (whatIf is not true)'; Keys = $keys }
+    }
+    # Reports before schemaVersion 2 carry no content hash, so they cannot bind a run to a file.
+    if ([int](Get-ObjectProperty -InputObject $plan -Name 'schemaVersion') -lt 2) {
+        return @{ Reason = 'has schemaVersion below 2 and carries no file hashes - run -WhatIf again'; Keys = $keys }
+    }
+    $plannedTenant = [string](Get-ObjectProperty -InputObject $plan -Name 'targetTenantId')
+    if ($plannedTenant -ne $TenantId) {
+        return @{ Reason = ('was planned against tenant {0}, this token is for {1}' -f $plannedTenant, $TenantId); Keys = $keys }
+    }
+    foreach ($row in @(Get-ObjectProperty -InputObject $plan -Name 'results')) {
+        if ($null -eq $row -or [string](Get-ObjectProperty -InputObject $row -Name 'status') -ne 'whatif') { continue }
+        $hash = [string](Get-ObjectProperty -InputObject $row -Name 'sha256')
+        if ([string]::IsNullOrWhiteSpace($hash)) { continue }
+        [void]$keys.Add(('{0}|{1}|{2}' -f (Get-ObjectProperty -InputObject $row -Name 'area'), (Get-ObjectProperty -InputObject $row -Name 'file'), $hash))
+    }
+    return @{ Reason = ''; Keys = $keys }
+}
+
+function Resolve-ImportPlan {
+    # A file is used or rejected with the reason. A folder yields its newest _importreport_ that
+    # qualifies (ordinal on the name, which is a timestamp); one that does not is skipped, and
+    # if none qualifies the run stops. Called before the confirmation prompt and before the
+    # report file is reserved, so a bad plan leaves nothing behind.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$TenantId
+    )
+
+    $item = Get-Item -LiteralPath $Path
+    if (-not $item.PSIsContainer) {
+        $result = Read-ImportPlanFile -Path $item.FullName -TenantId $TenantId
+        if ($result.Reason) { throw ('"{0}" {1}. Nothing was created.' -f $item.FullName, $result.Reason) }
+        return @{ Path = $item.FullName; Keys = $result.Keys }
+    }
+
+    $candidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new(
+        [System.IO.FileInfo[]]@(Get-ChildItem -LiteralPath $item.FullName -File -Filter '_importreport_*.json'))
+    $candidates.Sort([Comparison[System.IO.FileInfo]]{ param($x, $y) [string]::CompareOrdinal($y.Name, $x.Name) })
+    $rejected = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in $candidates) {
+        $result = Read-ImportPlanFile -Path $candidate.FullName -TenantId $TenantId
+        if (-not $result.Reason) { return @{ Path = $candidate.FullName; Keys = $result.Keys } }
+        $rejected.Add(('{0} {1}' -f $candidate.Name, $result.Reason))
+    }
+    throw ('No usable -WhatIf report in "{0}". Run -WhatIf first, then pass its report as -PlanPath. Nothing was created.{1}' -f
+        $item.FullName, ($rejected.Count -gt 0 ? ([System.Environment]::NewLine + ($rejected -join [System.Environment]::NewLine)) : ''))
 }
 
 function Get-ExistingName {
@@ -939,6 +1074,9 @@ function Get-ExistingName {
         policies per area, and the duplicate check is the only reason we read at all.
     #>
     [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseOutputTypeCorrectly', '',
+        Justification = 'False positive: the comma guard on the return wraps the HashSet in an Object[], which PowerShell unrolls on the way out, so the caller receives the HashSet.')]
     [OutputType([System.Collections.Generic.HashSet[string]])]
     param(
         [Parameter(Mandatory)][string]$Resource,
@@ -1129,17 +1267,17 @@ if ($useCertificate) {
         $script:AuthContext.Certificate.Thumbprint, $script:AuthContext.Certificate.NotAfter)
 }
 
-$sourceDirectoryResolved = (Resolve-Path -Path $SourceDirectory).Path
+$sourceDirectoryResolved = (Resolve-Path -LiteralPath $SourceDirectory).Path
 
-$folders = Get-ChildItem -Path $sourceDirectoryResolved -Directory | Sort-Object -Property Name
-if (@($folders).Count -eq 0) {
+$folders = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -Directory | Sort-Object -Property Name)
+if ($folders.Count -eq 0) {
     throw ('No area sub-folders in "{0}". Copy the export''s area folders, not loose JSON files. If this is an export run folder from 1.12.0 or later, unpack <Tenant>_<stamp>_sidecars.zip first - the area folders live inside the archive.' -f $sourceDirectoryResolved)
 }
 
 # The '_' prefix is the export's convention for run-level files, and it is this script's
 # convention for its own report. Skipping them keeps a second run from warning about the
 # first run's _importreport_ and about the export's own _manifest_ / _changeset_ files.
-$looseFiles = @(Get-ChildItem -Path $sourceDirectoryResolved -File -Filter '*.json' |
+$looseFiles = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -File -Filter '*.json' |
     Where-Object { -not $PSItem.Name.StartsWith('_') })
 if ($looseFiles.Count -gt 0) {
     Write-Warning ('{0} JSON file(s) sit directly in the source root and were ignored - the area folder is what selects the endpoint.' -f $looseFiles.Count)
@@ -1199,11 +1337,11 @@ foreach ($blocked in $blockedAreas) {
 $script:SourceTenantId = ''
 $script:SourceTenantName = ''
 $script:SourceRun = ''
-$sourceManifest = @(Get-ChildItem -Path $sourceDirectoryResolved -File -Filter '_manifest_*.json' |
+$sourceManifest = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -File -Filter '_manifest_*.json' |
     Sort-Object -Property Name)
 if ($sourceManifest.Count -gt 0) {
     try {
-        $manifestData = Get-Content -Path $sourceManifest[-1].FullName -Raw -Encoding utf8 | ConvertFrom-Json
+        $manifestData = Get-Content -LiteralPath $sourceManifest[-1].FullName -Raw -Encoding utf8 | ConvertFrom-Json
         $script:SourceTenantId = [string](Get-ObjectProperty -InputObject $manifestData -Name 'tenantId')
         $script:SourceTenantName = [string](Get-ObjectProperty -InputObject $manifestData -Name 'tenantName')
         # ConvertFrom-Json turns the export's yyyy-MM-ddTHH:mm:ss into a [datetime], and a bare
@@ -1219,15 +1357,36 @@ if ($sourceManifest.Count -gt 0) {
     }
 }
 
-# The banner is what the operator reads before typing YES, so it describes what will actually
-# be attempted: -Area, the unsupported list and unknown folder names all applied. The loop
-# below still walks every folder - it has to, to report 'unsupported' and 'unknown-area' rows.
-$selectedFolders = @($folders | Where-Object {
-    ($Area.Count -eq 0 -or $PSItem.Name -in $Area) -and
-    -not $script:UnsupportedAreas.Contains($PSItem.Name) -and
-    $script:AreaMap.Contains($PSItem.Name)
-})
-$selectedFileCount = @($selectedFolders | ForEach-Object { Get-ChildItem -Path $PSItem.FullName -File -Filter '*.json' }).Count
+# The plan this run is bound to, resolved before the banner, the prompt and the report
+# reservation: a bad plan stops the run with nothing created and no empty report left behind.
+# A -WhatIf run needs none; given one anyway, it shows what the plan would exclude.
+$plannedKeys = $null
+$planLabel = ''
+if (-not $WhatIfPreference -or -not [string]::IsNullOrWhiteSpace($PlanPath)) {
+    if ([string]::IsNullOrWhiteSpace($PlanPath)) {
+        throw 'A real run needs -PlanPath: the _importreport_ of a -WhatIf run against this target. Nothing was created.'
+    }
+    $plan = Resolve-ImportPlan -Path $PlanPath -TenantId $tokenTenantId
+    $plannedKeys = $plan.Keys
+    $planLabel = '{0} ({1} file(s) planned)' -f $plan.Path, $plannedKeys.Count
+}
+
+# Every folder is classified once, here, and the banner and the loop below both read the
+# result - two copies of the rule could drift apart, and the banner is what the operator reads
+# before typing YES. The loop still walks every folder: it has to, to report the
+# 'unsupported' and 'unknown-area' rows.
+$folderClass = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+foreach ($folder in $folders) {
+    $folderClass[$folder.Name] = if ($Area.Count -gt 0 -and $folder.Name -notin $Area) { 'not-selected' }
+        elseif ($script:UnsupportedAreas.Contains($folder.Name)) { 'unsupported' }
+        elseif (-not $script:AreaMap.Contains($folder.Name)) { 'unknown' }
+        else { 'selected' }
+}
+
+# The banner describes what will actually be attempted: -Area, the unsupported list and
+# unknown folder names all applied.
+$selectedFolders = @($folders | Where-Object { $folderClass[$PSItem.Name] -eq 'selected' })
+$selectedFileCount = @($selectedFolders | ForEach-Object { Get-ChildItem -LiteralPath $PSItem.FullName -File -Filter '*.json' }).Count
 $sourceLabel = 'no export manifest'
 if ($script:SourceTenantId -or $script:SourceRun) {
     $sourceLabel = 'export {0}, {1} / {2}' -f $script:SourceRun, $script:SourceTenantName, $script:SourceTenantId
@@ -1243,21 +1402,21 @@ Write-Host ('         ({0})' -f $sourceLabel)
 Write-Host ('Target : {0}' -f $targetLabel) -ForegroundColor Yellow -NoNewline
 Write-Host ($WhatIfPreference ? '   DRY RUN' : '   WRITE') -ForegroundColor ($WhatIfPreference ? 'Green' : 'Red')
 Write-Host ('Areas  : {0} of {1} folder(s) selected, {2} file(s)' -f $selectedFolders.Count, $folders.Count, $selectedFileCount)
+if ($planLabel) { Write-Host ('Plan   : {0}' -f $planLabel) }
 Write-Host ''
 
 # One gate for the whole run, not ConfirmImpact = 'High' - that asks once per object, and an
 # operator clicking through eighteen prompts has stopped reading by the third. Asked only
-# when something will actually be written and there is someone at the keyboard to answer:
-# a redirected stdin means a scheduled run, where Read-Host would block forever.
+# when something will actually be written. With nobody at the keyboard (redirected stdin, a
+# service, a Function host) the run refuses rather than writes: an unattended write has to
+# be asked for with -Force, never inferred from the absence of a console.
 $sessionIsInteractive = [Environment]::UserInteractive -and -not [System.Console]::IsInputRedirected
 if (-not $WhatIfPreference -and -not $Force) {
-    if ($sessionIsInteractive) {
-        $answer = Read-Host 'Create the above in the TARGET tenant? Type YES to continue'
-        if ($answer -cne 'YES') { throw 'Aborted at the confirmation prompt. Nothing was created.' }
+    if (-not $sessionIsInteractive) {
+        throw 'Non-interactive session and no -Force - refusing to write without confirmation. Nothing was created.'
     }
-    else {
-        Write-Warning 'Non-interactive session - the confirmation prompt was skipped. Use -Force to make that explicit.'
-    }
+    $answer = Read-Host 'Create the above in the TARGET tenant? Type YES to continue'
+    if ($answer -cne 'YES') { throw 'Aborted at the confirmation prompt. Nothing was created.' }
 }
 
 $results = [System.Collections.Generic.List[pscustomobject]]::new()
@@ -1268,11 +1427,11 @@ function Add-Result {
     # own message. One column cannot be both.
     param(
         [string]$AreaName, [string]$File, [string]$Name, [string]$Status,
-        [string]$Detail, [string]$CreatedId = ''
+        [string]$Detail, [string]$CreatedId = '', [string]$Sha256 = ''
     )
     $results.Add([pscustomobject][ordered]@{
         Area = $AreaName; File = $File; Name = $Name
-        Status = $Status; Detail = $Detail; CreatedId = $CreatedId
+        Status = $Status; Detail = $Detail; CreatedId = $CreatedId; Sha256 = $Sha256
     })
 }
 
@@ -1280,10 +1439,26 @@ function Add-Result {
 # the two can be reconciled. Same convention as the export's manifest.
 $runLocal = Get-Date
 $runUtc = $runLocal.ToUniversalTime()
-$fileStamp = $runLocal.ToString('yyyy-MM-dd_HHmm')
+$fileStamp = $runLocal.ToString('yyyy-MM-dd_HHmmss')
+
+# Reserved here - after the confirmation prompt, before the first POST. CreateNew fails if
+# the file exists, so two runs can never overwrite each other's record of what they created,
+# and an unwritable report directory stops the run while nothing has been created yet.
+$reportRoot = [string]::IsNullOrWhiteSpace($ReportDirectory) ? $sourceDirectoryResolved : (Resolve-Path -LiteralPath $ReportDirectory).Path
+$reportPath = Join-Path -Path $reportRoot -ChildPath ('_importreport_{0}.json' -f $fileStamp)
+try {
+    [System.IO.File]::Open($reportPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write).Dispose()
+}
+catch [System.Exception] {
+    throw ('Cannot create the import report "{0}" - nothing was created. {1}' -f $reportPath, $PSItem.Exception.Message)
+}
+
+$authAbortMessage = 'Aborting: {0}{1}If the message names no specific scope, this is not a permission problem - verify that the tenant has an active Intune licence.'
 
 $runComplete = $false
-$abortReason = ''
+# Overwritten by the catch below and cleared on completion. A Ctrl+C stops the pipeline
+# without running any catch, so this is what an interrupted run's report says.
+$abortReason = 'interrupted - stopped without an exception (Ctrl+C or host shutdown)'
 
 # The report is the only record of what was created, and there is no rollback - so it is
 # written in 'finally', not after the loop. The case that needs it most is the one that never
@@ -1293,25 +1468,25 @@ try {
     foreach ($folder in $folders) {
         $areaName = $folder.Name
 
-        if ($Area.Count -gt 0 -and $areaName -notin $Area) {
+        if ($folderClass[$areaName] -eq 'not-selected') {
             Write-Verbose ('{0}: not selected by -Area, skipping.' -f $areaName)
             continue
         }
 
-        if ($script:UnsupportedAreas.Contains($areaName)) {
+        if ($folderClass[$areaName] -eq 'unsupported') {
             Write-Warning ('{0}: not supported - {1}.' -f $areaName, $script:UnsupportedAreas[$areaName])
             Add-Result -AreaName $areaName -File '' -Name '' -Status 'unsupported' -Detail $script:UnsupportedAreas[$areaName]
             continue
         }
 
-        if (-not $script:AreaMap.Contains($areaName)) {
+        if ($folderClass[$areaName] -eq 'unknown') {
             Write-Warning ('{0}: unknown area folder, skipping. Expected one of: {1}' -f $areaName, ($script:AreaMap.Keys -join ', '))
             Add-Result -AreaName $areaName -File '' -Name '' -Status 'unknown-area' -Detail 'folder name does not match a known export area'
             continue
         }
 
         $definition = $script:AreaMap[$areaName]
-        $files = @(Get-ChildItem -Path $folder.FullName -File -Filter '*.json' | Sort-Object -Property Name)
+        $files = @(Get-ChildItem -LiteralPath $folder.FullName -File -Filter '*.json' | Sort-Object -Property Name)
         if ($files.Count -eq 0) {
             Write-Verbose ('{0}: no JSON files.' -f $areaName)
             continue
@@ -1324,8 +1499,7 @@ try {
         catch [GraphAuthenticationException] {
             # Global: the token itself is not accepted. Nothing else will work either, so the
             # run ends here and 'finally' writes what was created up to this point.
-            throw ('Aborting: {0}{1}If the message names no specific scope, this is not a permission problem - verify that the tenant has an active Intune licence.' -f
-                $PSItem.Exception.Message, [System.Environment]::NewLine)
+            throw ($authAbortMessage -f $PSItem.Exception.Message, [System.Environment]::NewLine)
         }
         catch [GraphAuthorizationException] {
             # Local: this resource needs a scope the token lacks. One row for the area, not one
@@ -1334,12 +1508,26 @@ try {
             Add-Result -AreaName $areaName -File '' -Name '' -Status 'blocked' -Detail $PSItem.Exception.Message
             continue
         }
+        catch [System.Exception] {
+            # Anything else - a 400, an exhausted 5xx retry. Without the names there is no
+            # duplicate check, so nothing is posted in this area; the next area still runs.
+            $message = Get-GraphErrorDetail -ErrorRecord $PSItem
+            Write-Warning ('{0}: skipped - could not read the existing names: {1}' -f $areaName, $message)
+            Add-Result -AreaName $areaName -File '' -Name '' -Status 'failed' -Detail ('could not read existing names: {0}' -f $message)
+            continue
+        }
         $targetUri = 'https://graph.microsoft.com/beta/{0}' -f $definition.Resource
 
         foreach ($file in $files) {
             $displayName = ''
+            $fileHash = ''
+            $pendingRow = $null
             try {
-                $sidecar = Get-Content -Path $file.FullName -Raw -Encoding utf8 |
+                # Read once: the hash that is compared with the plan and the bytes that are parsed
+                # and posted are the same bytes, so the file cannot change in between.
+                $fileBytes = [System.IO.File]::ReadAllBytes($file.FullName)
+                $fileHash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($fileBytes))
+                $sidecar = [System.Text.Encoding]::UTF8.GetString($fileBytes).TrimStart([char]0xFEFF) |
                     ConvertFrom-Json -AsHashtable -Depth 50
 
                 $body = ConvertTo-CreationBody -Sidecar $sidecar -Definition $definition -AreaName $areaName
@@ -1348,46 +1536,80 @@ try {
                 $problem = Test-CreationBody -Body $body -Definition $definition
                 if ($problem) {
                     Write-Warning ('{0}: skipped - {1}.' -f $file.Name, $problem)
-                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'invalid' -Detail $problem
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'invalid' -Detail $problem -Sha256 $fileHash
                     continue
                 }
 
                 if ($existing.Contains($displayName)) {
                     Write-Verbose ('{0}: "{1}" already exists in the tenant, skipping.' -f $areaName, $displayName)
-                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'duplicate' -Detail 'a policy with this name already exists'
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'duplicate' -Detail 'a policy with this name already exists' -Sha256 $fileHash
+                    continue
+                }
+
+                # Bound to the plan: only a file the -WhatIf run listed as 'whatif', with the
+                # same content, is created. Anything else is reported and left alone, and the
+                # rest of the plan still runs.
+                if ($null -ne $plannedKeys -and -not $plannedKeys.Contains(('{0}|{1}|{2}' -f $areaName, $file.Name, $fileHash))) {
+                    Write-Warning ('{0}: not in the plan - not shown as whatif there, or changed since. Skipped.' -f $file.Name)
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'not-in-plan' `
+                        -Detail 'not shown as whatif in the plan, or changed since' -Sha256 $fileHash
                     continue
                 }
 
                 if (-not $PSCmdlet.ShouldProcess(('{0} "{1}"' -f $areaName, $displayName), 'Create in tenant')) {
-                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'whatif' -Detail $definition.Resource
+                    # Claimed in the dry run too, so a second file with the same name shows as
+                    # 'duplicate' here exactly as it will in the real run.
+                    [void]$existing.Add($displayName)
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status ($WhatIfPreference ? 'whatif' : 'declined') -Detail $definition.Resource -Sha256 $fileHash
                     continue
                 }
 
                 $json = ConvertTo-Json -InputObject $body -Depth 50
-                $created = Invoke-GraphRequest -Uri $targetUri -Method 'POST' -Body $json
 
-                $createdId = [string](Get-ObjectProperty -InputObject $created -Name 'id')
-
-                # Added to the local set so two files with the same name in one run cannot both
-                # be created.
+                # Write-ahead: the row exists BEFORE the request leaves. A timeout, a 5xx or an
+                # interrupted run can all follow a successful create, and this row is then the
+                # only record that the object may exist. The name joins the local set now for the
+                # same reason - a second file with this name must not be posted while the first
+                # one's outcome is unknown.
+                Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'indeterminate' `
+                    -Detail 'POST sent, no response recorded' -Sha256 $fileHash
+                $pendingRow = $results[$results.Count - 1]
                 [void]$existing.Add($displayName)
-                Write-Verbose ('{0}: created "{1}" ({2}).' -f $areaName, $displayName, $createdId)
-                Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'created' `
-                    -Detail $definition.Resource -CreatedId $createdId
+
+                $created = Invoke-GraphRequest -Uri $targetUri -Method 'POST' -Body $json
+                $pendingRow.Status = 'created'
+                $pendingRow.Detail = $definition.Resource
+                $pendingRow.CreatedId = [string](Get-ObjectProperty -InputObject $created -Name 'id')
+                Write-Verbose ('{0}: created "{1}" ({2}).' -f $areaName, $displayName, $pendingRow.CreatedId)
+                $pendingRow = $null
+                # The export does not expand 'apps' for these areas, and 'apps' is removed from the
+                # body above, so the policy exists but targets no app until someone sets it.
+                if ('apps' -in $definition.Remove) {
+                    Write-Warning ('{0}: "{1}" was created with no target apps - it protects or configures nothing until they are set in the portal.' -f $areaName, $displayName)
+                }
             }
             catch [GraphAuthenticationException] {
+                # 401 is rejected before processing - nothing was created, so the row goes.
+                if ($null -ne $pendingRow) { [void]$results.Remove($pendingRow) }
                 # Same global abort as above. Must be declared before the catch-all below, or
                 # the untyped handler swallows it and the run limps on with a dead token.
-                throw ('Aborting: {0}{1}If the message names no specific scope, this is not a permission problem - verify that the tenant has an active Intune licence.' -f
-                    $PSItem.Exception.Message, [System.Environment]::NewLine)
+                throw ($authAbortMessage -f $PSItem.Exception.Message, [System.Environment]::NewLine)
             }
             catch [GraphAuthorizationException] {
+                if ($null -ne $pendingRow) { [void]$results.Remove($pendingRow) }
                 # A 403 that only shows up on the POST: the duplicate read needs a Read scope,
-                # creating needs ReadWrite, and an app can hold one without the other. One row
-                # for the area, then on to the next - the remaining files would all fail the
-                # same way.
-                Write-Warning ('{0}: skipped - {1}' -f $areaName, $PSItem.Exception.Message)
-                Add-Result -AreaName $areaName -File '' -Name '' -Status 'blocked' -Detail $PSItem.Exception.Message
+                # creating needs ReadWrite, and an app can hold one without the other. The area
+                # stops here and the run moves on. The blocked row names the file that was
+                # refused, and every file left in the area gets a 'not-attempted' row: a 403
+                # can also be about this one object, and files before it may already exist.
+                $blockedMessage = $PSItem.Exception.Message
+                Write-Warning ('{0}: skipped - {1}' -f $areaName, $blockedMessage)
+                Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'blocked' `
+                    -Detail $blockedMessage -Sha256 $fileHash
+                foreach ($skippedFile in @($files | Select-Object -Skip ([array]::IndexOf($files, $file) + 1))) {
+                    Add-Result -AreaName $areaName -File $skippedFile.Name -Name '' -Status 'not-attempted' `
+                        -Detail 'an earlier file in this area was refused with 403'
+                }
                 break
             }
             catch {
@@ -1396,8 +1618,23 @@ try {
                 # the bare message is "400 (Bad Request)" and says nothing about which property
                 # Graph objected to.
                 $message = Get-GraphErrorDetail -ErrorRecord $PSItem
-                Write-Warning ('{0}: failed - {1}' -f $file.Name, $message)
-                Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'failed' -Detail $message
+                if ($null -eq $pendingRow) {
+                    Write-Warning ('{0}: failed - {1}' -f $file.Name, $message)
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'failed' -Detail $message -Sha256 $fileHash
+                    continue
+                }
+                # A 4xx is the service refusing the body: nothing was created. Anything else - no
+                # response, timeout, 5xx - can follow a successful create, so the row stays
+                # indeterminate and the name stays taken. Check the portal before re-running.
+                $response = $PSItem.Exception.PSObject.Properties['Response']
+                $statusCode = ($null -ne $response -and $null -ne $response.Value) ? [int]$response.Value.StatusCode : 0
+                if ($statusCode -ge 400 -and $statusCode -lt 500) {
+                    $pendingRow.Status = 'failed'
+                    [void]$existing.Remove($displayName)
+                }
+                $pendingRow.Detail = $message
+                Write-Warning ('{0}: {1} - {2}' -f $file.Name, $pendingRow.Status, $message)
+                $pendingRow = $null
             }
         }
     }
@@ -1412,6 +1649,7 @@ try {
     }
 
     $runComplete = $true
+    $abortReason = ''
 }
 catch [System.Exception] {
     $abortReason = $PSItem.Exception.Message
@@ -1428,10 +1666,14 @@ finally {
         'duplicate'    = 'duplicate'
         'invalid'      = 'invalid'
         'failed'       = 'failed'
-        'whatif'       = 'whatif'
+        'indeterminate' = 'indeterminate'
+        'whatif'      = 'whatif'
+        'declined'    = 'declined'
+        'not-in-plan' = 'notInPlan'
         'unsupported'  = 'unsupported'
         'unknown-area' = 'unknownArea'
         'blocked'      = 'blocked'
+        'not-attempted' = 'notAttempted'
     }
     $totals = [ordered]@{}
     foreach ($statusKey in $statusKeyByStatus.Values) { $totals[$statusKey] = 0 }
@@ -1440,12 +1682,12 @@ finally {
     }
 
     $report = [ordered]@{
-        schemaVersion      = 1
+        schemaVersion      = 2
         runTimestampUtc    = $runUtc.ToString('o')
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
         timeZone           = [System.TimeZoneInfo]::Local.Id
-        scriptVersion      = '1.1.1'
+        scriptVersion      = '1.2.0'
         whatIf             = [bool]$WhatIfPreference
         targetTenantId     = $tokenTenantId
         targetCustomerName = $script:TargetCustomerName
@@ -1465,27 +1707,32 @@ finally {
                 status    = $PSItem.Status
                 detail    = $PSItem.Detail
                 createdId = $PSItem.CreatedId
+                sha256    = $PSItem.Sha256
             }
         })
     }
 
-    $reportRoot = [string]::IsNullOrWhiteSpace($ReportDirectory) ? $sourceDirectoryResolved : (Resolve-Path -Path $ReportDirectory).Path
-    $reportPath = Join-Path -Path $reportRoot -ChildPath ('_importreport_{0}.json' -f $fileStamp)
+    $reportJson = ConvertTo-Json -InputObject $report -Depth 6
     try {
         # Written on a -WhatIf run too. A dry run that produces a file you can read afterwards
         # is the point of the dry run; whatIf: true is what tells the two apart.
-        Write-Utf8File -Path $reportPath -Content (ConvertTo-Json -InputObject $report -Depth 6)
+        Write-Utf8File -Path $reportPath -Content $reportJson
         Write-Verbose ('Report: {0}' -f $reportPath)
     }
     catch [System.Exception] {
-        # Never let a failed report write replace the exception that caused the abort.
-        Write-Warning ('Could not write the import report to "{0}": {1}' -f $reportPath, $PSItem.Exception.Message)
+        # Never let a failed report write replace the exception that caused the abort - and
+        # never end a run that may have created something without a copy on disk either.
+        $fallbackPath = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath (Split-Path -Path $reportPath -Leaf)
+        Write-Warning ('Could not write the import report to "{0}": {1} - writing it to "{2}" instead.' -f
+            $reportPath, $PSItem.Exception.Message, $fallbackPath)
+        try { Write-Utf8File -Path $fallbackPath -Content $reportJson }
+        catch [System.Exception] { Write-Warning ('Fallback report failed too: {0}' -f $PSItem.Exception.Message) }
     }
 }
 
-$summary = $results | Group-Object -Property Status |
-    Sort-Object -Property Name |
-    ForEach-Object { '{0}={1}' -f $PSItem.Name, $PSItem.Count }
+# $totals is the report's own count, built in 'finally'; only the statuses that occurred are listed.
+$summary = @($totals.GetEnumerator() | Where-Object { $PSItem.Value -gt 0 } |
+    ForEach-Object { '{0}={1}' -f $PSItem.Key, $PSItem.Value })
 
 Write-Verbose ('Done. {0}' -f ($summary -join ', '))
 Write-Output $results
