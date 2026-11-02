@@ -1643,6 +1643,30 @@ function Write-Utf8File {
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+function ConvertTo-StableJson {
+    # ConvertTo-Json indents with Environment.NewLine: CRLF on Windows, LF on macOS/Linux.
+    # ConfigurationHash is taken over these bytes, so the host OS would move every hash.
+    # Literal line breaks only come from indentation - inside string values they are
+    # escaped (\r\n) - so the replacement cannot touch data.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][AllowNull()]$InputObject, [Parameter(Mandatory)][int]$Depth)
+    return (ConvertTo-Json -InputObject $InputObject -Depth $Depth) -replace "`r`n", "`n"
+}
+
+function Export-StableCsv {
+    # Export-Csv ends every line with Environment.NewLine. Fixed LF, UTF-8 with BOM (Excel
+    # needs it): byte-identical to Export-Csv -Encoding utf8BOM on macOS.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object[]]$InputObject,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Delimiter
+    )
+    $lines = $InputObject | ConvertTo-Csv -NoTypeInformation -Delimiter $Delimiter
+    [System.IO.File]::WriteAllText($Path, (($lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($true))
+}
+
 function Get-PolicyVersion {
     [CmdletBinding()]
     [OutputType([string])]
@@ -2733,7 +2757,7 @@ function Invoke-InventoryComparison {
 
     # No BOM - this is machine input, not a spreadsheet.
     [System.IO.File]::WriteAllText($OutputPath,
-        (ConvertTo-Json -InputObject $changeSet -Depth 12),
+        (ConvertTo-StableJson -InputObject $changeSet -Depth 12),
         [System.Text.UTF8Encoding]::new($false))
 
     Write-Verbose ('Change set written to {0}' -f $OutputPath)
@@ -3134,7 +3158,7 @@ foreach ($definition in $policyDefinitions) {
         # hash and every run looks like a change. Indented, not compressed: the whole point
         # of the sidecar is a diff a human or an agent can read line by line.
         $canonical = ConvertTo-CanonicalObject -InputObject $configuration
-        $configurationJson = ConvertTo-Json -InputObject $canonical -Depth $JsonDepth
+        $configurationJson = ConvertTo-StableJson -InputObject $canonical -Depth $JsonDepth
 
         Write-Utf8File -Path (Join-Path -Path $areaFolderPath -ChildPath $configFileName) -Content $configurationJson
 
@@ -3262,9 +3286,8 @@ if ($deviceInventoryRequested) {
 }
 
 # Deterministic row order - required for a meaningful line-by-line diff between runs.
-$inventory |
-    Sort-Object -Property PolicyArea, DisplayName, Id |
-    Export-Csv -Path $csvPath -NoTypeInformation -Delimiter $Delimiter -Encoding utf8BOM
+Export-StableCsv -Path $csvPath -Delimiter $Delimiter `
+    -InputObject @($inventory | Sort-Object -Property PolicyArea, DisplayName, Id)
 
 # The per-area sidecar folders are packed into one archive at the end of the run - after the
 # comparison, so the current run is still diffed loose (see the archive block below). The
@@ -3311,7 +3334,7 @@ $manifest = [ordered]@{
     areas                    = @($areaResults)
 }
 $manifestPath = Join-Path -Path $runDirectory -ChildPath ('_manifest_{0}.json' -f $fileStamp)
-Write-Utf8File -Path $manifestPath -Content (ConvertTo-Json -InputObject $manifest -Depth 6)
+Write-Utf8File -Path $manifestPath -Content (ConvertTo-StableJson -InputObject $manifest -Depth 6)
 
 # Run-wide Settings Catalog definitions, collected and deduplicated during the area loop and
 # already stripped out of every policy's configuration. Written even when empty, like
@@ -3326,7 +3349,7 @@ if ($IncludeSettingDefinitions) {
         definitionCount = $definitionList.Count
         definitions     = $definitionList
     }
-    Write-Utf8File -Path $settingDefinitionsPath -Content (ConvertTo-Json -InputObject $settingDefinitionsDocument -Depth 8)
+    Write-Utf8File -Path $settingDefinitionsPath -Content (ConvertTo-StableJson -InputObject $settingDefinitionsDocument -Depth 8)
     Write-Verbose ('Setting definitions: {0} -> {1}' -f $definitionList.Count, $settingDefinitionsPath)
 }
 
@@ -3336,9 +3359,8 @@ if ($IncludeSettingDefinitions) {
 $appInstallStatusPath = $null
 if ($IncludeAppInstallStatus -and $appInstallStatus.Count -gt 0) {
     $appInstallStatusPath = Join-Path -Path $runDirectory -ChildPath ('AppInstallStatus_{0}.csv' -f $fileStamp)
-    $appInstallStatus |
-        Sort-Object -Property DisplayName, Id |
-        Export-Csv -Path $appInstallStatusPath -NoTypeInformation -Delimiter $Delimiter -Encoding utf8BOM
+    Export-StableCsv -Path $appInstallStatusPath -Delimiter $Delimiter `
+        -InputObject @($appInstallStatus | Sort-Object -Property DisplayName, Id)
     Write-Verbose ('Install status for {0} app(s): {1}' -f $appInstallStatus.Count, $appInstallStatusPath)
 }
 
@@ -3347,9 +3369,8 @@ if ($IncludeAppInstallStatus -and $appInstallStatus.Count -gt 0) {
 $deviceInventoryPath = $null
 if ($IncludeDeviceInventory -and $deviceInventory.Count -gt 0) {
     $deviceInventoryPath = Join-Path -Path $runDirectory -ChildPath ('DeviceInventory_{0}.csv' -f $fileStamp)
-    $deviceInventory |
-        Sort-Object -Property OperatingSystem, DeviceName, Id |
-        Export-Csv -Path $deviceInventoryPath -NoTypeInformation -Delimiter $Delimiter -Encoding utf8BOM
+    Export-StableCsv -Path $deviceInventoryPath -Delimiter $Delimiter `
+        -InputObject @($deviceInventory | Sort-Object -Property OperatingSystem, DeviceName, Id)
     Write-Verbose ('Device inventory for {0} device(s): {1}' -f $deviceInventory.Count, $deviceInventoryPath)
 }
 
@@ -3370,7 +3391,7 @@ if ($IncludeAuditActor) {
             eventCount     = $auditProjection.Count
             events         = @($auditProjection)
         }
-        Write-Utf8File -Path $auditEventsPath -Content (ConvertTo-Json -InputObject $auditDocument -Depth 8)
+        Write-Utf8File -Path $auditEventsPath -Content (ConvertTo-StableJson -InputObject $auditDocument -Depth 8)
         Write-Verbose ('Audit events in window: {0} -> {1}' -f $auditProjection.Count, $auditEventsPath)
     }
     catch [System.Exception] {
