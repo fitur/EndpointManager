@@ -1165,8 +1165,10 @@ function Get-GraphAccessToken {
     catch [System.Exception] {
         # The AADSTS code in this message is the fastest way to separate "app not registered
         # in this tenant" (AADSTS700016) from "wrong secret" (AADSTS7000215).
-        throw ('Failed to acquire Graph token for tenant {0}: {1}' -f
-            $script:AuthContext.TenantId, (Get-GraphErrorDetail -ErrorRecord $PSItem))
+        # GraphAuthenticationException, not a plain exception: Invoke-GraphRequest retries
+        # anything without a status code, and a rejected credential does not get better.
+        throw [GraphAuthenticationException]::new(('Failed to acquire Graph token for tenant {0}: {1}' -f
+            $script:AuthContext.TenantId, (Get-GraphErrorDetail -ErrorRecord $PSItem)))
     }
 
     $script:TokenCache = [pscustomobject]@{
@@ -1205,6 +1207,10 @@ function Invoke-GraphRequest {
                 $requestArgs['ContentType'] = 'application/json'
             }
             return Invoke-RestMethod @requestArgs
+        }
+        catch [GraphAuthenticationException] {
+            # From Get-GraphAccessToken: no response, no point in retrying.
+            throw
         }
         catch [System.Exception] {
             $statusCode = 0
@@ -1247,7 +1253,8 @@ function Invoke-GraphRequest {
             if (-not $isRetryable -or $attempt -ge $MaxAttempt) { throw }
 
             # Retry-After wins over backoff: Graph knows the actual throttle window, we don't.
-            $delay = $retryAfterSeconds ?? [int][math]::Min([math]::Pow(2, $attempt), 60)
+            # Capped: a bogus header value must not freeze the run for an hour.
+            $delay = ($null -ne $retryAfterSeconds) ? [math]::Min($retryAfterSeconds, 300) : [int][math]::Min([math]::Pow(2, $attempt), 60)
             Write-Warning ('Graph {0} on attempt {1}/{2}, waiting {3}s: {4}' -f $statusCode, $attempt, $MaxAttempt, $delay, $Uri)
             Start-Sleep -Seconds ([math]::Max($delay, 1))
         }
