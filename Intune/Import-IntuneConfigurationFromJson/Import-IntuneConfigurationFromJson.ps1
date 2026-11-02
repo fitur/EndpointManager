@@ -1448,6 +1448,14 @@ try {
             Add-Result -AreaName $areaName -File '' -Name '' -Status 'blocked' -Detail $PSItem.Exception.Message
             continue
         }
+        catch [System.Exception] {
+            # Anything else - a 400, an exhausted 5xx retry. Without the names there is no
+            # duplicate check, so nothing is posted in this area; the next area still runs.
+            $message = Get-GraphErrorDetail -ErrorRecord $PSItem
+            Write-Warning ('{0}: skipped - could not read the existing names: {1}' -f $areaName, $message)
+            Add-Result -AreaName $areaName -File '' -Name '' -Status 'failed' -Detail ('could not read existing names: {0}' -f $message)
+            continue
+        }
         $targetUri = 'https://graph.microsoft.com/beta/{0}' -f $definition.Resource
 
         foreach ($file in $files) {

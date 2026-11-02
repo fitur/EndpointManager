@@ -394,6 +394,10 @@ only comes on a POST, the `blocked` row names the file that was refused, every f
 the area gets a `not-attempted` row, and the run moves on: a 403 can also be about one object,
 and the files before it may already have been created.
 
+**Any other error reading an area's existing names** (a 400, a 5xx that outlasts the retries)
+skips that area with one `failed` row and goes on to the next. Nothing is posted into an area
+whose names could not be read, since there would be no duplicate check.
+
 **401** is global: the token itself is not accepted. One automatic refresh covers a genuinely
 stale token; a second 401 aborts the run. The report is still written, with
 `runComplete: false`.
