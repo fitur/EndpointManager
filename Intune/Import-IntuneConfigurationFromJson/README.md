@@ -73,67 +73,6 @@ tells them apart.
 **More than one tenant?** Skip step 4 and put the credentials in a file instead — see
 [Several customers](#several-customers).
 
-## The hard requirement
-
-**Nothing is created that a `-WhatIf` run has not already shown, and everything that is
-created is on disk before the process can exit.**
-
-The first half is enforced by the code, not by discipline: a real run needs `-PlanPath`, the
-report of a `-WhatIf` run against the same tenant, and creates only the files that report
-listed as `whatif` with the same content hash. See [The plan](#the-plan).
-
-There is no rollback. When half a run fails, the import report is all that is left, so it is
-written from a `finally` block rather than after the loop — the case that needs it most is the
-one that never reaches the end. A global 401 halfway through leaves real objects in the target
-tenant that exist nowhere else in writing, and the report is what tells you which ones.
-
-That is also why the report is written on a `-WhatIf` run. A dry run you can read afterwards,
-diff, and hand to someone else is the point of the dry run.
-
-Two consequences that follow from the same constraint:
-
-- **A `POST` is retried only on 429.** A 5xx or a dropped connection can happen *after* the
-  service has already created the policy, so replaying it would create a second copy. 429 means
-  the request was rejected before it was processed, which makes it the one status that is safe.
-  `GET` keeps the export's wider retry set.
-- **One confirmation, before the first write, not one per object.** `ConfirmImpact = 'High'`
-  would ask eighteen times, and an operator clicking through eighteen prompts has stopped
-  reading by the third.
-
-## What it covers
-
-14 areas, all posted to `beta`:
-
-| Area folder | Graph resource |
-|---|---|
-| `Assignment-Filter` | `deviceManagement/assignmentFilters` |
-| `Settings-Catalog` | `deviceManagement/configurationPolicies` |
-| `Device-Configuration-Templates` | `deviceManagement/deviceConfigurations` |
-| `Compliance-Policy` | `deviceManagement/deviceCompliancePolicies` |
-| `Remediation-Script` | `deviceManagement/deviceHealthScripts` |
-| `Platform-Script-Windows` | `deviceManagement/deviceManagementScripts` |
-| `Shell-Script-macOS` | `deviceManagement/deviceShellScripts` |
-| `Autopilot-Deployment-Profile` | `deviceManagement/windowsAutopilotDeploymentProfiles` |
-| `Windows-Feature-Update-Profile` | `deviceManagement/windowsFeatureUpdateProfiles` |
-| `Windows-Quality-Update-Profile` | `deviceManagement/windowsQualityUpdateProfiles` |
-| `Windows-Driver-Update-Profile` | `deviceManagement/windowsDriverUpdateProfiles` |
-| `App-Protection-Policy-iOS` | `deviceAppManagement/iosManagedAppProtections` |
-| `App-Protection-Policy-Android` | `deviceAppManagement/androidManagedAppProtections` |
-| `App-Configuration-Managed-Apps` | `deviceAppManagement/targetedManagedAppConfigurations` |
-
-Five more areas appear in an export and are **not** importable. They are listed explicitly in
-the script so a run reports them with the reason rather than leaving you wondering why a folder
-was ignored — see [Known limitations](#known-limitations).
-
-A sidecar is a record of what a policy looked like, not a request body. Three things happen to
-each file before it is posted: the service-owned properties are stripped, the double-wrapped
-`settings` array written by exports before 1.11.0 is flattened, and the required properties are
-checked up front so a file that cannot produce a valid policy is reported rather than
-half-created.
-
-Duplicates are handled by reading the existing display names once per area. A file whose name
-matches something already in the target tenant is skipped and reported.
-
 ## Requirements
 
 **PowerShell 7.5 or later.** Ternary operators, null-coalescing and `ConvertFrom-Json -DateKind`. Developed on macOS 7.6.5,
@@ -306,6 +245,67 @@ hash and the name check against the tenant are what keep a stale plan from doing
 **Scheduled runs:** run `-WhatIf` first, then `-Force -PlanPath <that report>`. A scheduled
 real run without a plan throws before anything is created.
 
+## The hard requirement
+
+**Nothing is created that a `-WhatIf` run has not already shown, and everything that is
+created is on disk before the process can exit.**
+
+The first half is enforced by the code, not by discipline: a real run needs `-PlanPath`, the
+report of a `-WhatIf` run against the same tenant, and creates only the files that report
+listed as `whatif` with the same content hash. See [The plan](#the-plan).
+
+There is no rollback. When half a run fails, the import report is all that is left, so it is
+written from a `finally` block rather than after the loop — the case that needs it most is the
+one that never reaches the end. A global 401 halfway through leaves real objects in the target
+tenant that exist nowhere else in writing, and the report is what tells you which ones.
+
+That is also why the report is written on a `-WhatIf` run. A dry run you can read afterwards,
+diff, and hand to someone else is the point of the dry run.
+
+Two consequences that follow from the same constraint:
+
+- **A `POST` is retried only on 429.** A 5xx or a dropped connection can happen *after* the
+  service has already created the policy, so replaying it would create a second copy. 429 means
+  the request was rejected before it was processed, which makes it the one status that is safe.
+  `GET` keeps the export's wider retry set.
+- **One confirmation, before the first write, not one per object.** `ConfirmImpact = 'High'`
+  would ask eighteen times, and an operator clicking through eighteen prompts has stopped
+  reading by the third.
+
+## What it covers
+
+14 areas, all posted to `beta`:
+
+| Area folder | Graph resource |
+|---|---|
+| `Assignment-Filter` | `deviceManagement/assignmentFilters` |
+| `Settings-Catalog` | `deviceManagement/configurationPolicies` |
+| `Device-Configuration-Templates` | `deviceManagement/deviceConfigurations` |
+| `Compliance-Policy` | `deviceManagement/deviceCompliancePolicies` |
+| `Remediation-Script` | `deviceManagement/deviceHealthScripts` |
+| `Platform-Script-Windows` | `deviceManagement/deviceManagementScripts` |
+| `Shell-Script-macOS` | `deviceManagement/deviceShellScripts` |
+| `Autopilot-Deployment-Profile` | `deviceManagement/windowsAutopilotDeploymentProfiles` |
+| `Windows-Feature-Update-Profile` | `deviceManagement/windowsFeatureUpdateProfiles` |
+| `Windows-Quality-Update-Profile` | `deviceManagement/windowsQualityUpdateProfiles` |
+| `Windows-Driver-Update-Profile` | `deviceManagement/windowsDriverUpdateProfiles` |
+| `App-Protection-Policy-iOS` | `deviceAppManagement/iosManagedAppProtections` |
+| `App-Protection-Policy-Android` | `deviceAppManagement/androidManagedAppProtections` |
+| `App-Configuration-Managed-Apps` | `deviceAppManagement/targetedManagedAppConfigurations` |
+
+Five more areas appear in an export and are **not** importable. They are listed explicitly in
+the script so a run reports them with the reason rather than leaving you wondering why a folder
+was ignored — see [Known limitations](#known-limitations).
+
+A sidecar is a record of what a policy looked like, not a request body. Three things happen to
+each file before it is posted: the service-owned properties are stripped, the double-wrapped
+`settings` array written by exports before 1.11.0 is flattened, and the required properties are
+checked up front so a file that cannot produce a valid policy is reported rather than
+half-created.
+
+Duplicates are handled by reading the existing display names once per area. A file whose name
+matches something already in the target tenant is skipped and reported.
+
 ## Output
 
 Two things: the result objects on the pipeline, and `_importreport_<stamp>.json` written into
@@ -422,47 +422,6 @@ The `configurationPolicies` endpoint is less tidy about it: it packs an entire J
 right behaviour — the function is shared word-for-word with the export script and is not going
 to be forked to unpack an Intune-internal blob.
 
-## Data sensitivity
-
-The source folder holds the tenant's complete security configuration, including script bodies
-and security baselines. Nothing here protects it.
-
-The **import report** is its own item, and it crosses a customer boundary: it describes the
-*target* tenant — its tenant ID and every policy name created there — but by default it is
-written into the *source* customer's folder. Import Contoso's export into Fabrikam's tenant and
-you end up with Fabrikam's tenant ID and policy names sitting in Contoso's directory, which for
-a synchronised source folder means in Contoso's OneDrive.
-
-That is the same sensitivity class as the export's own output. Use `-ReportDirectory` to send
-the report somewhere that belongs to the target customer, or somewhere that belongs to neither.
-
-## On the code itself
-
-This was written with heavy AI assistance, over days rather than a long slow burn. Worth saying
-plainly rather than leaving to be discovered.
-
-What it has going for it is that the bugs were found by **running it**, not by reading it:
-
-- `Get-ExistingName` returned its `HashSet` without a comma guard. PowerShell enumerates a
-  collection on the way out of a function, so an empty set came back as `$null` and a
-  one-element set as a bare string — and a string's `.Contains()` does substring matching, so
-  a policy named `Windows` would have matched `Windows 11 Baseline` and been skipped as a
-  duplicate. Both failures are silent.
-- Exports before 1.11.0 wrote `settings` as `[[{...}]]`, one array too deep. Posting that
-  creates a Settings Catalog policy with no settings at all and returns 201. The detection is
-  shape-based rather than version-based so it keeps working once every run folder has been
-  regenerated.
-- The export's `Invoke-GraphRequest` treats a status of `0` — no response, network error,
-  timeout — as retryable. Correct for a `GET`, dangerous for a `POST`; see
-  [The hard requirement](#the-hard-requirement).
-- Copying the export's 401 handler verbatim would have looked right and done nothing. It nulls
-  a single `$script:TokenCache`; this script caches the token and its expiry in two fields, and
-  clearing only the token hands the same rejected token straight back on the retry.
-
-Judge it on the behaviour, not the provenance. It is not certified, warrantied or supported —
-and unlike the export, which only ever issues `GET`, this one writes. Read it before running it
-against a tenant you care about, and start with `-TestPermissionOnly` and `-WhatIf`.
-
 ## Known limitations
 
 - **Five areas cannot be imported.** They are reported with the reason when their folder is
@@ -532,6 +491,47 @@ against a tenant you care about, and start with `-TestPermissionOnly` and `-What
   `ConvertTo-Base64Url` and `New-ClientAssertion` in two. Do not "resynchronise" them by
   pasting one copy over another; the win32 copy takes a `[string]` password and catches only
   `PlatformNotSupportedException`, which the export widened deliberately.
+
+## Data sensitivity
+
+The source folder holds the tenant's complete security configuration, including script bodies
+and security baselines. Nothing here protects it.
+
+The **import report** is its own item, and it crosses a customer boundary: it describes the
+*target* tenant — its tenant ID and every policy name created there — but by default it is
+written into the *source* customer's folder. Import Contoso's export into Fabrikam's tenant and
+you end up with Fabrikam's tenant ID and policy names sitting in Contoso's directory, which for
+a synchronised source folder means in Contoso's OneDrive.
+
+That is the same sensitivity class as the export's own output. Use `-ReportDirectory` to send
+the report somewhere that belongs to the target customer, or somewhere that belongs to neither.
+
+## On the code itself
+
+This was written with heavy AI assistance, over days rather than a long slow burn. Worth saying
+plainly rather than leaving to be discovered.
+
+What it has going for it is that the bugs were found by **running it**, not by reading it:
+
+- `Get-ExistingName` returned its `HashSet` without a comma guard. PowerShell enumerates a
+  collection on the way out of a function, so an empty set came back as `$null` and a
+  one-element set as a bare string — and a string's `.Contains()` does substring matching, so
+  a policy named `Windows` would have matched `Windows 11 Baseline` and been skipped as a
+  duplicate. Both failures are silent.
+- Exports before 1.11.0 wrote `settings` as `[[{...}]]`, one array too deep. Posting that
+  creates a Settings Catalog policy with no settings at all and returns 201. The detection is
+  shape-based rather than version-based so it keeps working once every run folder has been
+  regenerated.
+- The export's `Invoke-GraphRequest` treats a status of `0` — no response, network error,
+  timeout — as retryable. Correct for a `GET`, dangerous for a `POST`; see
+  [The hard requirement](#the-hard-requirement).
+- Copying the export's 401 handler verbatim would have looked right and done nothing. It nulls
+  a single `$script:TokenCache`; this script caches the token and its expiry in two fields, and
+  clearing only the token hands the same rejected token straight back on the retry.
+
+Judge it on the behaviour, not the provenance. It is not certified, warrantied or supported —
+and unlike the export, which only ever issues `GET`, this one writes. Read it before running it
+against a tenant you care about, and start with `-TestPermissionOnly` and `-WhatIf`.
 
 ## License
 
