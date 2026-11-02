@@ -2128,8 +2128,13 @@ function Get-RunContext {
         throw ('CSV "{0}" named by the manifest is missing from "{1}".' -f $csvName, $Path)
     }
 
+    # The CSV is read with the delimiter it was written with. A manifest from before 1.15.0
+    # has no csvDelimiter, and those runs were always written with a comma.
+    $csvDelimiter = [string](Get-ObjectProperty -InputObject $manifest -Name 'csvDelimiter')
+    if ([string]::IsNullOrEmpty($csvDelimiter)) { $csvDelimiter = ',' }
+
     $index = @{}
-    foreach ($row in (Import-Csv -Path $csvPath)) {
+    foreach ($row in (Import-Csv -Path $csvPath -Delimiter $csvDelimiter)) {
         $index[$row.RecordKey] = $row
     }
     Write-Verbose ('Loaded {0} record(s) from {1}' -f $index.Count, $csvName)
@@ -3422,6 +3427,7 @@ $manifest = [ordered]@{
     tenantDirectory          = $tenantNamePart
     runDirectory             = $folderStamp
     csvFile                  = $csvName
+    csvDelimiter             = $Delimiter
     jsonDepth                = $JsonDepth
     detailedSettingsIncluded = (-not $SkipDetailedSettings.IsPresent)
     totalPolicies            = $inventory.Count
