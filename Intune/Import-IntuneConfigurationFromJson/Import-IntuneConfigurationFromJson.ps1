@@ -1279,7 +1279,19 @@ function Add-Result {
 # the two can be reconciled. Same convention as the export's manifest.
 $runLocal = Get-Date
 $runUtc = $runLocal.ToUniversalTime()
-$fileStamp = $runLocal.ToString('yyyy-MM-dd_HHmm')
+$fileStamp = $runLocal.ToString('yyyy-MM-dd_HHmmss')
+
+# Reserved here - after the confirmation prompt, before the first POST. CreateNew fails if
+# the file exists, so two runs can never overwrite each other's record of what they created,
+# and an unwritable report directory stops the run while nothing has been created yet.
+$reportRoot = [string]::IsNullOrWhiteSpace($ReportDirectory) ? $sourceDirectoryResolved : (Resolve-Path -LiteralPath $ReportDirectory).Path
+$reportPath = Join-Path -Path $reportRoot -ChildPath ('_importreport_{0}.json' -f $fileStamp)
+try {
+    [System.IO.File]::Open($reportPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write).Dispose()
+}
+catch [System.Exception] {
+    throw ('Cannot create the import report "{0}" - nothing was created. {1}' -f $reportPath, $PSItem.Exception.Message)
+}
 
 $runComplete = $false
 $abortReason = ''
@@ -1468,17 +1480,21 @@ finally {
         })
     }
 
-    $reportRoot = [string]::IsNullOrWhiteSpace($ReportDirectory) ? $sourceDirectoryResolved : (Resolve-Path -Path $ReportDirectory).Path
-    $reportPath = Join-Path -Path $reportRoot -ChildPath ('_importreport_{0}.json' -f $fileStamp)
+    $reportJson = ConvertTo-Json -InputObject $report -Depth 6
     try {
         # Written on a -WhatIf run too. A dry run that produces a file you can read afterwards
         # is the point of the dry run; whatIf: true is what tells the two apart.
-        Write-Utf8File -Path $reportPath -Content (ConvertTo-Json -InputObject $report -Depth 6)
+        Write-Utf8File -Path $reportPath -Content $reportJson
         Write-Verbose ('Report: {0}' -f $reportPath)
     }
     catch [System.Exception] {
-        # Never let a failed report write replace the exception that caused the abort.
-        Write-Warning ('Could not write the import report to "{0}": {1}' -f $reportPath, $PSItem.Exception.Message)
+        # Never let a failed report write replace the exception that caused the abort - and
+        # never end a run that may have created something without a copy on disk either.
+        $fallbackPath = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath (Split-Path -Path $reportPath -Leaf)
+        Write-Warning ('Could not write the import report to "{0}": {1} - writing it to "{2}" instead.' -f
+            $reportPath, $PSItem.Exception.Message, $fallbackPath)
+        try { Write-Utf8File -Path $fallbackPath -Content $reportJson }
+        catch [System.Exception] { Write-Warning ('Fallback report failed too: {0}' -f $PSItem.Exception.Message) }
     }
 }
 

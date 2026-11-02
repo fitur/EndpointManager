@@ -283,13 +283,15 @@ about the first run's report.
 ```
 Import/
   _manifest_2026-08-20_0914.json          ← the export's, if you kept it
-  _importreport_2026-09-01_1204.json      ← this script's
+  _importreport_2026-09-01_120437.json    ← this script's
   Settings-Catalog/
   Compliance-Policy/
 ```
 
-The file name uses local time so a run is easy to identify while browsing; the report records
-the same instant in UTC, in local time, and with the offset.
+The file name uses local time, to the second, so a run is easy to identify while browsing; the
+report records the same instant in UTC, in local time, and with the offset. The file is created
+before the first write and is never overwritten: if it cannot be created (it exists, or the
+folder is not writable) the run stops with nothing created.
 
 ```json
 {
