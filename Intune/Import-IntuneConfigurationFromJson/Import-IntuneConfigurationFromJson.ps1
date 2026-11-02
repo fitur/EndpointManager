@@ -892,8 +892,11 @@ function ConvertTo-CreationBody {
     # fell back to a flat one, do not - and those are the ones this fills in. A block action
     # with no grace period is the least surprising default, but it is still a decision the
     # script is making on the operator's behalf.
+    # An empty array or null counts as absent: it fails the POST the same way.
     if ($Definition.Resource -eq 'deviceManagement/deviceCompliancePolicies' -and
-        -not $body.ContainsKey('scheduledActionsForRule')) {
+        (-not $body.ContainsKey('scheduledActionsForRule') -or
+         $null -eq $body['scheduledActionsForRule'] -or
+         @($body['scheduledActionsForRule']).Count -eq 0)) {
         Write-Warning ('Compliance policy "{0}": no scheduled actions in the sidecar - creating with block after 0 hours. Review the grace period in the portal, and see "Known limitations" in README.md.' -f $body['displayName'])
         $body['scheduledActionsForRule'] = @(
             @{
@@ -951,6 +954,10 @@ function Test-CreationBody {
         $value = $Body[$property]
         if ($null -eq $value) { return ('required property "{0}" is null' -f $property) }
         if ($value -is [string] -and [string]::IsNullOrWhiteSpace($value)) {
+            return ('required property "{0}" is empty' -f $property)
+        }
+        # An empty 'settings' array would create a Settings Catalog policy with no settings (201).
+        if ($value -is [System.Collections.IList] -and $value.Count -eq 0) {
             return ('required property "{0}" is empty' -f $property)
         }
     }
