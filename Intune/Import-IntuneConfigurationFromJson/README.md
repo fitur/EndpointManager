@@ -510,6 +510,10 @@ against a tenant you care about, and start with `-TestPermissionOnly` and `-What
 - **Compliance notification templates are not carried over.** A scheduled action's
   `notificationTemplateId` points at a template in the source tenant. It is cleared, with a
   warning naming the policy, so no notification is sent until a template is chosen in the portal.
+- **Device configuration profiles with secrets are rejected as `invalid`.** An encrypted OMA-URI
+  value (`isEncrypted: true`) or a `secretReferenceValueId` is masked or referenced to the source
+  tenant in the export, so posting it would fail or create a profile with a placeholder instead
+  of the secret. Create those in the portal.
 - **Everything is created unassigned.** Assignments are never imported.
 - **The duplicate check is name-based.** Names are compared case-insensitively after trimming
   surrounding whitespace and normalising Unicode to NFC; the name that is posted is unchanged. An object renamed in the

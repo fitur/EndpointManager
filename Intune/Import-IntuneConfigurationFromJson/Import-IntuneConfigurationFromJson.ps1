@@ -988,6 +988,29 @@ function ConvertTo-CreationBody {
     return $body
 }
 
+function Test-SecretPlaceholder {
+    # The export cannot carry a secret: an encrypted OMA-URI value or a Wi-Fi/VPN secret comes
+    # back masked, null or as a reference to a store in the SOURCE tenant. Posting it either
+    # fails or creates a profile with a placeholder in place of the secret.
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([AllowNull()]$InputObject)
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        foreach ($key in $InputObject.Keys) {
+            if ([string]$key -eq 'secretReferenceValueId' -and -not [string]::IsNullOrWhiteSpace([string]$InputObject[$key])) { return $true }
+            if ([string]$key -eq 'isEncrypted' -and $InputObject[$key] -eq $true) { return $true }
+            if (Test-SecretPlaceholder -InputObject $InputObject[$key]) { return $true }
+        }
+    }
+    elseif ($InputObject -is [System.Collections.IList]) {
+        foreach ($item in $InputObject) {
+            if (Test-SecretPlaceholder -InputObject $item) { return $true }
+        }
+    }
+    return $false
+}
+
 function Test-CreationBody {
     [CmdletBinding()]
     [OutputType([string])]
@@ -1007,6 +1030,9 @@ function Test-CreationBody {
         if ($value -is [System.Collections.IList] -and $value.Count -eq 0) {
             return ('required property "{0}" is empty' -f $property)
         }
+    }
+    if ($Definition.Resource -eq 'deviceManagement/deviceConfigurations' -and (Test-SecretPlaceholder -InputObject $Body)) {
+        return 'contains an encrypted value or a secret reference (isEncrypted / secretReferenceValueId) that the export cannot carry - create this profile in the portal'
     }
     return ''
 }
