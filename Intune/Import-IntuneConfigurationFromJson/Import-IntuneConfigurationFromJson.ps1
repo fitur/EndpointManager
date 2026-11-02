@@ -1373,6 +1373,9 @@ try {
                 }
 
                 if (-not $PSCmdlet.ShouldProcess(('{0} "{1}"' -f $areaName, $displayName), 'Create in tenant')) {
+                    # Claimed in the dry run too, so a second file with the same name shows as
+                    # 'duplicate' here exactly as it will in the real run.
+                    [void]$existing.Add($displayName)
                     Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'whatif' -Detail $definition.Resource
                     continue
                 }
