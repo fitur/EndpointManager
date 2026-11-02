@@ -501,6 +501,12 @@ against a tenant you care about, and start with `-TestPermissionOnly` and `-What
   0 hours** and warns. **Review the grace period in the portal afterwards.**
 - **Area folders live in a zip** in export run folders from 1.12.0 onwards. Unpack first. The
   script says so if it finds no area folders, but it cannot read the archive itself yet.
+- **App protection and app configuration policies are created without target apps.** The
+  export does not expand `apps` for `App-Protection-Policy-iOS`, `App-Protection-Policy-Android`
+  and `App-Configuration-Managed-Apps`, and the import drops the key, so the policy is created
+  (201) but protects or configures no app until `targetApps` is set in the portal. The script
+  warns once per created policy in those areas. Setting the apps from the script would be a
+  second, writing call and is not done.
 - **Everything is created unassigned.** Assignments are never imported.
 - **The duplicate check is name-based.** An object renamed in the target tenant is not
   recognised and gets created a second time.

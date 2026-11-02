@@ -1522,6 +1522,11 @@ try {
                 $pendingRow.CreatedId = [string](Get-ObjectProperty -InputObject $created -Name 'id')
                 Write-Verbose ('{0}: created "{1}" ({2}).' -f $areaName, $displayName, $pendingRow.CreatedId)
                 $pendingRow = $null
+                # The export does not expand 'apps' for these areas, and 'apps' is removed from the
+                # body above, so the policy exists but targets no app until someone sets it.
+                if ('apps' -in $definition.Remove) {
+                    Write-Warning ('{0}: "{1}" was created with no target apps - it protects or configures nothing until they are set in the portal.' -f $areaName, $displayName)
+                }
             }
             catch [GraphAuthenticationException] {
                 # 401 is rejected before processing - nothing was created, so the row goes.
