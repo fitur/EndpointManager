@@ -741,6 +741,35 @@ function Get-GraphErrorDetail {
     return '{0} | {1}' -f $message, $details.Message
 }
 
+function Join-OrdinalUnique {
+    # Ordinal and case-sensitive. Sort-Object collates by the host culture (sv-SE puts A-ring
+    # after Z, en-US after A) and -Unique folds case, so the same set of groups joined differently
+    # on another machine, and two groups differing only in case collapsed into one.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Value, [string]$Separator = ';')
+    $set = [System.Collections.Generic.SortedSet[string]]::new(
+        [string[]]@($Value | Where-Object { $null -ne $PSItem }), [System.StringComparer]::Ordinal)
+    return ($set -join $Separator)
+}
+
+function Get-OrdinalSortedRow {
+    # Sort-Object has no ordinal mode. OrderBy is stable and takes an explicit comparer;
+    # the key joins the properties with NUL so they compare field by field.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Row,
+        [Parameter(Mandatory)][string[]]$Property
+    )
+    $names = $Property
+    $keySelector = [System.Func[object, string]] {
+        param($item)
+        @(foreach ($name in $names) { [string]$item.$name }) -join [char]0
+    }.GetNewClosure()
+    return [object[]][System.Linq.Enumerable]::ToArray(
+        [System.Linq.Enumerable]::OrderBy([object[]]@($Row), $keySelector, [System.StringComparer]::Ordinal))
+}
+
 function ConvertTo-CanonicalObject {
     <#
         Recursively rebuilds an object with dictionary/property keys sorted.
@@ -1603,10 +1632,10 @@ function ConvertTo-AssignmentDetail {
 
     # Sorted so an unchanged assignment set always produces an identical string between runs.
     return [pscustomobject]@{
-        Included = (($included | Sort-Object -Unique) -join ';')
-        Excluded = (($excluded | Sort-Object -Unique) -join ';')
-        Filters  = (($filters | Sort-Object -Unique) -join ';')
-        Intents  = (($intents | Sort-Object -Unique) -join ';')
+        Included = Join-OrdinalUnique -Value $included
+        Excluded = Join-OrdinalUnique -Value $excluded
+        Filters  = Join-OrdinalUnique -Value $filters
+        Intents  = Join-OrdinalUnique -Value $intents
         Count    = $count
     }
 }
@@ -2620,7 +2649,12 @@ function Invoke-InventoryComparison {
                     foreach ($field in $assignmentFields) {
                         $oldValue = [string](Get-ObjectProperty -InputObject $old -Name $field)
                         $newValue = [string](Get-ObjectProperty -InputObject $row -Name $field)
-                        if ($oldValue -ne $newValue) {
+                        # Compared as ordinal sets: the join order is presentation, and a
+                        # baseline written with the old culture-sorted join must not read
+                        # as re-targeted.
+                        $oldSet = [System.Collections.Generic.SortedSet[string]]::new([string[]]($oldValue -split ';'), [System.StringComparer]::Ordinal)
+                        $newSet = [System.Collections.Generic.SortedSet[string]]::new([string[]]($newValue -split ';'), [System.StringComparer]::Ordinal)
+                        if (-not $oldSet.SetEquals($newSet)) {
                             $assignmentChanges.Add([pscustomobject][ordered]@{
                                 field = $field; oldValue = $oldValue; newValue = $newValue
                             })
@@ -3287,7 +3321,7 @@ if ($deviceInventoryRequested) {
 
 # Deterministic row order - required for a meaningful line-by-line diff between runs.
 Export-StableCsv -Path $csvPath -Delimiter $Delimiter `
-    -InputObject @($inventory | Sort-Object -Property PolicyArea, DisplayName, Id)
+    -InputObject (Get-OrdinalSortedRow -Row $inventory -Property PolicyArea, DisplayName, Id)
 
 # The per-area sidecar folders are packed into one archive at the end of the run - after the
 # comparison, so the current run is still diffed loose (see the archive block below). The
@@ -3360,7 +3394,7 @@ $appInstallStatusPath = $null
 if ($IncludeAppInstallStatus -and $appInstallStatus.Count -gt 0) {
     $appInstallStatusPath = Join-Path -Path $runDirectory -ChildPath ('AppInstallStatus_{0}.csv' -f $fileStamp)
     Export-StableCsv -Path $appInstallStatusPath -Delimiter $Delimiter `
-        -InputObject @($appInstallStatus | Sort-Object -Property DisplayName, Id)
+        -InputObject (Get-OrdinalSortedRow -Row $appInstallStatus -Property DisplayName, Id)
     Write-Verbose ('Install status for {0} app(s): {1}' -f $appInstallStatus.Count, $appInstallStatusPath)
 }
 
@@ -3370,7 +3404,7 @@ $deviceInventoryPath = $null
 if ($IncludeDeviceInventory -and $deviceInventory.Count -gt 0) {
     $deviceInventoryPath = Join-Path -Path $runDirectory -ChildPath ('DeviceInventory_{0}.csv' -f $fileStamp)
     Export-StableCsv -Path $deviceInventoryPath -Delimiter $Delimiter `
-        -InputObject @($deviceInventory | Sort-Object -Property OperatingSystem, DeviceName, Id)
+        -InputObject (Get-OrdinalSortedRow -Row $deviceInventory -Property OperatingSystem, DeviceName, Id)
     Write-Verbose ('Device inventory for {0} device(s): {1}' -f $deviceInventory.Count, $deviceInventoryPath)
 }
 
