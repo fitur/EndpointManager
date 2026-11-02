@@ -1440,6 +1440,8 @@ function Add-Result {
         [string]$AreaName, [string]$File, [string]$Name, [string]$Status,
         [string]$Detail, [string]$CreatedId = '', [string]$Sha256 = ''
     )
+    # Graph's own message goes in verbatim and can be a whole JSON document quoting the body.
+    if ($Detail.Length -gt 2000) { $Detail = $Detail.Substring(0, 2000) + ' ... [truncated]' }
     $results.Add([pscustomobject][ordered]@{
         Area = $AreaName; File = $File; Name = $Name
         Status = $Status; Detail = $Detail; CreatedId = $CreatedId; Sha256 = $Sha256
@@ -1463,6 +1465,8 @@ try {
 catch [System.Exception] {
     throw ('Cannot create the import report "{0}" - nothing was created. {1}' -f $reportPath, $PSItem.Exception.Message)
 }
+# The report names the target tenant and every policy created there: owner only, not the umask's 644.
+if (-not $IsWindows) { [System.IO.File]::SetUnixFileMode($reportPath, 'UserRead, UserWrite') }
 
 $authAbortMessage = 'Aborting: {0}{1}If the message names no specific scope, this is not a permission problem - verify that the tenant has an active Intune licence.'
 
@@ -1739,7 +1743,10 @@ finally {
         $fallbackPath = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath (Split-Path -Path $reportPath -Leaf)
         Write-Warning ('Could not write the import report to "{0}": {1} - writing it to "{2}" instead.' -f
             $reportPath, $PSItem.Exception.Message, $fallbackPath)
-        try { Write-Utf8File -Path $fallbackPath -Content $reportJson }
+        try {
+            Write-Utf8File -Path $fallbackPath -Content $reportJson
+            if (-not $IsWindows) { [System.IO.File]::SetUnixFileMode($fallbackPath, 'UserRead, UserWrite') }
+        }
         catch [System.Exception] { Write-Warning ('Fallback report failed too: {0}' -f $PSItem.Exception.Message) }
     }
 }
