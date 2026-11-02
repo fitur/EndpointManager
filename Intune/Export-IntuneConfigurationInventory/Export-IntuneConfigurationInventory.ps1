@@ -3122,6 +3122,20 @@ if ($IncludeAuditActor) {
 
 New-Item -Path $runDirectory -ItemType Directory -Force | Out-Null
 
+# The output is the tenant's complete security configuration, and the umask would leave it
+# world-readable (755/644). Owner-only on the two folders keeps every file below them
+# unreachable for other local accounts. Windows has no Unix mode; its ACLs are inherited.
+if (-not $IsWindows) {
+    try {
+        foreach ($protectedFolder in @($tenantRoot, $runDirectory)) {
+            [System.IO.File]::SetUnixFileMode($protectedFolder, [System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute')
+        }
+    }
+    catch [System.Exception] {
+        Write-Warning ('Could not restrict "{0}" to its owner: {1}' -f $tenantRoot, $PSItem.Exception.Message)
+    }
+}
+
 $csvName = 'IntuneConfigurationInventory_{0}_{1}.csv' -f $tenantNamePart, $fileStamp
 $csvPath = Join-Path -Path $runDirectory -ChildPath $csvName
 

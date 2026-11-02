@@ -550,8 +550,11 @@ identity asked — including a delegated Global Admin token. If you see this, ch
 ## Data sensitivity
 
 The output contains the tenant's complete security configuration, including script bodies,
-BitLocker settings and security baselines. Nothing in the script protects it — the folder
-and the zip are unencrypted and inherit the permissions of `-OutputDirectory`.
+BitLocker settings and security baselines. The folder and the zip are unencrypted. On macOS
+and Linux the script sets the tenant folder and each run folder to owner-only (`700`), so
+other local accounts cannot read what is inside; on Windows nothing is set and the folders
+inherit the permissions of `-OutputDirectory`. Copying or zipping the files out of the
+folder drops that protection.
 
 Do not point `-OutputDirectory` at a synchronised folder unless that is a deliberate
 decision, and treat the zip as customer confidential material when handing it over.
