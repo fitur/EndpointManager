@@ -311,7 +311,7 @@ folder is not writable) the run stops with nothing created.
   "areasSelected": "",
   "runComplete": true,
   "abortReason": "",
-  "totals": { "created": 0, "duplicate": 0, "invalid": 1, "failed": 0,
+  "totals": { "created": 0, "duplicate": 0, "invalid": 1, "failed": 0, "indeterminate": 0,
               "whatif": 2, "unsupported": 1, "unknownArea": 1, "blocked": 0 },
   "results": [
     { "area": "Settings-Catalog", "file": "a.json", "name": "SC test",
@@ -329,12 +329,19 @@ states and both have to be legible without interpreting the warning stream.
 carries the reason a row got the status it has — for a failure, Graph's own `code` and
 `message`. `createdId` is its own field so `detail` never has to be both.
 
+A row is written *before* its POST leaves, as `indeterminate`, and becomes `created` or `failed`
+when the answer arrives. That is what lets an interrupted run (Ctrl+C, `runComplete: false`,
+`abortReason` saying so) still name the object that was in flight. A re-run is safe once the
+object is listable in the tenant, because the name check will then skip it; the name stays taken
+for the rest of the run, so a second file with the same name is not posted meanwhile.
+
 | `status` | Meaning |
 |---|---|
 | `created` | Posted successfully; `createdId` holds the new object's id |
 | `duplicate` | A policy with that name already exists in the target tenant |
 | `invalid` | The sidecar cannot produce a valid body; nothing was posted |
-| `failed` | Graph rejected the POST; `detail` has the service's message |
+| `failed` | Graph refused the POST with a 4xx, so nothing was created; `detail` has the service's message |
+| `indeterminate` | The POST was sent but no answer was recorded - a timeout, a dropped connection, a 5xx, or the run was interrupted. **The object may exist.** Check the target tenant before re-running |
 | `whatif` | Would have been created |
 | `unsupported` | The area cannot be created from a single POST |
 | `unknown-area` | Folder name does not match a known export area |

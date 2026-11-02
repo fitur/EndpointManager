@@ -1294,7 +1294,9 @@ catch [System.Exception] {
 }
 
 $runComplete = $false
-$abortReason = ''
+# Overwritten by the catch below and cleared on completion. A Ctrl+C stops the pipeline
+# without running any catch, so this is what an interrupted run's report says.
+$abortReason = 'interrupted - stopped without an exception (Ctrl+C or host shutdown)'
 
 # The report is the only record of what was created, and there is no rollback - so it is
 # written in 'finally', not after the loop. The case that needs it most is the one that never
@@ -1349,6 +1351,7 @@ try {
 
         foreach ($file in $files) {
             $displayName = ''
+            $pendingRow = $null
             try {
                 $sidecar = Get-Content -Path $file.FullName -Raw -Encoding utf8 |
                     ConvertFrom-Json -AsHashtable -Depth 50
@@ -1375,24 +1378,34 @@ try {
                 }
 
                 $json = ConvertTo-Json -InputObject $body -Depth 50
-                $created = Invoke-GraphRequest -Uri $targetUri -Method 'POST' -Body $json
 
-                $createdId = [string](Get-ObjectProperty -InputObject $created -Name 'id')
-
-                # Added to the local set so two files with the same name in one run cannot both
-                # be created.
+                # Write-ahead: the row exists BEFORE the request leaves. A timeout, a 5xx or an
+                # interrupted run can all follow a successful create, and this row is then the
+                # only record that the object may exist. The name joins the local set now for the
+                # same reason - a second file with this name must not be posted while the first
+                # one's outcome is unknown.
+                Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'indeterminate' `
+                    -Detail 'POST sent, no response recorded'
+                $pendingRow = $results[$results.Count - 1]
                 [void]$existing.Add($displayName)
-                Write-Verbose ('{0}: created "{1}" ({2}).' -f $areaName, $displayName, $createdId)
-                Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'created' `
-                    -Detail $definition.Resource -CreatedId $createdId
+
+                $created = Invoke-GraphRequest -Uri $targetUri -Method 'POST' -Body $json
+                $pendingRow.Status = 'created'
+                $pendingRow.Detail = $definition.Resource
+                $pendingRow.CreatedId = [string](Get-ObjectProperty -InputObject $created -Name 'id')
+                Write-Verbose ('{0}: created "{1}" ({2}).' -f $areaName, $displayName, $pendingRow.CreatedId)
+                $pendingRow = $null
             }
             catch [GraphAuthenticationException] {
+                # 401 is rejected before processing - nothing was created, so the row goes.
+                if ($null -ne $pendingRow) { [void]$results.Remove($pendingRow) }
                 # Same global abort as above. Must be declared before the catch-all below, or
                 # the untyped handler swallows it and the run limps on with a dead token.
                 throw ('Aborting: {0}{1}If the message names no specific scope, this is not a permission problem - verify that the tenant has an active Intune licence.' -f
                     $PSItem.Exception.Message, [System.Environment]::NewLine)
             }
             catch [GraphAuthorizationException] {
+                if ($null -ne $pendingRow) { [void]$results.Remove($pendingRow) }
                 # A 403 that only shows up on the POST: the duplicate read needs a Read scope,
                 # creating needs ReadWrite, and an app can hold one without the other. One row
                 # for the area, then on to the next - the remaining files would all fail the
@@ -1407,8 +1420,23 @@ try {
                 # the bare message is "400 (Bad Request)" and says nothing about which property
                 # Graph objected to.
                 $message = Get-GraphErrorDetail -ErrorRecord $PSItem
-                Write-Warning ('{0}: failed - {1}' -f $file.Name, $message)
-                Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'failed' -Detail $message
+                if ($null -eq $pendingRow) {
+                    Write-Warning ('{0}: failed - {1}' -f $file.Name, $message)
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'failed' -Detail $message
+                    continue
+                }
+                # A 4xx is the service refusing the body: nothing was created. Anything else - no
+                # response, timeout, 5xx - can follow a successful create, so the row stays
+                # indeterminate and the name stays taken. Check the portal before re-running.
+                $response = $PSItem.Exception.PSObject.Properties['Response']
+                $statusCode = ($null -ne $response -and $null -ne $response.Value) ? [int]$response.Value.StatusCode : 0
+                if ($statusCode -ge 400 -and $statusCode -lt 500) {
+                    $pendingRow.Status = 'failed'
+                    [void]$existing.Remove($displayName)
+                }
+                $pendingRow.Detail = $message
+                Write-Warning ('{0}: {1} - {2}' -f $file.Name, $pendingRow.Status, $message)
+                $pendingRow = $null
             }
         }
     }
@@ -1423,6 +1451,7 @@ try {
     }
 
     $runComplete = $true
+    $abortReason = ''
 }
 catch [System.Exception] {
     $abortReason = $PSItem.Exception.Message
@@ -1439,7 +1468,8 @@ finally {
         'duplicate'    = 'duplicate'
         'invalid'      = 'invalid'
         'failed'       = 'failed'
-        'whatif'       = 'whatif'
+        'indeterminate' = 'indeterminate'
+        'whatif'      = 'whatif'
         'unsupported'  = 'unsupported'
         'unknown-area' = 'unknownArea'
         'blocked'      = 'blocked'
