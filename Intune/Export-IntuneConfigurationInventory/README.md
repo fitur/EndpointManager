@@ -388,6 +388,13 @@ required. This is what lets a consumer tell **"this area was empty"** from **"we
 read this area"** — without it, a missing permission looks identical to someone having
 deleted every policy in a category.
 
+`degradedRecords` lists the `RecordKey`s that were exported with something a failed call left
+out: detail settings, a script body or supersedence relationships that could not be read after
+retries, or group or filter names that could not be resolved for a reason other than the group
+having been deleted. The area still counts as `exported`. A change on one of these records is
+not evidence of a change in the tenant, and the change set marks such a modified entry with
+`degraded: true`.
+
 `exportComplete: false` means at least one area was skipped and the run is not a complete
 picture.
 
@@ -607,7 +614,9 @@ before running it against one you care about, and start with `-TestPermissionOnl
   there is no column to disambiguate if several customers' CSVs are loaded together.
 - **No retention.** Roughly 1.6 MB per run, uncompressed. Scheduled use needs a cleanup.
 - **Deleted assignment targets** appear as `<deleted-or-unresolved:guid>`. Deliberately
-  visible rather than hidden.
+  visible rather than hidden. A lookup that failed for another reason than 404 (for instance a
+  403 without `Group.Read.All`) leaves the same string, but the record is then listed in the
+  manifest's `degradedRecords`.
 
 ## License
 

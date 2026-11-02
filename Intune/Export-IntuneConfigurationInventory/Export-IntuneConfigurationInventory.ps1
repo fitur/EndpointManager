@@ -693,6 +693,8 @@ $script:AuthContext = [pscustomobject]@{
 }
 $script:GroupNameCache = @{}
 $script:FilterNameCache = @{}
+# Group ids whose lookup failed for a reason other than 404 - the name is unknown, not gone.
+$script:GroupLookupFailed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
 #region Helpers
 
@@ -1578,6 +1580,13 @@ function Resolve-GroupDisplayName {
         if (-not [string]::IsNullOrWhiteSpace($name)) { $displayName = $name }
     }
     catch [System.Exception] {
+        # 404 is the normal deleted-group case. Anything else (403 without Group.Read.All,
+        # retries exhausted) leaves the same placeholder, so the record is marked degraded.
+        $lookupResponse = $PSItem.Exception.PSObject.Properties['Response']
+        if ($null -eq $lookupResponse -or $null -eq $lookupResponse.Value -or
+            [int]$lookupResponse.Value.StatusCode -ne 404) {
+            [void]$script:GroupLookupFailed.Add($GroupId)
+        }
         Write-Verbose ('Could not resolve group {0}: {1}' -f $GroupId, $PSItem.Exception.Message)
     }
 
@@ -1595,6 +1604,7 @@ function ConvertTo-AssignmentDetail {
     $filters = [System.Collections.Generic.List[string]]::new()
     $intents = [System.Collections.Generic.List[string]]::new()
     $count = 0
+    $degraded = $false
 
     foreach ($item in @($Assignment)) {
         if ($null -eq $item) { continue }
@@ -1622,11 +1632,14 @@ function ConvertTo-AssignmentDetail {
             }
             default { $included.Add(($targetType -replace '^#microsoft\.graph\.', '')) }
         }
+        if (-not [string]::IsNullOrWhiteSpace($groupId) -and $script:GroupLookupFailed.Contains($groupId)) { $degraded = $true }
 
         $filterId = [string](Get-ObjectProperty -InputObject $target -Name 'deviceAndAppManagementAssignmentFilterId')
         if (-not [string]::IsNullOrWhiteSpace($filterId) -and $filterId -ne '00000000-0000-0000-0000-000000000000') {
             $filterType = [string](Get-ObjectProperty -InputObject $target -Name 'deviceAndAppManagementAssignmentFilterType')
-            $filterName = $script:FilterNameCache.ContainsKey($filterId) ? $script:FilterNameCache[$filterId] : $filterId
+            $filterName = $filterId
+            if ($script:FilterNameCache.ContainsKey($filterId)) { $filterName = $script:FilterNameCache[$filterId] }
+            else { $degraded = $true }
             $filters.Add(('{0} ({1})' -f $filterName, $filterType))
         }
     }
@@ -1638,6 +1651,7 @@ function ConvertTo-AssignmentDetail {
         Filters  = Join-OrdinalUnique -Value $filters
         Intents  = Join-OrdinalUnique -Value $intents
         Count    = $count
+        Degraded = $degraded
     }
 }
 
@@ -2121,6 +2135,7 @@ function Get-RunContext {
         Manifest   = $manifest
         Records    = $index
         Unreliable = $unreliable
+        Degraded   = @(Get-ObjectProperty -InputObject $manifest -Name 'degradedRecords')
     }
 }
 
@@ -2731,6 +2746,9 @@ function Invoke-InventoryComparison {
                     if ($null -ne $auditByPolicy) {
                         $entry['auditActors'] = Get-PolicyAuditActor -Index $auditByPolicy -PolicyId ([string]$row.Id)
                     }
+                    if ($row.RecordKey -in $current.Degraded -or $row.RecordKey -in $baseline.Degraded) {
+                        $entry['degraded'] = $true
+                    }
                     $modified.Add($entry)
                 }
 
@@ -3058,6 +3076,8 @@ $skipped = [System.Collections.Generic.List[string]]::new()
 $settingDefinitions = @{}
 # Run-wide count of .ps1/.sh files written beside the sidecars - see Expand-ScriptContent.
 $scriptFilesWritten = 0
+# RecordKeys exported with an incomplete payload or unresolved assignment names.
+$degradedRecords = [System.Collections.Generic.List[string]]::new()
 
 foreach ($definition in $policyDefinitions) {
     $baseUri = 'https://graph.microsoft.com/{0}/{1}' -f $definition.ApiVersion, $definition.Resource
@@ -3146,6 +3166,7 @@ foreach ($definition in $policyDefinitions) {
         }
 
         $assignmentDetail = ConvertTo-AssignmentDetail -Assignment $assignments
+        $recordDegraded = $assignmentDetail.Degraded
 
         # Resolved here rather than just before the write: Expand-ScriptContent below needs the
         # sidecar's base name to name the .ps1/.sh beside it. Both are pure reads of $item, $id
@@ -3188,6 +3209,7 @@ foreach ($definition in $policyDefinitions) {
                 }
                 catch [System.Exception] {
                     Write-Warning ('Application "{0}": could not read supersedence relationships - {1}' -f $id, $PSItem.Exception.Message)
+                    $recordDegraded = $true
                 }
             }
         }
@@ -3209,6 +3231,7 @@ foreach ($definition in $policyDefinitions) {
             }
             catch [System.Exception] {
                 Write-Warning ('{0} "{1}": could not read detail settings - {2}' -f $definition.Area, $id, $PSItem.Exception.Message)
+                $recordDegraded = $true
             }
         }
 
@@ -3227,6 +3250,7 @@ foreach ($definition in $policyDefinitions) {
             }
             catch [System.Exception] {
                 Write-Warning ('{0} "{1}": could not read script content - {2}' -f $definition.Area, $displayName, $PSItem.Exception.Message)
+                $recordDegraded = $true
             }
         }
 
@@ -3279,6 +3303,7 @@ foreach ($definition in $policyDefinitions) {
             ConfigurationFile    = $relativeConfigPath
             GraphResourceUri     = $resourceUri
         })
+        if ($recordDegraded) { $degradedRecords.Add($recordKey) }
     }
 
     $areaResults.Add((New-AreaResult -Definition $definition -Status 'exported' -ObjectCount @($items).Count))
@@ -3391,6 +3416,9 @@ $manifest = [ordered]@{
     areasExported            = @($areaResults | Where-Object { $PSItem.status -eq 'exported' }).Count
     areasSkipped             = @($areaResults | Where-Object { $PSItem.status -eq 'skipped' }).Count
     exportComplete           = ($skipped.Count -eq 0)
+    # Exported, but with a payload or assignment names that a failed call left incomplete.
+    # A change on one of these is not evidence of a change in the tenant.
+    degradedRecords          = @([System.Collections.Generic.SortedSet[string]]::new([string[]]@($degradedRecords), [System.StringComparer]::Ordinal))
     # Requested-but-zero-rows is a real state (report unreachable, or the report knows none of
     # the apps) and must be visible without reading the warning stream, like areasSkipped.
     appInstallStatusRequested = $appInstallStatusRequested
@@ -3585,6 +3613,9 @@ catch [System.Exception] {
 # area as "everything in it was deleted".
 if ($skipped.Count -gt 0) {
     Write-Warning ('INCOMPLETE EXPORT - {0} area(s) skipped: {1}' -f $skipped.Count, ($skipped -join '; '))
+}
+if ($degradedRecords.Count -gt 0) {
+    Write-Warning ('{0} record(s) exported with an incomplete payload or unresolved assignment names - listed as degradedRecords in the manifest.' -f $degradedRecords.Count)
 }
 
 Write-Verbose ('Exported {0} policies from {1} area(s) in tenant {2}' -f
