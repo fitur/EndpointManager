@@ -1519,9 +1519,11 @@ function Expand-ScriptContent {
         vary between individual scripts - in one measurement one body of a remediation object
         carried a BOM and the other did not - so it is a property of the file the admin
         uploaded, not drift on Intune's side. A BOM that disappears means someone re-uploaded
-        the file, and that must show in the diff. Leaving the text alone also makes
-        Write-Utf8File byte-exact against what Graph returned, so the .ps1 can be uploaded
-        again as it is.
+        the file, and that must show in the diff. The standalone file is written from the
+        decoded bytes, not from the decoded text, so it is byte-exact against what Graph
+        returned even for a script that is not valid UTF-8 (Windows-1252, UTF-16) and can be
+        uploaded again as it is. The sidecar holds the UTF-8 decoding, which replaces invalid
+        bytes with U+FFFD; the hash is taken over that.
 
         A failure on one object warns and moves on, like the relationships fetch. Microsoft's
         built-in remediations (isGlobalScript = true) do not always hand out their body; that
@@ -1566,7 +1568,7 @@ function Expand-ScriptContent {
         }
 
         $scriptFileName = '{0}{1}{2}' -f $FileBaseName, $suffix, $DefaultExtension
-        Write-Utf8File -Path (Join-Path -Path $AreaFolderPath -ChildPath $scriptFileName) -Content $text
+        [System.IO.File]::WriteAllBytes((Join-Path -Path $AreaFolderPath -ChildPath $scriptFileName), $bytes)
         $written++
     }
 
