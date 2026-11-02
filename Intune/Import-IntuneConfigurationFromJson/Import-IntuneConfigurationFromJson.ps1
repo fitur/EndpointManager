@@ -1312,14 +1312,21 @@ if (-not $WhatIfPreference -or -not [string]::IsNullOrWhiteSpace($PlanPath)) {
     $planLabel = '{0} ({1} file(s) planned)' -f $plan.Path, $plannedKeys.Count
 }
 
-# The banner is what the operator reads before typing YES, so it describes what will actually
-# be attempted: -Area, the unsupported list and unknown folder names all applied. The loop
-# below still walks every folder - it has to, to report 'unsupported' and 'unknown-area' rows.
-$selectedFolders = @($folders | Where-Object {
-    ($Area.Count -eq 0 -or $PSItem.Name -in $Area) -and
-    -not $script:UnsupportedAreas.Contains($PSItem.Name) -and
-    $script:AreaMap.Contains($PSItem.Name)
-})
+# Every folder is classified once, here, and the banner and the loop below both read the
+# result - two copies of the rule could drift apart, and the banner is what the operator reads
+# before typing YES. The loop still walks every folder: it has to, to report the
+# 'unsupported' and 'unknown-area' rows.
+$folderClass = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+foreach ($folder in $folders) {
+    $folderClass[$folder.Name] = if ($Area.Count -gt 0 -and $folder.Name -notin $Area) { 'not-selected' }
+        elseif ($script:UnsupportedAreas.Contains($folder.Name)) { 'unsupported' }
+        elseif (-not $script:AreaMap.Contains($folder.Name)) { 'unknown' }
+        else { 'selected' }
+}
+
+# The banner describes what will actually be attempted: -Area, the unsupported list and
+# unknown folder names all applied.
+$selectedFolders = @($folders | Where-Object { $folderClass[$PSItem.Name] -eq 'selected' })
 $selectedFileCount = @($selectedFolders | ForEach-Object { Get-ChildItem -Path $PSItem.FullName -File -Filter '*.json' }).Count
 $sourceLabel = 'no export manifest'
 if ($script:SourceTenantId -or $script:SourceRun) {
@@ -1400,18 +1407,18 @@ try {
     foreach ($folder in $folders) {
         $areaName = $folder.Name
 
-        if ($Area.Count -gt 0 -and $areaName -notin $Area) {
+        if ($folderClass[$areaName] -eq 'not-selected') {
             Write-Verbose ('{0}: not selected by -Area, skipping.' -f $areaName)
             continue
         }
 
-        if ($script:UnsupportedAreas.Contains($areaName)) {
+        if ($folderClass[$areaName] -eq 'unsupported') {
             Write-Warning ('{0}: not supported - {1}.' -f $areaName, $script:UnsupportedAreas[$areaName])
             Add-Result -AreaName $areaName -File '' -Name '' -Status 'unsupported' -Detail $script:UnsupportedAreas[$areaName]
             continue
         }
 
-        if (-not $script:AreaMap.Contains($areaName)) {
+        if ($folderClass[$areaName] -eq 'unknown') {
             Write-Warning ('{0}: unknown area folder, skipping. Expected one of: {1}' -f $areaName, ($script:AreaMap.Keys -join ', '))
             Add-Result -AreaName $areaName -File '' -Name '' -Status 'unknown-area' -Detail 'folder name does not match a known export area'
             continue
