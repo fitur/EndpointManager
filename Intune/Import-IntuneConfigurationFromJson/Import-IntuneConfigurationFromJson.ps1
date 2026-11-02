@@ -1247,17 +1247,16 @@ Write-Host ''
 
 # One gate for the whole run, not ConfirmImpact = 'High' - that asks once per object, and an
 # operator clicking through eighteen prompts has stopped reading by the third. Asked only
-# when something will actually be written and there is someone at the keyboard to answer:
-# a redirected stdin means a scheduled run, where Read-Host would block forever.
+# when something will actually be written. With nobody at the keyboard (redirected stdin, a
+# service, a Function host) the run refuses rather than writes: an unattended write has to
+# be asked for with -Force, never inferred from the absence of a console.
 $sessionIsInteractive = [Environment]::UserInteractive -and -not [System.Console]::IsInputRedirected
 if (-not $WhatIfPreference -and -not $Force) {
-    if ($sessionIsInteractive) {
-        $answer = Read-Host 'Create the above in the TARGET tenant? Type YES to continue'
-        if ($answer -cne 'YES') { throw 'Aborted at the confirmation prompt. Nothing was created.' }
+    if (-not $sessionIsInteractive) {
+        throw 'Non-interactive session and no -Force - refusing to write without confirmation. Nothing was created.'
     }
-    else {
-        Write-Warning 'Non-interactive session - the confirmation prompt was skipped. Use -Force to make that explicit.'
-    }
+    $answer = Read-Host 'Create the above in the TARGET tenant? Type YES to continue'
+    if ($answer -cne 'YES') { throw 'Aborted at the confirmation prompt. Nothing was created.' }
 }
 
 $results = [System.Collections.Generic.List[pscustomobject]]::new()

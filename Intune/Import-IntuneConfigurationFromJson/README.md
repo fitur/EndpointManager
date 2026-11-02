@@ -266,8 +266,8 @@ Expand-Archive -Path './Contoso-AB_2026-08-20_0914_sidecars.zip' -DestinationPat
 
 A real run prints the banner and asks once for confirmation before the first write. `-Force`
 skips the prompt, which is what a scheduled run needs; a non-interactive session with no
-`-Force` warns that the prompt was skipped rather than blocking on a `Read-Host` nobody will
-answer.
+`-Force` refuses to write and stops before anything is created, rather than blocking on a
+`Read-Host` nobody will answer. Pass `-Force` for unattended runs.
 
 `-ReportDirectory` moves the report somewhere other than the source folder. Use it when the
 source sits in OneDrive or Dropbox — see [Data sensitivity](#data-sensitivity).
