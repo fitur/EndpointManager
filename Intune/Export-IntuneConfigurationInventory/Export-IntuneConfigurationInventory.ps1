@@ -102,13 +102,56 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.14.0
+    Version:        1.15.0
     Creation Date:  2026-07-30
-    Last Updated:   2026-10-21
+    Last Updated:   2026-11-02
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.15.0 - 2026-11-02
+            Review fixes (W44). No hash wave: ConfigurationHash is unchanged for an unchanged
+            tenant. What does change is listed under CHANGED OUTPUT.
+
+            Determinism. JSON and CSV are written with LF whatever the host OS (ConvertTo-
+            StableJson, Export-StableCsv; byte-identical to before on macOS). Assignment
+            strings, the three CSV row orders and the change set order use ordinal, case-
+            sensitive sorting, and the comparator compares assignments as sets so a baseline
+            written with the old culture-sorted strings does not read as re-targeted. The
+            sidecar archive no longer has the run stamp in its entry names and is written with
+            ordinal entry order, a fixed timestamp and no file-mode bits, so two runs against
+            an unchanged tenant give the same archive on the same platform. Ties in the change
+            set and in auditActors are broken by RecordKey / activityType / resource id.
+
+            Comparison. A $expand fallback runs only on 400/501; after throttling or a 5xx the
+            area is skipped, not re-read without its extra query. An area in the baseline's
+            manifest but not in the current one, and runs with different jsonDepth or
+            detailedSettingsIncluded, make the change set reliable = false (new field
+            comparabilityNotes). Records exported after a failed per-object call, or with a
+            group or filter name that could not be resolved, are listed in the manifest's
+            degradedRecords and carry degraded = true when modified. The manifest records
+            csvDelimiter and the baseline CSV is read with it. The baseline and the audit
+            window start are the newest run folder with a manifest, by runTimestampUtc, and
+            the in-script caller passes -CurrentRunPath. Field and metadata comparisons are
+            case-sensitive.
+
+            Other. Standalone script files are written from the raw bytes Graph returned.
+            Tenant and run folders are set to 700 on macOS and Linux. The tenant name part is
+            capped at 40 characters and Windows reserved names get an underscore. With
+            FUNCTIONS_WORKER_RUNTIME set, -OutputDirectory (and -CustomerName with a customer
+            file) is required. A run into a git work tree warns, and the script folder has a
+            .gitignore for run output. Retry-After is capped at 300 s, a failed token request
+            stops instead of being retried, the change set holds only the tenant folder name,
+            and backslashes in customer names are escaped in the macOS picker.
+
+            CHANGED OUTPUT (once): ConfigurationFile in the CSV loses the stamp
+            (..._<id>.json); assignment strings and CSV row order change for policies whose
+            group names mix case or contain underscores or non-ASCII letters; tenant names over
+            40 characters, or reserved on Windows, get a new folder name and so a new baseline;
+            the manifest gains csvDelimiter and degradedRecords and the change set gains
+            comparabilityNotes. Not done: F14 (datetime offsets), the hash of raw script
+            bytes (F11 part 2), F21-F24.
 
         1.14.0 - 2026-10-21
             Added -IncludeDeviceInventory (and includeDeviceInventory in the customer file).
