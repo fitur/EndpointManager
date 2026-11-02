@@ -1628,7 +1628,8 @@ try {
                 # indeterminate and the name stays taken. Check the portal before re-running.
                 $response = $PSItem.Exception.PSObject.Properties['Response']
                 $statusCode = ($null -ne $response -and $null -ne $response.Value) ? [int]$response.Value.StatusCode : 0
-                if ($statusCode -ge 400 -and $statusCode -lt 500) {
+                # 408 is a request timeout, which can follow a processed request: not a refusal.
+                if ($statusCode -ge 400 -and $statusCode -lt 500 -and $statusCode -ne 408) {
                     $pendingRow.Status = 'failed'
                     [void]$existing.Remove($displayName)
                 }
