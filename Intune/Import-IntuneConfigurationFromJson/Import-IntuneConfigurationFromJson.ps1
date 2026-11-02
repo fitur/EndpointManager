@@ -1420,6 +1420,8 @@ catch [System.Exception] {
     throw ('Cannot create the import report "{0}" - nothing was created. {1}' -f $reportPath, $PSItem.Exception.Message)
 }
 
+$authAbortMessage = 'Aborting: {0}{1}If the message names no specific scope, this is not a permission problem - verify that the tenant has an active Intune licence.'
+
 $runComplete = $false
 # Overwritten by the catch below and cleared on completion. A Ctrl+C stops the pipeline
 # without running any catch, so this is what an interrupted run's report says.
@@ -1464,8 +1466,7 @@ try {
         catch [GraphAuthenticationException] {
             # Global: the token itself is not accepted. Nothing else will work either, so the
             # run ends here and 'finally' writes what was created up to this point.
-            throw ('Aborting: {0}{1}If the message names no specific scope, this is not a permission problem - verify that the tenant has an active Intune licence.' -f
-                $PSItem.Exception.Message, [System.Environment]::NewLine)
+            throw ($authAbortMessage -f $PSItem.Exception.Message, [System.Environment]::NewLine)
         }
         catch [GraphAuthorizationException] {
             # Local: this resource needs a scope the token lacks. One row for the area, not one
@@ -1559,8 +1560,7 @@ try {
                 if ($null -ne $pendingRow) { [void]$results.Remove($pendingRow) }
                 # Same global abort as above. Must be declared before the catch-all below, or
                 # the untyped handler swallows it and the run limps on with a dead token.
-                throw ('Aborting: {0}{1}If the message names no specific scope, this is not a permission problem - verify that the tenant has an active Intune licence.' -f
-                    $PSItem.Exception.Message, [System.Environment]::NewLine)
+                throw ($authAbortMessage -f $PSItem.Exception.Message, [System.Environment]::NewLine)
             }
             catch [GraphAuthorizationException] {
                 if ($null -ne $pendingRow) { [void]$results.Remove($pendingRow) }
