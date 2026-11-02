@@ -2389,7 +2389,8 @@ function Compare-JsonNode {
     }
 
     # Scalars, or a type change between runs.
-    if ([string]$Reference -ne [string]$Difference) {
+    # -cne: a change that only differs in case (true/True, a renamed script) is a change.
+    if ([string]$Reference -cne [string]$Difference) {
         $Changes.Add([pscustomobject][ordered]@{
             path       = $Path
             changeType = 'modified'
@@ -2722,7 +2723,7 @@ function Invoke-InventoryComparison {
                     foreach ($field in $metadataFields) {
                         $oldValue = [string](Get-ObjectProperty -InputObject $old -Name $field)
                         $newValue = [string](Get-ObjectProperty -InputObject $row -Name $field)
-                        if ($oldValue -ne $newValue) {
+                        if ($oldValue -cne $newValue) {
                             $metadataChanges.Add([pscustomobject][ordered]@{
                                 field = $field; oldValue = $oldValue; newValue = $newValue
                             })
