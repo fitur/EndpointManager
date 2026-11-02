@@ -36,6 +36,5 @@ desktop.ini
 /scratch/
 *.local.*
 
-
- # Claude Code related files
- .claude/
+# Claude Code related files
+.claude/
