@@ -487,6 +487,10 @@ if ($CustomerConfigPath) {
         }
     }
     else {
+        # No console to ask in: Read-Host would hang or throw in a non-interactive host.
+        if (-not [string]::IsNullOrWhiteSpace($env:FUNCTIONS_WORKER_RUNTIME)) {
+            throw '-CustomerName is required when running in Azure Functions; there is no console to pick a customer in.'
+        }
         $customerNames = $customers | ForEach-Object { $_["name"] }
         $customer      = $null
 
@@ -617,6 +621,14 @@ if ($CustomerConfigPath) {
     }
 
     Write-Host "Customer: $($customer["name"])  (tenant $TenantId)" -ForegroundColor Green
+}
+
+# Azure Functions: the default output folder is $PSScriptRoot, which is read-only under
+# run-from-package, and a local path there does not survive the instance. Fail before the
+# first Graph call rather than after reading every policy.
+if (-not [string]::IsNullOrWhiteSpace($env:FUNCTIONS_WORKER_RUNTIME) -and
+    [string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    throw '-OutputDirectory is required when running in Azure Functions; point it at mounted storage (for example Azure Files).'
 }
 
 #endregion

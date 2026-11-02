@@ -600,6 +600,14 @@ before running it against one you care about, and start with `-TestPermissionOnl
   column were added in export 1.7.0. The first comparison after upgrading reports every
   application as added — set a new baseline deliberately rather than reading that as someone
   having published 300 apps overnight.
+- **Azure Functions is not tested.** When `FUNCTIONS_WORKER_RUNTIME` is set the script
+  requires `-OutputDirectory` (or `outputDirectory` in the customer file) and, with
+  `-CustomerConfigPath`, `-CustomerName`, and stops before the first Graph call if either is
+  missing. Beyond that: the default folder is read-only under run-from-package, a comparison
+  needs the previous run's folder on mounted storage (Azure Files), and a Consumption plan's
+  timeout is probably too short for several hundred policies with the per-policy calls, so a
+  Premium plan or a container job is the likelier fit. These are assumptions, not
+  measurements.
 - **Beta endpoints throughout.** Required for remediations, shell scripts, driver update
   profiles and intents. Beta can change without notice.
 - **N+1 request patterns** in two places: one call per unique group, and one per policy for
