@@ -40,7 +40,7 @@
       Application                         needs content upload, not a JSON body
 
 .NOTES
-    Version:        1.2.0
+    Version:        1.3.0
     Creation Date:  2026-09-01
     Last Updated:   2026-11-02
     Author:         Peter Olausson
@@ -71,6 +71,33 @@
     This writes to a customer tenant. Run it with -WhatIf first, every time.
 
     CHANGELOG
+
+        1.3.0 - 2026-11-02
+            Follow-up to 1.2.0 from the same review. No new parameter; the report's
+            schemaVersion stays 2. The minimum PowerShell version moves from 7.4 to 7.5.
+
+            Stricter, never looser:
+              - the duplicate check compares names after Trim and Unicode NFC, so a name typed
+                in NFD (macOS) or with stray spaces matches the tenant's (the posted name is not
+                changed)
+              - a device configuration holding an encrypted or secret-referenced value
+                (isEncrypted, secretReferenceValueId) is 'invalid' - the export cannot carry the
+                secret
+              - a 408 on POST is 'indeterminate', not 'failed' (it can follow a processed request)
+              - the compliance notificationTemplateId, which points into the source tenant, is
+                cleared with a warning
+
+            Same result on every host: folders, files and the manifest are sorted ordinally
+            instead of by the host's culture, which decided which of two same-named files was
+            created; sidecars are parsed with ConvertFrom-Json -DateKind String (needs 7.5), so
+            an offset date string is posted as written instead of in the host's time zone; ._*
+            AppleDouble files are skipped, and the banner count and the loop share one file
+            list; the report's timeZone is an IANA id on Windows.
+
+            Hardening: the report is owner-only (600) on non-Windows and a row's detail is cut at
+            2000 characters; the customers.json mode check follows a symlink; control characters
+            are stripped from names shown in the banner and the confirmation text; without
+            -CustomerName a non-interactive session stops instead of hanging in Read-Host.
 
         1.2.0 - 2026-11-02
             BREAKING: a real run now needs -PlanPath. Without it the script throws before
@@ -204,7 +231,7 @@
         -ClientId <guid> -TestPermissionOnly
 #>
 
-#Requires -Version 7.4
+#Requires -Version 7.5
 
 [CmdletBinding(SupportsShouldProcess)]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
@@ -302,10 +329,17 @@ if ($CustomerConfigPath) {
     # Warn when the file is readable by more than its owner. UnixMode is not populated on Windows.
     if (-not $IsWindows) {
         $configItem = Get-Item -LiteralPath $customerConfigResolved
+        # A symlink's own mode is always lrwxr-xr-x; the file that holds the secrets is its target.
+        if ($null -ne $configItem.ResolvedTarget -and $configItem.ResolvedTarget -ne $configItem.FullName) {
+            $configItem = Get-Item -LiteralPath $configItem.ResolvedTarget
+        }
         if ($configItem.PSObject.Properties.Name -contains "UnixMode" -and
             $configItem.UnixMode.Substring(4) -match '[rwx]') {
-            Write-Warning "'$customerConfigResolved' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$customerConfigResolved'"
+            Write-Warning "'$($configItem.FullName)' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$($configItem.FullName)'"
         }
+    }
+    else {
+        Write-Verbose 'Windows: the access rights on the customer config file are not checked - keep it in a folder only you can read.'
     }
 
     try {
@@ -340,6 +374,11 @@ if ($CustomerConfigPath) {
     else {
         $customerNames = $customers | ForEach-Object { $_["name"] }
         $customer      = $null
+
+        # Nobody to ask: stop here instead of hanging in Read-Host or throwing from it.
+        if (-not ([Environment]::UserInteractive -and -not [System.Console]::IsInputRedirected)) {
+            throw "No -CustomerName given and the session is not interactive, so the customer cannot be chosen. Available: $($customerNames -join ', ')"
+        }
 
         # Native picker on macOS, console menu everywhere else and on cancel/failure
         if ($IsMacOS) {
@@ -966,12 +1005,42 @@ function ConvertTo-CreationBody {
             $rule.Remove('id')
             if (-not $rule.ContainsKey('scheduledActionConfigurations')) { continue }
             foreach ($action in @($rule['scheduledActionConfigurations'])) {
-                if ($action -is [System.Collections.IDictionary]) { $action.Remove('id') }
+                if ($action -isnot [System.Collections.IDictionary]) { continue }
+                $action.Remove('id')
+                # A notification template lives in the SOURCE tenant; its id means nothing here.
+                $templateId = $action.ContainsKey('notificationTemplateId') ? [string]$action['notificationTemplateId'] : ''
+                if (-not [string]::IsNullOrWhiteSpace($templateId) -and $templateId -ne [guid]::Empty.ToString()) {
+                    Write-Warning ('Compliance policy "{0}": notification template {1} belongs to the source tenant and was cleared - no notification will be sent until one is chosen in the portal.' -f $body['displayName'], $templateId)
+                    $action['notificationTemplateId'] = ''
+                }
             }
         }
     }
 
     return $body
+}
+
+function Test-SecretPlaceholder {
+    # The export cannot carry a secret: an encrypted OMA-URI value or a Wi-Fi/VPN secret comes
+    # back masked, null or as a reference to a store in the SOURCE tenant. Posting it either
+    # fails or creates a profile with a placeholder in place of the secret.
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([AllowNull()]$InputObject)
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        foreach ($key in $InputObject.Keys) {
+            if ([string]$key -eq 'secretReferenceValueId' -and -not [string]::IsNullOrWhiteSpace([string]$InputObject[$key])) { return $true }
+            if ([string]$key -eq 'isEncrypted' -and $InputObject[$key] -eq $true) { return $true }
+            if (Test-SecretPlaceholder -InputObject $InputObject[$key]) { return $true }
+        }
+    }
+    elseif ($InputObject -is [System.Collections.IList]) {
+        foreach ($item in $InputObject) {
+            if (Test-SecretPlaceholder -InputObject $item) { return $true }
+        }
+    }
+    return $false
 }
 
 function Test-CreationBody {
@@ -993,6 +1062,9 @@ function Test-CreationBody {
         if ($value -is [System.Collections.IList] -and $value.Count -eq 0) {
             return ('required property "{0}" is empty' -f $property)
         }
+    }
+    if ($Definition.Resource -eq 'deviceManagement/deviceConfigurations' -and (Test-SecretPlaceholder -InputObject $Body)) {
+        return 'contains an encrypted value or a secret reference (isEncrypted / secretReferenceValueId) that the export cannot carry - create this profile in the portal'
     }
     return ''
 }
@@ -1068,6 +1140,48 @@ function Resolve-ImportPlan {
         $item.FullName, ($rejected.Count -gt 0 ? ([System.Environment]::NewLine + ($rejected -join [System.Environment]::NewLine)) : ''))
 }
 
+function Get-DisplayText {
+    # Names come from the source tenant's export and are printed in the banner the operator
+    # reads before typing YES. A control character - an ANSI escape - could redraw that line.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowEmptyString()][string]$Text)
+    return [regex]::Replace($Text, '\p{Cc}', '')
+}
+
+function Get-OrdinalSortedItem {
+    # Sort-Object -Property Name follows the host's culture, so two machines can disagree on
+    # the order of the same folder - and the order decides which of two same-named files wins.
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param([AllowEmptyCollection()][object[]]$Item)
+    $sorted = [System.Collections.Generic.List[object]]::new(@($Item))
+    $sorted.Sort([Comparison[object]]{ param($x, $y) [string]::CompareOrdinal($x.Name, $y.Name) })
+    return $sorted.ToArray()
+}
+
+function Get-SidecarFile {
+    # One definition of "the files of an area", used by the banner count and by the loop. The
+    # '._' files are AppleDouble resource forks that SMB and exFAT shares add next to every
+    # real file; they are not JSON and would only show up as failed rows.
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param([Parameter(Mandatory)][string]$Path)
+    $found = @(Get-ChildItem -LiteralPath $Path -File -Filter '*.json' | Where-Object { -not $PSItem.Name.StartsWith('._') })
+    return Get-OrdinalSortedItem -Item $found
+}
+
+function Get-NameKey {
+    # The duplicate check compares this, never the raw name. Trim and NFC make the check
+    # stricter - a name typed on macOS in NFD, or with a stray space, now matches the tenant's
+    # NFC one - so it can only report more duplicates, never fewer. The name that is POSTed is
+    # not changed.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowEmptyString()][string]$Name)
+    return $Name.Trim().Normalize([System.Text.NormalizationForm]::FormC)
+}
+
 function Get-ExistingName {
     <#
         One call per area rather than one per file: a tenant has at most a few hundred
@@ -1100,7 +1214,7 @@ function Get-ExistingName {
                 # A name is always a scalar string, so the unrolling caveat above does not apply.
                 $name = [string](Get-ObjectProperty -InputObject $item -Name $NameProperty)
                 if (-not [string]::IsNullOrWhiteSpace($name)) {
-                    [void]$names.Add($name)
+                    [void]$names.Add((Get-NameKey -Name $name))
                 }
             }
         }
@@ -1269,7 +1383,7 @@ if ($useCertificate) {
 
 $sourceDirectoryResolved = (Resolve-Path -LiteralPath $SourceDirectory).Path
 
-$folders = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -Directory | Sort-Object -Property Name)
+$folders = @(Get-OrdinalSortedItem -Item @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -Directory))
 if ($folders.Count -eq 0) {
     throw ('No area sub-folders in "{0}". Copy the export''s area folders, not loose JSON files. If this is an export run folder from 1.12.0 or later, unpack <Tenant>_<stamp>_sidecars.zip first - the area folders live inside the archive.' -f $sourceDirectoryResolved)
 }
@@ -1337,8 +1451,7 @@ foreach ($blocked in $blockedAreas) {
 $script:SourceTenantId = ''
 $script:SourceTenantName = ''
 $script:SourceRun = ''
-$sourceManifest = @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -File -Filter '_manifest_*.json' |
-    Sort-Object -Property Name)
+$sourceManifest = @(Get-OrdinalSortedItem -Item @(Get-ChildItem -LiteralPath $sourceDirectoryResolved -File -Filter '_manifest_*.json'))
 if ($sourceManifest.Count -gt 0) {
     try {
         $manifestData = Get-Content -LiteralPath $sourceManifest[-1].FullName -Raw -Encoding utf8 | ConvertFrom-Json
@@ -1386,18 +1499,18 @@ foreach ($folder in $folders) {
 # The banner describes what will actually be attempted: -Area, the unsupported list and
 # unknown folder names all applied.
 $selectedFolders = @($folders | Where-Object { $folderClass[$PSItem.Name] -eq 'selected' })
-$selectedFileCount = @($selectedFolders | ForEach-Object { Get-ChildItem -LiteralPath $PSItem.FullName -File -Filter '*.json' }).Count
+$selectedFileCount = @($selectedFolders | ForEach-Object { Get-SidecarFile -Path $PSItem.FullName }).Count
 $sourceLabel = 'no export manifest'
 if ($script:SourceTenantId -or $script:SourceRun) {
-    $sourceLabel = 'export {0}, {1} / {2}' -f $script:SourceRun, $script:SourceTenantName, $script:SourceTenantId
+    $sourceLabel = 'export {0}, {1} / {2}' -f $script:SourceRun, (Get-DisplayText -Text $script:SourceTenantName), $script:SourceTenantId
 }
 $targetLabel = $tokenTenantId
 if (-not [string]::IsNullOrWhiteSpace($script:TargetCustomerName)) {
-    $targetLabel = '{0}  ({1})' -f $script:TargetCustomerName, $tokenTenantId
+    $targetLabel = '{0}  ({1})' -f (Get-DisplayText -Text $script:TargetCustomerName), $tokenTenantId
 }
 
 Write-Host ''
-Write-Host ('Source : {0}' -f $sourceDirectoryResolved) -ForegroundColor Cyan
+Write-Host ('Source : {0}' -f (Get-DisplayText -Text $sourceDirectoryResolved)) -ForegroundColor Cyan
 Write-Host ('         ({0})' -f $sourceLabel)
 Write-Host ('Target : {0}' -f $targetLabel) -ForegroundColor Yellow -NoNewline
 Write-Host ($WhatIfPreference ? '   DRY RUN' : '   WRITE') -ForegroundColor ($WhatIfPreference ? 'Green' : 'Red')
@@ -1429,6 +1542,8 @@ function Add-Result {
         [string]$AreaName, [string]$File, [string]$Name, [string]$Status,
         [string]$Detail, [string]$CreatedId = '', [string]$Sha256 = ''
     )
+    # Graph's own message goes in verbatim and can be a whole JSON document quoting the body.
+    if ($Detail.Length -gt 2000) { $Detail = $Detail.Substring(0, 2000) + ' ... [truncated]' }
     $results.Add([pscustomobject][ordered]@{
         Area = $AreaName; File = $File; Name = $Name
         Status = $Status; Detail = $Detail; CreatedId = $CreatedId; Sha256 = $Sha256
@@ -1452,6 +1567,8 @@ try {
 catch [System.Exception] {
     throw ('Cannot create the import report "{0}" - nothing was created. {1}' -f $reportPath, $PSItem.Exception.Message)
 }
+# The report names the target tenant and every policy created there: owner only, not the umask's 644.
+if (-not $IsWindows) { [System.IO.File]::SetUnixFileMode($reportPath, 'UserRead, UserWrite') }
 
 $authAbortMessage = 'Aborting: {0}{1}If the message names no specific scope, this is not a permission problem - verify that the tenant has an active Intune licence.'
 
@@ -1486,7 +1603,7 @@ try {
         }
 
         $definition = $script:AreaMap[$areaName]
-        $files = @(Get-ChildItem -LiteralPath $folder.FullName -File -Filter '*.json' | Sort-Object -Property Name)
+        $files = @(Get-SidecarFile -Path $folder.FullName)
         if ($files.Count -eq 0) {
             Write-Verbose ('{0}: no JSON files.' -f $areaName)
             continue
@@ -1520,6 +1637,7 @@ try {
 
         foreach ($file in $files) {
             $displayName = ''
+            $nameKey = ''
             $fileHash = ''
             $pendingRow = $null
             try {
@@ -1527,11 +1645,15 @@ try {
                 # and posted are the same bytes, so the file cannot change in between.
                 $fileBytes = [System.IO.File]::ReadAllBytes($file.FullName)
                 $fileHash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($fileBytes))
+                # -DateKind String (7.5+): a date-looking string stays the string it was. The default
+                # turns "2026-01-01T00:00:00+05:00" into a [datetime] that serialises back in the
+                # host's time zone, so the body would depend on where the script runs.
                 $sidecar = [System.Text.Encoding]::UTF8.GetString($fileBytes).TrimStart([char]0xFEFF) |
-                    ConvertFrom-Json -AsHashtable -Depth 50
+                    ConvertFrom-Json -AsHashtable -Depth 50 -DateKind String
 
                 $body = ConvertTo-CreationBody -Sidecar $sidecar -Definition $definition -AreaName $areaName
                 $displayName = $body.ContainsKey($definition.NameProperty) ? [string]$body[$definition.NameProperty] : ''
+                $nameKey = Get-NameKey -Name $displayName
 
                 $problem = Test-CreationBody -Body $body -Definition $definition
                 if ($problem) {
@@ -1540,7 +1662,7 @@ try {
                     continue
                 }
 
-                if ($existing.Contains($displayName)) {
+                if ($existing.Contains($nameKey)) {
                     Write-Verbose ('{0}: "{1}" already exists in the tenant, skipping.' -f $areaName, $displayName)
                     Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'duplicate' -Detail 'a policy with this name already exists' -Sha256 $fileHash
                     continue
@@ -1556,10 +1678,10 @@ try {
                     continue
                 }
 
-                if (-not $PSCmdlet.ShouldProcess(('{0} "{1}"' -f $areaName, $displayName), 'Create in tenant')) {
+                if (-not $PSCmdlet.ShouldProcess((Get-DisplayText -Text ('{0} "{1}"' -f $areaName, $displayName)), 'Create in tenant')) {
                     # Claimed in the dry run too, so a second file with the same name shows as
                     # 'duplicate' here exactly as it will in the real run.
-                    [void]$existing.Add($displayName)
+                    [void]$existing.Add($nameKey)
                     Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status ($WhatIfPreference ? 'whatif' : 'declined') -Detail $definition.Resource -Sha256 $fileHash
                     continue
                 }
@@ -1574,7 +1696,7 @@ try {
                 Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'indeterminate' `
                     -Detail 'POST sent, no response recorded' -Sha256 $fileHash
                 $pendingRow = $results[$results.Count - 1]
-                [void]$existing.Add($displayName)
+                [void]$existing.Add($nameKey)
 
                 $created = Invoke-GraphRequest -Uri $targetUri -Method 'POST' -Body $json
                 $pendingRow.Status = 'created'
@@ -1631,7 +1753,7 @@ try {
                 # 408 is a request timeout, which can follow a processed request: not a refusal.
                 if ($statusCode -ge 400 -and $statusCode -lt 500 -and $statusCode -ne 408) {
                     $pendingRow.Status = 'failed'
-                    [void]$existing.Remove($displayName)
+                    [void]$existing.Remove($nameKey)
                 }
                 $pendingRow.Detail = $message
                 Write-Warning ('{0}: {1} - {2}' -f $file.Name, $pendingRow.Status, $message)
@@ -1682,13 +1804,20 @@ finally {
         if ($statusKeyByStatus.Contains($row.Status)) { $totals[$statusKeyByStatus[$row.Status]]++ }
     }
 
+    # Windows reports its own ids ("W. Europe Standard Time"); the export's convention is IANA.
+    $reportTimeZone = [System.TimeZoneInfo]::Local.Id
+    $ianaTimeZone = $null
+    if ($IsWindows -and [System.TimeZoneInfo]::TryConvertWindowsIdToIanaId($reportTimeZone, [ref]$ianaTimeZone)) {
+        $reportTimeZone = $ianaTimeZone
+    }
+
     $report = [ordered]@{
         schemaVersion      = 2
         runTimestampUtc    = $runUtc.ToString('o')
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
-        timeZone           = [System.TimeZoneInfo]::Local.Id
-        scriptVersion      = '1.2.0'
+        timeZone           = $reportTimeZone
+        scriptVersion      = '1.3.0'
         whatIf             = [bool]$WhatIfPreference
         targetTenantId     = $tokenTenantId
         targetCustomerName = $script:TargetCustomerName
@@ -1726,7 +1855,10 @@ finally {
         $fallbackPath = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath (Split-Path -Path $reportPath -Leaf)
         Write-Warning ('Could not write the import report to "{0}": {1} - writing it to "{2}" instead.' -f
             $reportPath, $PSItem.Exception.Message, $fallbackPath)
-        try { Write-Utf8File -Path $fallbackPath -Content $reportJson }
+        try {
+            Write-Utf8File -Path $fallbackPath -Content $reportJson
+            if (-not $IsWindows) { [System.IO.File]::SetUnixFileMode($fallbackPath, 'UserRead, UserWrite') }
+        }
         catch [System.Exception] { Write-Warning ('Fallback report failed too: {0}' -f $PSItem.Exception.Message) }
     }
 }

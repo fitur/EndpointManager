@@ -22,7 +22,7 @@ endpoint each file is posted to; the script never guesses an endpoint from a fil
 Six steps from an export folder to policies in a target tenant. Every step has a fuller
 section further down.
 
-**1. Check PowerShell.** 7.4 or later.
+**1. Check PowerShell.** 7.5 or later.
 
 ```powershell
 $PSVersionTable.PSVersion
@@ -136,7 +136,7 @@ matches something already in the target tenant is skipped and reported.
 
 ## Requirements
 
-**PowerShell 7.4 or later.** Ternary operators and null-coalescing. Developed on macOS 7.6.5,
+**PowerShell 7.5 or later.** Ternary operators, null-coalescing and `ConvertFrom-Json -DateKind`. Developed on macOS 7.6.5,
 run against production tenants.
 
 No modules. Graph is called directly with `Invoke-RestMethod` — no SDK to install and no
@@ -334,7 +334,7 @@ folder is not writable) the run stops with nothing created.
   "runTimestampLocal": "2026-09-01T12:04:54",
   "utcOffset": "02:00:00",
   "timeZone": "Europe/Stockholm",
-  "scriptVersion": "1.2.0",
+  "scriptVersion": "1.3.0",
   "whatIf": true,
   "targetTenantId": "4444-…",
   "targetCustomerName": "Fabrikam AB",
@@ -507,9 +507,22 @@ against a tenant you care about, and start with `-TestPermissionOnly` and `-What
   (201) but protects or configures no app until `targetApps` is set in the portal. The script
   warns once per created policy in those areas. Setting the apps from the script would be a
   second, writing call and is not done.
+- **Compliance notification templates are not carried over.** A scheduled action's
+  `notificationTemplateId` points at a template in the source tenant. It is cleared, with a
+  warning naming the policy, so no notification is sent until a template is chosen in the portal.
+- **Device configuration profiles with secrets are rejected as `invalid`.** An encrypted OMA-URI
+  value (`isEncrypted: true`) or a `secretReferenceValueId` is masked or referenced to the source
+  tenant in the export, so posting it would fail or create a profile with a placeholder instead
+  of the secret. Create those in the portal.
 - **Everything is created unassigned.** Assignments are never imported.
-- **The duplicate check is name-based.** An object renamed in the target tenant is not
-  recognised and gets created a second time.
+- **File order is ordinal, and `._*` files are skipped.** Folders and files are processed in
+  byte order of their names, the same on every host, because the order decides which of two
+  files with the same policy name is created and which is a duplicate. `._*` AppleDouble files
+  that SMB and exFAT shares add are ignored. Without `-CustomerName` a non-interactive session
+  stops instead of asking which customer to use.
+- **The duplicate check is name-based.** Names are compared case-insensitively after trimming
+  surrounding whitespace and normalising Unicode to NFC; the name that is posted is unchanged. An object renamed in the
+  target tenant is not recognised and gets created a second time.
 - **No updates.** Creation only. A name that already exists is skipped, never patched — there
   is no `PATCH` path and no rollback.
 - **Beta endpoints throughout.** Required for remediations, shell scripts and driver update
