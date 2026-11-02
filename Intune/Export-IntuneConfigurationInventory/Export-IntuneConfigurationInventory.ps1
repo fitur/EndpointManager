@@ -2483,8 +2483,20 @@ function Get-PolicyAuditActor {
     $key = $PolicyId.ToLowerInvariant()
     if (-not $Index.ContainsKey($key)) { return , @() }
 
-    return , @($Index[$key] |
-        Sort-Object -Property @{ Expression = { [string]$PSItem.activityDateTime }; Descending = $true })
+    # Newest first. Two events can share a timestamp, and the index holds them in the order
+    # the audit pages happened to arrive, so activityType and the first resource id break the
+    # tie. Ordinal throughout, like every other sort that reaches disk.
+    $byTime = [System.Func[object, string]] { param($e) [string]$e.activityDateTime }
+    $byType = [System.Func[object, string]] { param($e) [string]$e.activityType }
+    $byResource = [System.Func[object, string]] {
+        param($e)
+        $first = @(Get-ObjectProperty -InputObject $e -Name 'resources') | Select-Object -First 1
+        [string](Get-ObjectProperty -InputObject $first -Name 'resourceId')
+    }
+    $ordered = [System.Linq.Enumerable]::OrderByDescending([object[]]@($Index[$key]), $byTime, [System.StringComparer]::Ordinal)
+    $ordered = [System.Linq.Enumerable]::ThenBy($ordered, $byType, [System.StringComparer]::Ordinal)
+    $ordered = [System.Linq.Enumerable]::ThenBy($ordered, $byResource, [System.StringComparer]::Ordinal)
+    return , [object[]][System.Linq.Enumerable]::ToArray($ordered)
 }
 
 function Invoke-InventoryComparison {
@@ -2717,12 +2729,12 @@ function Invoke-InventoryComparison {
             $unchangedCount = 0
 
             if ($isBaselineMode) {
-                foreach ($row in ($currentRows | Sort-Object PolicyArea, DisplayName)) {
+                foreach ($row in (Get-OrdinalSortedRow -Row $currentRows -Property PolicyArea, DisplayName, RecordKey)) {
                     $baselineItems.Add((New-RecordSummary -Row $row -RunFolder $currentFolder -Platforms $platformCache[$row.RecordKey]))
                 }
             }
             else {
-                foreach ($row in ($currentRows | Sort-Object PolicyArea, DisplayName)) {
+                foreach ($row in (Get-OrdinalSortedRow -Row $currentRows -Property PolicyArea, DisplayName, RecordKey)) {
                     $platforms = $platformCache[$row.RecordKey]
 
                     if (-not $baseline.Records.ContainsKey($row.RecordKey)) {
@@ -2811,7 +2823,7 @@ function Invoke-InventoryComparison {
                     $modified.Add($entry)
                 }
 
-                foreach ($row in ($baselineRows | Sort-Object PolicyArea, DisplayName)) {
+                foreach ($row in (Get-OrdinalSortedRow -Row $baselineRows -Property PolicyArea, DisplayName, RecordKey)) {
                     if ($current.Records.ContainsKey($row.RecordKey)) { continue }
 
                     $entry = New-RecordSummary -Row $row -RunFolder $baselineFolder -Platforms $platformCache[$row.RecordKey]
