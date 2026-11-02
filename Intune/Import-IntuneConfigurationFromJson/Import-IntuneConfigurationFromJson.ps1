@@ -204,7 +204,7 @@
         -ClientId <guid> -TestPermissionOnly
 #>
 
-#Requires -Version 7.4
+#Requires -Version 7.5
 
 [CmdletBinding(SupportsShouldProcess)]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
@@ -1618,8 +1618,11 @@ try {
                 # and posted are the same bytes, so the file cannot change in between.
                 $fileBytes = [System.IO.File]::ReadAllBytes($file.FullName)
                 $fileHash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($fileBytes))
+                # -DateKind String (7.5+): a date-looking string stays the string it was. The default
+                # turns "2026-01-01T00:00:00+05:00" into a [datetime] that serialises back in the
+                # host's time zone, so the body would depend on where the script runs.
                 $sidecar = [System.Text.Encoding]::UTF8.GetString($fileBytes).TrimStart([char]0xFEFF) |
-                    ConvertFrom-Json -AsHashtable -Depth 50
+                    ConvertFrom-Json -AsHashtable -Depth 50 -DateKind String
 
                 $body = ConvertTo-CreationBody -Sidecar $sidecar -Definition $definition -AreaName $areaName
                 $displayName = $body.ContainsKey($definition.NameProperty) ? [string]$body[$definition.NameProperty] : ''

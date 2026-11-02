@@ -22,7 +22,7 @@ endpoint each file is posted to; the script never guesses an endpoint from a fil
 Six steps from an export folder to policies in a target tenant. Every step has a fuller
 section further down.
 
-**1. Check PowerShell.** 7.4 or later.
+**1. Check PowerShell.** 7.5 or later.
 
 ```powershell
 $PSVersionTable.PSVersion
@@ -136,7 +136,7 @@ matches something already in the target tenant is skipped and reported.
 
 ## Requirements
 
-**PowerShell 7.4 or later.** Ternary operators and null-coalescing. Developed on macOS 7.6.5,
+**PowerShell 7.5 or later.** Ternary operators, null-coalescing and `ConvertFrom-Json -DateKind`. Developed on macOS 7.6.5,
 run against production tenants.
 
 No modules. Graph is called directly with `Invoke-RestMethod` — no SDK to install and no
