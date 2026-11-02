@@ -1526,11 +1526,18 @@ try {
             catch [GraphAuthorizationException] {
                 if ($null -ne $pendingRow) { [void]$results.Remove($pendingRow) }
                 # A 403 that only shows up on the POST: the duplicate read needs a Read scope,
-                # creating needs ReadWrite, and an app can hold one without the other. One row
-                # for the area, then on to the next - the remaining files would all fail the
-                # same way.
-                Write-Warning ('{0}: skipped - {1}' -f $areaName, $PSItem.Exception.Message)
-                Add-Result -AreaName $areaName -File '' -Name '' -Status 'blocked' -Detail $PSItem.Exception.Message
+                # creating needs ReadWrite, and an app can hold one without the other. The area
+                # stops here and the run moves on. The blocked row names the file that was
+                # refused, and every file left in the area gets a 'not-attempted' row: a 403
+                # can also be about this one object, and files before it may already exist.
+                $blockedMessage = $PSItem.Exception.Message
+                Write-Warning ('{0}: skipped - {1}' -f $areaName, $blockedMessage)
+                Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'blocked' `
+                    -Detail $blockedMessage -Sha256 $fileHash
+                foreach ($skippedFile in @($files | Select-Object -Skip ([array]::IndexOf($files, $file) + 1))) {
+                    Add-Result -AreaName $areaName -File $skippedFile.Name -Name '' -Status 'not-attempted' `
+                        -Detail 'an earlier file in this area was refused with 403'
+                }
                 break
             }
             catch {
@@ -1593,6 +1600,7 @@ finally {
         'unsupported'  = 'unsupported'
         'unknown-area' = 'unknownArea'
         'blocked'      = 'blocked'
+        'not-attempted' = 'notAttempted'
     }
     $totals = [ordered]@{}
     foreach ($statusKey in $statusKeyByStatus.Values) { $totals[$statusKey] = 0 }

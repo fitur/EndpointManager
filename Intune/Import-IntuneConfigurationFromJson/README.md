@@ -342,7 +342,8 @@ folder is not writable) the run stops with nothing created.
   "runComplete": true,
   "abortReason": "",
   "totals": { "created": 0, "duplicate": 0, "invalid": 1, "failed": 0, "indeterminate": 0,
-              "whatif": 2, "notInPlan": 0, "unsupported": 1, "unknownArea": 1, "blocked": 0 },
+              "whatif": 2, "notInPlan": 0, "unsupported": 1, "unknownArea": 1, "blocked": 0,
+              "notAttempted": 0 },
   "results": [
     { "area": "Settings-Catalog", "file": "a.json", "name": "SC test",
       "status": "whatif", "detail": "deviceManagement/configurationPolicies",
@@ -376,13 +377,17 @@ for the rest of the run, so a second file with the same name is not posted meanw
 | `not-in-plan` | A real run skipped it: the plan did not list it as `whatif`, or the file has changed since |
 | `unsupported` | The area cannot be created from a single POST |
 | `unknown-area` | Folder name does not match a known export area |
-| `blocked` | 403 on the area — the token lacks the scope; one row, not one per file |
+| `blocked` | 403 — the token lacks the scope. On the area's name check the row has no file; on a POST it names the file that was refused |
+| `not-attempted` | A file left in an area after a 403 on a POST stopped it; nothing was sent for it |
 
 ## Error semantics
 
-**403** means a missing scope for that one area. Intune names the scope it wants. The script
-records one `blocked` row for the area and moves on to the next — not one row per file, since
-every file in it would fail identically.
+**403** means a missing scope for that one area. Intune names the scope it wants. When it
+comes on the area's name check, the script records one `blocked` row for the area and moves on
+to the next — not one row per file, since every file in it would fail identically. When it
+only comes on a POST, the `blocked` row names the file that was refused, every file after it in
+the area gets a `not-attempted` row, and the run moves on: a 403 can also be about one object,
+and the files before it may already have been created.
 
 **401** is global: the token itself is not accepted. One automatic refresh covers a genuinely
 stale token; a second 401 aborts the run. The report is still written, with
