@@ -3061,6 +3061,20 @@ foreach ($definition in $policyDefinitions) {
     }
     catch [System.Exception] {
         # Some resources reject $expand; retry flat and pull assignments per object instead.
+        # Only for a rejected query: after throttling or a 5xx the fallback would drop
+        # ExtraQuery from the payload - moving every hash in the area - and multiply the calls
+        # against a service that is already pushing back. Skip the area instead.
+        $failedStatus = 0
+        $failedResponse = $PSItem.Exception.PSObject.Properties['Response']
+        if ($null -ne $failedResponse -and $null -ne $failedResponse.Value) {
+            $failedStatus = [int]$failedResponse.Value.StatusCode
+        }
+        if ($failedStatus -notin @(400, 501)) {
+            Write-Warning ('{0}: skipped - {1}' -f $definition.Area, $PSItem.Exception.Message)
+            $skipped.Add($definition.Area)
+            $areaResults.Add((New-AreaResult -Definition $definition -Status 'skipped' -Reason $PSItem.Exception.Message))
+            continue
+        }
         Write-Warning ('{0}: expanded query failed ({1}). Retrying without $expand.' -f $definition.Area, $PSItem.Exception.Message)
         try {
             $items = Get-GraphCollection -Uri $baseUri
