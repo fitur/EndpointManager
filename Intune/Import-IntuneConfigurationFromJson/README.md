@@ -62,11 +62,13 @@ This step reads nothing, writes nothing and posts nothing.
 
 ```powershell
 ./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -WhatIf -Verbose
-./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -Area 'Assignment-Filter'
+./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -PlanPath ~/Import -Area 'Assignment-Filter'
 ```
 
-Do the real run one area at a time, at least the first time. Both runs write an
-`_importreport_<stamp>.json` into the source folder; `whatIf` in it tells them apart.
+A real run **needs `-PlanPath`**: the report of the dry run, as a file or as the folder it sits
+in (the newest usable one is picked). Do the real run one area at a time, at least the first
+time. Both runs write an `_importreport_<stamp>.json` into the source folder; `whatIf` in it
+tells them apart.
 
 **More than one tenant?** Skip step 4 and put the credentials in a file instead — see
 [Several customers](#several-customers).
@@ -75,6 +77,10 @@ Do the real run one area at a time, at least the first time. Both runs write an
 
 **Nothing is created that a `-WhatIf` run has not already shown, and everything that is
 created is on disk before the process can exit.**
+
+The first half is enforced by the code, not by discipline: a real run needs `-PlanPath`, the
+report of a `-WhatIf` run against the same tenant, and creates only the files that report
+listed as `whatif` with the same content hash. See [The plan](#the-plan).
 
 There is no rollback. When half a run fails, the import report is all that is left, so it is
 written from a `finally` block rather than after the loop — the case that needs it most is the
@@ -257,11 +263,12 @@ Expand-Archive -Path './Contoso-AB_2026-08-20_0914_sidecars.zip' -DestinationPat
 # 3. Dry run. Contacts Graph only to read existing names; writes the report with whatIf: true
 ./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -WhatIf -Verbose
 
-# 4. For real, one area at a time
-./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -Area 'Assignment-Filter'
+# 4. For real, one area at a time. -PlanPath is the dry run's report (a file, or the folder
+#    it sits in - the newest usable one is chosen); a real run without it throws
+./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -PlanPath ~/Import -Area 'Assignment-Filter'
 
-# 5. The rest, once the first area looks right in the portal
-./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -Verbose
+# 5. The rest, once the first area looks right in the portal - same plan
+./Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -PlanPath ~/Import -Verbose
 ```
 
 A real run prints the banner and asks once for confirmation before the first write. `-Force`
@@ -271,6 +278,29 @@ skips the prompt, which is what a scheduled run needs; a non-interactive session
 
 `-ReportDirectory` moves the report somewhere other than the source folder. Use it when the
 source sits in OneDrive or Dropbox — see [Data sensitivity](#data-sensitivity).
+
+### The plan
+
+`-PlanPath` binds a real run to a dry run. It takes the `_importreport_*.json` of a `-WhatIf`
+run, or a folder, in which case the newest report in it that is a `-WhatIf` report for the
+same target tenant is used. The banner names the report that was chosen. The run is refused,
+before the confirmation prompt and before anything is written, when the plan:
+
+- is not a `-WhatIf` report (`whatIf: true`), or was made against another tenant than the
+  token's, or has `schemaVersion` below 2 (older reports carry no file hashes);
+- cannot be found in the folder at all — the message is "run `-WhatIf` first".
+
+A file is created only if the plan listed it as `whatif` **with the same area, file name and
+SHA-256 of its content**. Any other file — added since, edited since, or shown as something
+else in the plan — gets the status `not-in-plan`, a warning, and a count in `totals.notInPlan`;
+the run carries on with the rest. The plan decides what *may* be created, `-Area` what is
+created *now*: `-Area` can only narrow the selection, so one dry run over the whole source can
+be followed by a real run per area against the same plan. There is no maximum age; the content
+hash and the name check against the tenant are what keep a stale plan from doing harm.
+`-WhatIf` and `-TestPermissionOnly` need no plan.
+
+**Scheduled runs:** run `-WhatIf` first, then `-Force -PlanPath <that report>`. A scheduled
+real run without a plan throws before anything is created.
 
 ## Output
 
@@ -295,12 +325,12 @@ folder is not writable) the run stops with nothing created.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "runTimestampUtc": "2026-09-01T10:04:54.0274400Z",
   "runTimestampLocal": "2026-09-01T12:04:54",
   "utcOffset": "02:00:00",
   "timeZone": "Europe/Stockholm",
-  "scriptVersion": "1.1.0",
+  "scriptVersion": "1.2.0",
   "whatIf": true,
   "targetTenantId": "4444-…",
   "targetCustomerName": "Fabrikam AB",
@@ -312,11 +342,11 @@ folder is not writable) the run stops with nothing created.
   "runComplete": true,
   "abortReason": "",
   "totals": { "created": 0, "duplicate": 0, "invalid": 1, "failed": 0, "indeterminate": 0,
-              "whatif": 2, "unsupported": 1, "unknownArea": 1, "blocked": 0 },
+              "whatif": 2, "notInPlan": 0, "unsupported": 1, "unknownArea": 1, "blocked": 0 },
   "results": [
     { "area": "Settings-Catalog", "file": "a.json", "name": "SC test",
       "status": "whatif", "detail": "deviceManagement/configurationPolicies",
-      "createdId": "" }
+      "createdId": "", "sha256": "9F2C…" }
   ]
 }
 ```
@@ -342,7 +372,8 @@ for the rest of the run, so a second file with the same name is not posted meanw
 | `invalid` | The sidecar cannot produce a valid body; nothing was posted |
 | `failed` | Graph refused the POST with a 4xx, so nothing was created; `detail` has the service's message |
 | `indeterminate` | The POST was sent but no answer was recorded - a timeout, a dropped connection, a 5xx, or the run was interrupted. **The object may exist.** Check the target tenant before re-running |
-| `whatif` | Would have been created |
+| `whatif` | Would have been created; `sha256` is the hash of the file that was planned |
+| `not-in-plan` | A real run skipped it: the plan did not list it as `whatif`, or the file has changed since |
 | `unsupported` | The area cannot be created from a single POST |
 | `unknown-area` | Folder name does not match a known export area |
 | `blocked` | 403 on the area — the token lacks the scope; one row, not one per file |

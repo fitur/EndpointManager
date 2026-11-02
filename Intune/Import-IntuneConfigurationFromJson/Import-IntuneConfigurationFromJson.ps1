@@ -149,9 +149,10 @@
         -ClientId <guid> -WhatIf
 
 .EXAMPLE
-    # Only the Settings Catalog folder, for real.
+    # Only the Settings Catalog folder, for real. -PlanPath is the -WhatIf run's report (here
+    # the folder it was written to); the run creates only what that report listed.
     .\Import-IntuneConfigurationFromJson.ps1 -SourceDirectory ~/Import -TenantId <guid> `
-        -ClientId <guid> -Area 'Settings-Catalog' -Verbose
+        -ClientId <guid> -PlanPath ~/Import -Area 'Settings-Catalog' -Verbose
 
 .EXAMPLE
     # Pick the TARGET tenant from the same customers.json the export uses. Omit
@@ -221,7 +222,14 @@ param(
     # source sits in a synchronised folder: the report names the target tenant's ID and every
     # policy name that was created.
     [ValidateScript({ Test-Path -Path $PSItem -PathType Container })]
-    [string]$ReportDirectory
+    [string]$ReportDirectory,
+
+    # The -WhatIf report this run is bound to: a file, or a folder, in which case the newest
+    # usable _importreport_*.json is chosen. A real run creates only what that report listed
+    # as 'whatif' - same area, same file name, same content hash, same target tenant - and
+    # throws without it. A -WhatIf or -TestPermissionOnly run needs none.
+    [ValidateScript({ Test-Path -LiteralPath $PSItem })]
+    [string]$PlanPath
 )
 
 Set-StrictMode -Version Latest
@@ -933,6 +941,77 @@ function Test-CreationBody {
     return ''
 }
 
+function Read-ImportPlanFile {
+    # One candidate plan. Returns the rejection reason, or '' with the planned keys filled in.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$TenantId
+    )
+
+    $keys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    try {
+        $plan = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json
+    }
+    catch [System.Exception] {
+        return @{ Reason = ('is not readable JSON ({0})' -f $PSItem.Exception.Message); Keys = $keys }
+    }
+    if ($null -eq $plan -or $plan -isnot [pscustomobject]) {
+        return @{ Reason = 'is not an import report'; Keys = $keys }
+    }
+    if (-not (Get-ObjectProperty -InputObject $plan -Name 'whatIf')) {
+        return @{ Reason = 'is not a -WhatIf report (whatIf is not true)'; Keys = $keys }
+    }
+    # Reports before schemaVersion 2 carry no content hash, so they cannot bind a run to a file.
+    if ([int](Get-ObjectProperty -InputObject $plan -Name 'schemaVersion') -lt 2) {
+        return @{ Reason = 'has schemaVersion below 2 and carries no file hashes - run -WhatIf again'; Keys = $keys }
+    }
+    $plannedTenant = [string](Get-ObjectProperty -InputObject $plan -Name 'targetTenantId')
+    if ($plannedTenant -ne $TenantId) {
+        return @{ Reason = ('was planned against tenant {0}, this token is for {1}' -f $plannedTenant, $TenantId); Keys = $keys }
+    }
+    foreach ($row in @(Get-ObjectProperty -InputObject $plan -Name 'results')) {
+        if ($null -eq $row -or [string](Get-ObjectProperty -InputObject $row -Name 'status') -ne 'whatif') { continue }
+        $hash = [string](Get-ObjectProperty -InputObject $row -Name 'sha256')
+        if ([string]::IsNullOrWhiteSpace($hash)) { continue }
+        [void]$keys.Add(('{0}|{1}|{2}' -f (Get-ObjectProperty -InputObject $row -Name 'area'), (Get-ObjectProperty -InputObject $row -Name 'file'), $hash))
+    }
+    return @{ Reason = ''; Keys = $keys }
+}
+
+function Resolve-ImportPlan {
+    # A file is used or rejected with the reason. A folder yields its newest _importreport_ that
+    # qualifies (ordinal on the name, which is a timestamp); one that does not is skipped, and
+    # if none qualifies the run stops. Called before the confirmation prompt and before the
+    # report file is reserved, so a bad plan leaves nothing behind.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$TenantId
+    )
+
+    $item = Get-Item -LiteralPath $Path
+    if (-not $item.PSIsContainer) {
+        $result = Read-ImportPlanFile -Path $item.FullName -TenantId $TenantId
+        if ($result.Reason) { throw ('"{0}" {1}. Nothing was created.' -f $item.FullName, $result.Reason) }
+        return @{ Path = $item.FullName; Keys = $result.Keys }
+    }
+
+    $candidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new(
+        [System.IO.FileInfo[]]@(Get-ChildItem -LiteralPath $item.FullName -File -Filter '_importreport_*.json'))
+    $candidates.Sort([Comparison[System.IO.FileInfo]]{ param($x, $y) [string]::CompareOrdinal($y.Name, $x.Name) })
+    $rejected = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in $candidates) {
+        $result = Read-ImportPlanFile -Path $candidate.FullName -TenantId $TenantId
+        if (-not $result.Reason) { return @{ Path = $candidate.FullName; Keys = $result.Keys } }
+        $rejected.Add(('{0} {1}' -f $candidate.Name, $result.Reason))
+    }
+    throw ('No usable -WhatIf report in "{0}". Run -WhatIf first, then pass its report as -PlanPath. Nothing was created.{1}' -f
+        $item.FullName, ($rejected.Count -gt 0 ? ([System.Environment]::NewLine + ($rejected -join [System.Environment]::NewLine)) : ''))
+}
+
 function Get-ExistingName {
     <#
         One call per area rather than one per file: a tenant has at most a few hundred
@@ -1219,6 +1298,20 @@ if ($sourceManifest.Count -gt 0) {
     }
 }
 
+# The plan this run is bound to, resolved before the banner, the prompt and the report
+# reservation: a bad plan stops the run with nothing created and no empty report left behind.
+# A -WhatIf run needs none; given one anyway, it shows what the plan would exclude.
+$plannedKeys = $null
+$planLabel = ''
+if (-not $WhatIfPreference -or -not [string]::IsNullOrWhiteSpace($PlanPath)) {
+    if ([string]::IsNullOrWhiteSpace($PlanPath)) {
+        throw 'A real run needs -PlanPath: the _importreport_ of a -WhatIf run against this target. Nothing was created.'
+    }
+    $plan = Resolve-ImportPlan -Path $PlanPath -TenantId $tokenTenantId
+    $plannedKeys = $plan.Keys
+    $planLabel = '{0} ({1} file(s) planned)' -f $plan.Path, $plannedKeys.Count
+}
+
 # The banner is what the operator reads before typing YES, so it describes what will actually
 # be attempted: -Area, the unsupported list and unknown folder names all applied. The loop
 # below still walks every folder - it has to, to report 'unsupported' and 'unknown-area' rows.
@@ -1243,6 +1336,7 @@ Write-Host ('         ({0})' -f $sourceLabel)
 Write-Host ('Target : {0}' -f $targetLabel) -ForegroundColor Yellow -NoNewline
 Write-Host ($WhatIfPreference ? '   DRY RUN' : '   WRITE') -ForegroundColor ($WhatIfPreference ? 'Green' : 'Red')
 Write-Host ('Areas  : {0} of {1} folder(s) selected, {2} file(s)' -f $selectedFolders.Count, $folders.Count, $selectedFileCount)
+if ($planLabel) { Write-Host ('Plan   : {0}' -f $planLabel) }
 Write-Host ''
 
 # One gate for the whole run, not ConfirmImpact = 'High' - that asks once per object, and an
@@ -1267,11 +1361,11 @@ function Add-Result {
     # own message. One column cannot be both.
     param(
         [string]$AreaName, [string]$File, [string]$Name, [string]$Status,
-        [string]$Detail, [string]$CreatedId = ''
+        [string]$Detail, [string]$CreatedId = '', [string]$Sha256 = ''
     )
     $results.Add([pscustomobject][ordered]@{
         Area = $AreaName; File = $File; Name = $Name
-        Status = $Status; Detail = $Detail; CreatedId = $CreatedId
+        Status = $Status; Detail = $Detail; CreatedId = $CreatedId; Sha256 = $Sha256
     })
 }
 
@@ -1351,9 +1445,14 @@ try {
 
         foreach ($file in $files) {
             $displayName = ''
+            $fileHash = ''
             $pendingRow = $null
             try {
-                $sidecar = Get-Content -Path $file.FullName -Raw -Encoding utf8 |
+                # Read once: the hash that is compared with the plan and the bytes that are parsed
+                # and posted are the same bytes, so the file cannot change in between.
+                $fileBytes = [System.IO.File]::ReadAllBytes($file.FullName)
+                $fileHash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($fileBytes))
+                $sidecar = [System.Text.Encoding]::UTF8.GetString($fileBytes).TrimStart([char]0xFEFF) |
                     ConvertFrom-Json -AsHashtable -Depth 50
 
                 $body = ConvertTo-CreationBody -Sidecar $sidecar -Definition $definition -AreaName $areaName
@@ -1362,13 +1461,23 @@ try {
                 $problem = Test-CreationBody -Body $body -Definition $definition
                 if ($problem) {
                     Write-Warning ('{0}: skipped - {1}.' -f $file.Name, $problem)
-                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'invalid' -Detail $problem
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'invalid' -Detail $problem -Sha256 $fileHash
                     continue
                 }
 
                 if ($existing.Contains($displayName)) {
                     Write-Verbose ('{0}: "{1}" already exists in the tenant, skipping.' -f $areaName, $displayName)
-                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'duplicate' -Detail 'a policy with this name already exists'
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'duplicate' -Detail 'a policy with this name already exists' -Sha256 $fileHash
+                    continue
+                }
+
+                # Bound to the plan: only a file the -WhatIf run listed as 'whatif', with the
+                # same content, is created. Anything else is reported and left alone, and the
+                # rest of the plan still runs.
+                if ($null -ne $plannedKeys -and -not $plannedKeys.Contains(('{0}|{1}|{2}' -f $areaName, $file.Name, $fileHash))) {
+                    Write-Warning ('{0}: not in the plan - not shown as whatif there, or changed since. Skipped.' -f $file.Name)
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'not-in-plan' `
+                        -Detail 'not shown as whatif in the plan, or changed since' -Sha256 $fileHash
                     continue
                 }
 
@@ -1376,7 +1485,7 @@ try {
                     # Claimed in the dry run too, so a second file with the same name shows as
                     # 'duplicate' here exactly as it will in the real run.
                     [void]$existing.Add($displayName)
-                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'whatif' -Detail $definition.Resource
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'whatif' -Detail $definition.Resource -Sha256 $fileHash
                     continue
                 }
 
@@ -1388,7 +1497,7 @@ try {
                 # same reason - a second file with this name must not be posted while the first
                 # one's outcome is unknown.
                 Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'indeterminate' `
-                    -Detail 'POST sent, no response recorded'
+                    -Detail 'POST sent, no response recorded' -Sha256 $fileHash
                 $pendingRow = $results[$results.Count - 1]
                 [void]$existing.Add($displayName)
 
@@ -1425,7 +1534,7 @@ try {
                 $message = Get-GraphErrorDetail -ErrorRecord $PSItem
                 if ($null -eq $pendingRow) {
                     Write-Warning ('{0}: failed - {1}' -f $file.Name, $message)
-                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'failed' -Detail $message
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'failed' -Detail $message -Sha256 $fileHash
                     continue
                 }
                 # A 4xx is the service refusing the body: nothing was created. Anything else - no
@@ -1473,6 +1582,7 @@ finally {
         'failed'       = 'failed'
         'indeterminate' = 'indeterminate'
         'whatif'      = 'whatif'
+        'not-in-plan' = 'notInPlan'
         'unsupported'  = 'unsupported'
         'unknown-area' = 'unknownArea'
         'blocked'      = 'blocked'
@@ -1484,7 +1594,7 @@ finally {
     }
 
     $report = [ordered]@{
-        schemaVersion      = 1
+        schemaVersion      = 2
         runTimestampUtc    = $runUtc.ToString('o')
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
@@ -1509,6 +1619,7 @@ finally {
                 status    = $PSItem.Status
                 detail    = $PSItem.Detail
                 createdId = $PSItem.CreatedId
+                sha256    = $PSItem.Sha256
             }
         })
     }
