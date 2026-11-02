@@ -291,7 +291,7 @@ Data/
       _manifest_2026-08-05_1216.json
       _changeset_vs_2026-07-31-11-25.json          ← only with -CompareWithPrevious
       Contoso-AB_2026-08-05_1216_sidecars.zip
-        Settings-Catalog/WIN-C-ES-SB-Windows-11_<id>_2026-08-05_1216.json
+        Settings-Catalog/WIN-C-ES-SB-Windows-11_<id>.json
         Compliance-Policy/...
 ```
 
@@ -303,6 +303,11 @@ ambiguous. A scheduled run on a UTC host will name its folder in UTC.
 
 Every run packs its per-area sidecar folders into a single `<Tenant>_<stamp>_sidecars.zip`
 in the run folder — one measured run went from 16 area folders and 229 files to one archive.
+Entry names carry no run stamp, and the entries are written in ordinal name order with a
+fixed timestamp and no file-mode bits, so two runs against an unchanged tenant produce the
+same archive bytes on the same platform. The stamp is in the run folder, the archive name and
+the manifest. (Archives from 1.14.0 and earlier have the stamp in each entry name; they are
+still read through the `ConfigurationFile` of their own CSV.)
 `ConfigurationFile` in the CSV, and `configurationFile` / `previousConfigurationFile` in the
 change set, are therefore **entry names inside that zip**, not loose paths: a consumer opens
 `<run>/<Tenant>_<stamp>_sidecars.zip` and reads the named entry. The change set's top-level

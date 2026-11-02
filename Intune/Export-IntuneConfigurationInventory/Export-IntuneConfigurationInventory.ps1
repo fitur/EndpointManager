@@ -14,8 +14,8 @@
                     IntuneConfigurationInventory_<Tenant>_<yyyy-MM-dd_HHmm>.csv
                     _manifest_<yyyy-MM-dd_HHmm>.json
                     <Tenant>_<yyyy-MM-dd_HHmm>_sidecars.zip
-                        <Policy-Area>/<Name>_<Id>_<yyyy-MM-dd_HHmm>.json   (one archive entry per policy)
-                        <Policy-Area>/<Name>_<Id>_<yyyy-MM-dd_HHmm>.ps1|.sh   (script areas; remediations get _detect / _remediate)
+                        <Policy-Area>/<Name>_<Id>.json   (one archive entry per policy)
+                        <Policy-Area>/<Name>_<Id>.ps1|.sh   (script areas; remediations get _detect / _remediate)
                     _changeset_<...>.json   (only with -CompareWithPrevious)
                     AppInstallStatus_<yyyy-MM-dd_HHmm>.csv   (only with -IncludeAppInstallStatus)
                     DeviceInventory_<yyyy-MM-dd_HHmm>.csv   (only with -IncludeDeviceInventory)
@@ -878,11 +878,12 @@ function New-ConfigurationFileName {
     [OutputType([string])]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$DisplayName,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Id,
-        [Parameter(Mandatory)][string]$Stamp
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Id
     )
-    # Name first so the folder is navigable, id second so the file survives a rename,
-    # stamp last so a file identifies its own run even when moved out of the folder.
+    # Name first so the folder is navigable, id second so the file survives a rename. No run
+    # stamp: entry names inside the sidecar archive must not change between two runs against
+    # an unchanged tenant, or the archive can never be byte-identical. The run folder, the
+    # archive name and the manifest carry the stamp instead.
     # 40 characters keeps the deepest path well inside Windows' 260 character limit;
     # the id guarantees uniqueness, so the name only has to be recognisable.
     $namePart = ConvertTo-SafeFileNamePart -Value $DisplayName
@@ -892,7 +893,7 @@ function New-ConfigurationFileName {
     if ([string]::IsNullOrWhiteSpace($namePart)) { $namePart = 'unnamed' }
 
     $idPart = [string]::IsNullOrWhiteSpace($Id) ? 'no-id' : (ConvertTo-SafeFileNamePart -Value $Id)
-    return '{0}_{1}_{2}.json' -f $namePart, $idPart, $Stamp
+    return '{0}_{1}.json' -f $namePart, $idPart
 }
 
 function New-AreaResult {
@@ -3112,7 +3113,7 @@ foreach ($definition in $policyDefinitions) {
         if ([string]::IsNullOrWhiteSpace($displayName)) {
             $displayName = [string](Get-ObjectProperty -InputObject $item -Name 'displayName')
         }
-        $configFileName = New-ConfigurationFileName -DisplayName $displayName -Id $id -Stamp $fileStamp
+        $configFileName = New-ConfigurationFileName -DisplayName $displayName -Id $id
 
         # Build the configuration payload: the object itself minus noise, plus fetched detail.
         # largeIcon is a base64 PNG on Win32 apps - tens of kilobytes of payload that would
@@ -3483,18 +3484,35 @@ try {
             Remove-Item -Path $sidecarArchivePath -Force
         }
 
-        # ZipFile::Open + CreateEntryFromFile, not CreateFromDirectory: the latter would
-        # sweep in the CSV, the manifest and every _*.json in the run root. Entry names are
-        # the path relative to the run folder with '/' separators, matching ConfigurationFile
-        # in the CSV and the change set. PS7 resolves the type without Add-Type.
+        # ZipFile::Open + explicit entries, not CreateFromDirectory: the latter would sweep in
+        # the CSV, the manifest and every _*.json in the run root. Entry names are the path
+        # relative to the run folder with '/' separators, matching ConfigurationFile in the
+        # CSV and the change set. PS7 resolves the type without Add-Type.
+        #
+        # Byte-identical between runs against an unchanged tenant: entries in ordinal name
+        # order (Get-ChildItem order depends on the filesystem), a fixed timestamp and no
+        # file-mode bits - CreateEntryFromFile would copy LastWriteTime and the Unix mode.
+        # 2000-01-01 rather than a "zero" date: the zip format cannot store years before 1980.
+        $entryTime = [System.DateTimeOffset]::new(2000, 1, 1, 0, 0, 0, [System.TimeSpan]::Zero)
+        $entries = [System.Collections.Generic.SortedDictionary[string, string]]::new([System.StringComparer]::Ordinal)
+        foreach ($file in $sidecarFiles) {
+            $entryName = [System.IO.Path]::GetRelativePath($runDirectory, $file.FullName).Replace(
+                [System.IO.Path]::DirectorySeparatorChar, '/')
+            $entries[$entryName] = $file.FullName
+        }
         $archive = [System.IO.Compression.ZipFile]::Open(
             $sidecarArchivePath, [System.IO.Compression.ZipArchiveMode]::Create)
         try {
-            foreach ($file in $sidecarFiles) {
-                $entryName = [System.IO.Path]::GetRelativePath($runDirectory, $file.FullName).Replace(
-                    [System.IO.Path]::DirectorySeparatorChar, '/')
-                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-                    $archive, $file.FullName, $entryName) | Out-Null
+            foreach ($pair in $entries.GetEnumerator()) {
+                $entry = $archive.CreateEntry($pair.Key, [System.IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = $entryTime
+                $entry.ExternalAttributes = 0
+                $stream = $entry.Open()
+                try {
+                    $bytes = [System.IO.File]::ReadAllBytes($pair.Value)
+                    $stream.Write($bytes, 0, $bytes.Length)
+                }
+                finally { $stream.Dispose() }
             }
         }
         finally {
