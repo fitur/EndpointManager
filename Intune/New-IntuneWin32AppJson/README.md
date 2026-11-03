@@ -113,8 +113,11 @@ line:
 ```
 
 `Application - Publisher` takes the place of `Application - Vendor`, and the unit of the disk
-space is in the label. A value of `n/a`, `None` or nothing counts as missing. Other fields,
-such as `Architecture`, are not read; the `-Architecture` parameter still applies.
+space is in the label. A value of `n/a`, `None` or nothing counts as missing.
+
+`Architecture` (`x64`, `x86` or `arm64`) sets the architecture requirement when `-Architecture`
+is not given. If both are given and differ, or the file holds any other value, the run stops.
+Other fields in the file are not read.
 
 Markdown escapes are not undone, so write the detection string exactly as it should be
 matched, with single backslashes.

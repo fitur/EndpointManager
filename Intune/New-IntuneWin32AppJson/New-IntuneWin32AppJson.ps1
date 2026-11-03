@@ -73,7 +73,9 @@
     without one it is "<Vendor> <Name> <Version>" (IgorPavlov 7Zip 26.02).
 
 .PARAMETER Architecture
-    Architecture requirement sent to Intune. Defaults to x64.
+    Architecture requirement sent to Intune. Defaults to x64. When not given, the
+    Architecture of an ApplicationInformation.md (x64, x86 or arm64) is used instead; a
+    value given here must agree with it.
 
 .PARAMETER MinimumWindowsRelease
     Minimum supported Windows release sent to Intune. Defaults to W11_21H2, the
@@ -2283,6 +2285,22 @@ try {
             throw "Detection type '$declaredDetectionType' is not REG, MSI or FILE."
         }
         $detectionMethod = Get-AppInfoMarkdownValue -Content $appInfo -Label "Detection string"
+
+        # The package states its architecture; -Architecture, which defaults to x64, would
+        # otherwise ignore it and upload an x86 or arm64 build with an x64 requirement. An
+        # explicit -Architecture must agree with the file, and an unknown value is not guessed at.
+        $fileArchitecture = Get-AppInfoMarkdownValue -Content $appInfo -Label "Architecture"
+        if ($fileArchitecture) {
+            if ($fileArchitecture -notin "x64", "x86", "arm64") {
+                throw "Architecture '$fileArchitecture' in $($appInfoFile.Name) is not x64, x86 or arm64."
+            }
+            if (-not $PSBoundParameters.ContainsKey("Architecture")) {
+                $Architecture = $fileArchitecture.ToLowerInvariant()
+            }
+            elseif ($Architecture -ne $fileArchitecture) {
+                throw "-Architecture $Architecture disagrees with Architecture '$fileArchitecture' in $($appInfoFile.Name)."
+            }
+        }
     }
     else {
         $vendor       = Get-AppInfoValue -Content $appInfo -Label "Application - Vendor"
