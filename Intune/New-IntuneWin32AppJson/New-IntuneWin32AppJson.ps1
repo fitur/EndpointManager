@@ -1057,6 +1057,19 @@ function Get-Win32AppInventory {
     return ,$apps.ToArray()
 }
 
+function ConvertTo-ComparableVersion {
+    <#
+    .SYNOPSIS
+        Fills in a missing build and revision, so that 1.0 and 1.0.0 compare as equal.
+        [version]'1.0' is -lt [version]'1.0.0' because an absent component is -1.
+    #>
+    [OutputType([version])]
+    param (
+        [Parameter(Mandatory)][version]$Version
+    )
+    return [version]::new($Version.Major, $Version.Minor, [Math]::Max($Version.Build, 0), [Math]::Max($Version.Revision, 0))
+}
+
 function Select-SupersedableApp {
     <#
     .SYNOPSIS
@@ -1081,8 +1094,8 @@ function Select-SupersedableApp {
         [Parameter(Mandatory)][string]$NewVersion,
         [Parameter(Mandatory)][AllowEmptyString()][string]$ExcludeId,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AllApps,
-        # Return the apps strictly newer than the new version instead of the earlier ones
-        [switch]$Newer
+        # Which apps to return: strictly earlier (default), strictly newer, or the same version
+        [ValidateSet("Earlier", "Newer", "Same")][string]$Relation = "Earlier"
     )
 
     $newParsed = $null
@@ -1090,6 +1103,7 @@ function Select-SupersedableApp {
         Write-Warning "Version '$NewVersion' is not comparable - skipping supersedence to avoid superseding the wrong app."
         return ,@()
     }
+    $newParsed = ConvertTo-ComparableVersion -Version $newParsed
 
     $patterns = foreach ($base in ($NameBases | Where-Object { $_ } | Select-Object -Unique)) {
         "^" + [regex]::Escape($base) + '\s+(\d+(?:\.\d+){0,3})$'
@@ -1106,7 +1120,13 @@ function Select-SupersedableApp {
                 Write-Verbose "Skipping '$($app.displayName)': version not comparable."
                 continue
             }
-            if ($Newer ? ($oldParsed -le $newParsed) : ($oldParsed -ge $newParsed)) { continue }
+            $oldParsed = ConvertTo-ComparableVersion -Version $oldParsed
+            $qualifies = switch ($Relation) {
+                "Earlier" { $oldParsed -lt $newParsed }
+                "Newer"   { $oldParsed -gt $newParsed }
+                "Same"    { $oldParsed -eq $newParsed }
+            }
+            if (-not $qualifies) { continue }
 
             [pscustomobject]@{ Id = $app.id; DisplayName = $app.displayName; Version = $oldParsed }
             break
@@ -2471,6 +2491,13 @@ else {
         }
         if ($existingDuplicate) { break }
     }
+    # The same version written differently ("7-Zip 26.5" for 26.05) is the same package
+    if (-not $existingDuplicate) {
+        $sameVersion = Select-SupersedableApp -NameBases @($descResult.DisplayName, "$vendor $appName") -NewVersion $appVersion `
+                                              -ExcludeId "" -AllApps $appInventory -Relation Same
+        $existingDuplicate = $sameVersion | Select-Object -First 1
+        if ($existingDuplicate) { $existingDuplicate = [pscustomobject]@{ id = $existingDuplicate.Id; displayName = $existingDuplicate.DisplayName } }
+    }
     if ($existingDuplicate) {
         $existingId = $existingDuplicate.PSObject.Properties["id"] ? $existingDuplicate.id : "unknown"
         throw "An app named '$($existingDuplicate.displayName)' already exists in the tenant (id $existingId). The script refuses to upload the same package twice. Remove or rename the existing app, or raise the version in ApplicationInformation.txt."
@@ -2630,7 +2657,7 @@ if ($appId -and $uploadVerified) {
         $supersedeCandidates = Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
                                                       -ExcludeId $appId -AllApps $appInventory
         $newerApps = Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
-                                            -ExcludeId $appId -AllApps $appInventory -Newer
+                                            -ExcludeId $appId -AllApps $appInventory -Relation Newer
 
         # Superseding the earlier versions while a newer one exists would leave both deployed,
         # and the newer one is the one that should be kept. Nothing here shows which is right,

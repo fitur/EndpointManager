@@ -466,6 +466,7 @@ read it before running it against a tenant you care about, and use `-WhatIf` fir
 
 - **Rerunning the same package is refused.** If an app with the same name is already in the
   tenant the script stops before uploading - raise the version or remove the old app first.
+  The same version written differently counts too: `7-Zip 26.5` is `7-Zip 26.05`.
   The check needs the tenant inventory, so it is skipped under `-WhatIf`.
 - **The app uploads immediately**, even when the assignment is scheduled. Only the
   assignment is deferred; the app is visible in the portal right away.
