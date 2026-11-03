@@ -1282,6 +1282,13 @@ function ConvertFrom-DetectionRule {
         [Parameter(Mandatory)][string]$DetectionString
     )
 
+    # A path here never has a doubled backslash, and UNC is not supported. A doubled one is an
+    # escaped string (JSON, PowerShell) that would parse into a rule that uploads fine and never
+    # detects. Not decoded: that would be a guess.
+    if ($DetectionString.Contains('\\')) {
+        throw "Detection rule '$DetectionString' contains a doubled backslash (\\). Write the path with single backslashes."
+    }
+
     $operatorMap = @{
         ">=" = "greaterThanOrEqual"
         "="  = "equal"
