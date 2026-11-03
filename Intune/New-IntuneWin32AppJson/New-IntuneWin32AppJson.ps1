@@ -139,7 +139,9 @@
     setting this to $false shifts a locally entered time by the UTC offset.
 
 .OUTPUTS
-    PSCustomObject with DisplayName, AppId, JsonPath, DetectionType and DescriptionFound.
+    PSCustomObject with DisplayName, AppId, JsonPath, DetectionType, DescriptionFound,
+    AssignedGroupId, PilotGroupId, ProductionGroupId, SupersededApp, RetiredApps and
+    UploadVerified. AppId is $null under -WhatIf.
 
 .EXAMPLE
     .\New-IntuneWin32AppJson.ps1 -AppPath "C:\AppTest\MyApp_1.0.zip"
@@ -667,8 +669,6 @@ if ($CustomerConfigPath) {
 
 #endregion
 
-# These mirror the lookup tables inside New-IntuneWin32AppRequirementRule so the generated
-# JSON artifact records the same values that are actually sent to Intune.
 # Return codes written to the JSON artifact and used to correct the module's defaults after
 # upload. Defined once so the two can never drift apart.
 $script:Win32AppReturnCodes = @(
@@ -682,6 +682,8 @@ $script:Win32AppReturnCodes = @(
 # 1x1 transparent PNG, used when a package ships without an icon
 $script:BlankPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 
+# These mirror the lookup tables inside New-IntuneWin32AppRequirementRule so the generated
+# JSON artifact records the same values that are actually sent to Intune.
 $architectureMap = @{
     "x64" = "x64"; "x86" = "x86"; "arm64" = "arm64"
     "x64x86" = "x64,x86"; "AllWithARM64" = "x64,x86,arm64"
@@ -1241,8 +1243,8 @@ function ConvertTo-MB {
 function Expand-AppPackage {
     <#
     .SYNOPSIS
-        Extracts a zip file to an AppUnzip directory next to the zip file.
-        An existing directory is cleared first. Returns the temp directory path.
+        Extracts a zip file to a new AppUnzip_<id> directory next to the zip file and returns
+        its path. The directory is unique per run, so nothing existing is touched.
     #>
     [OutputType([string])]
     param (
@@ -2060,7 +2062,7 @@ if ($missingCredentials.Count -gt 0) {
     throw "Missing required authentication credentials: $($missingCredentials -join ', ')"
 }
 
-# Assignment input is validated up front so a misconfiguration fails before extraction (§7.2)
+# Assignment input is validated up front so a misconfiguration fails before extraction
 
 # GUID check for every supplied group id, same pattern as the original AssignmentGroupId check
 foreach ($groupIdField in @(
