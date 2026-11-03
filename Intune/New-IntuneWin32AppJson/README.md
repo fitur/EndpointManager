@@ -201,6 +201,7 @@ entirely. See [Working across several customers](#working-across-several-custome
 | `-CustomerConfigPath` | — | Local JSON file with credentials for several customers |
 | `-CustomerName` | — | Selects a customer without prompting |
 | `-CertificateThumbprint` | env var | Certificate in the CurrentUser store |
+| `-CertificateStoreLocation` | `CurrentUser` | `CurrentUser` or `LocalMachine`, for the thumbprint lookup. Scheduled tasks on Windows usually keep the certificate in `LocalMachine` |
 | `-CertificatePath` `-CertificatePassword` | env vars | PFX file instead of a store lookup |
 | `-TenantID` `-ClientID` `-ClientSecret` | env vars | Avoid on the command line |
 | `-Quiet` | off | Suppresses the per-chunk upload progress |
@@ -424,8 +425,9 @@ otherwise be assigned into the wrong tenant's group. The file is authoritative.
 **Explicitly passed parameters still win**, so `-Owner` on the command line overrides
 whatever the file says for that run.
 
-The script warns if the file is readable by anyone but its owner. Run `chmod 600` on it and
-add it to `.gitignore` — never commit a filled-in copy.
+The script warns if the file is readable by anyone but its owner: on macOS and Linux by its
+mode, on Windows when Everyone, Users or Authenticated Users can read it (`icacls` fixes that).
+Run `chmod 600` on it and keep it out of the repo - `customers.json` is in `.gitignore`.
 
 ## App names and descriptions
 

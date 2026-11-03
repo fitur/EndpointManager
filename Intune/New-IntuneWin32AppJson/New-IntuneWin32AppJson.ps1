@@ -51,6 +51,11 @@
     the certificate store on Windows. Preferred over a client secret: the private key
     stays in the OS keystore. Falls back to $env:INTUNE_CERT_THUMBPRINT.
 
+.PARAMETER CertificateStoreLocation
+    Store the thumbprint is looked up in: CurrentUser (default) or LocalMachine. Scheduled
+    tasks and service accounts on Windows usually keep their certificate in LocalMachine.
+    Ignored with -CertificatePath.
+
 .PARAMETER CertificatePath
     Path to a PFX file, for environments without a usable certificate store such as a
     Linux-based Azure Function. Falls back to $env:INTUNE_CERT_PATH.
@@ -203,6 +208,9 @@
     Requires PowerShell 7.4+ and the IntuneWin32App module, which is installed
     automatically on first run. Graph permission: DeviceManagementApps.ReadWrite.All
     as an Application permission with admin consent.
+
+    The Get-ClientCertificate function in this file has a -StoreLocation parameter that the
+    copies in the export and import scripts lack. It was deliberately not synced to them.
 
     CHANGELOG
 
@@ -397,7 +405,7 @@
 param (
     [Parameter(Mandatory = $true)]
     [ValidateScript({
-        if (-not (Test-Path -Path $_ -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $_ -PathType Leaf)) {
             throw "AppPath '$_' does not exist or is not a file."
         }
         if ([System.IO.Path]::GetExtension($_) -ne ".zip") {
@@ -422,6 +430,10 @@ param (
     # Linux-based Azure Function.
     [Parameter()]
     [string]$CertificateThumbprint = $env:INTUNE_CERT_THUMBPRINT,
+
+    [Parameter()]
+    [ValidateSet("CurrentUser", "LocalMachine")]
+    [string]$CertificateStoreLocation = "CurrentUser",
 
     [Parameter()]
     [string]$CertificatePath = $env:INTUNE_CERT_PATH,
@@ -537,7 +549,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # Resolve to absolute path so relative input works from any working directory
-$AppPath = (Resolve-Path -Path $AppPath).Path
+$AppPath = (Resolve-Path -LiteralPath $AppPath).Path
 
 #region Customer selection
 
@@ -549,22 +561,35 @@ $AppPath = (Resolve-Path -Path $AppPath).Path
 # by setting the environment.
 if ($CustomerConfigPath) {
 
-    if (-not (Test-Path -Path $CustomerConfigPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $CustomerConfigPath -PathType Leaf)) {
         throw "Customer config '$CustomerConfigPath' does not exist or is not a file."
     }
-    $customerConfigResolved = (Resolve-Path -Path $CustomerConfigPath).Path
+    $customerConfigResolved = (Resolve-Path -LiteralPath $CustomerConfigPath).Path
 
     # Warn when the file is readable by more than its owner. UnixMode is not populated on Windows.
     if (-not $IsWindows) {
-        $configItem = Get-Item -Path $customerConfigResolved
+        $configItem = Get-Item -LiteralPath $customerConfigResolved
         if ($configItem.PSObject.Properties.Name -contains "UnixMode" -and
             $configItem.UnixMode.Substring(4) -match '[rwx]') {
             Write-Warning "'$customerConfigResolved' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$customerConfigResolved'"
         }
     }
+    else {
+        # Windows has no UnixMode; look at the ACL for read access granted to everyone. A failure
+        # to read the ACL is not worth stopping for, so it only produces a verbose note.
+        try {
+            $broadRules = Get-BroadReadRule -Rule (Get-Acl -LiteralPath $customerConfigResolved).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
+            if ($broadRules.Count -gt 0) {
+                Write-Warning "'$customerConfigResolved' is readable by Everyone, Users or Authenticated Users. Run: icacls '$customerConfigResolved' /inheritance:r /grant:r `"$($env:USERNAME):(R,W)`""
+            }
+        }
+        catch {
+            Write-Verbose "Could not read the ACL of '$customerConfigResolved': $($PSItem.Exception.Message)"
+        }
+    }
 
     try {
-        $customerConfig = Get-Content -Path $customerConfigResolved -Raw -Encoding UTF8 |
+        $customerConfig = Get-Content -LiteralPath $customerConfigResolved -Raw -Encoding UTF8 |
             ConvertFrom-Json -AsHashtable -ErrorAction Stop
     }
     catch {
@@ -813,7 +838,7 @@ function Get-AppDescription {
             $rawText  = $response -is [string] ? $response : ($response | ConvertTo-Json -Depth 20)
         }
         else {
-            $rawText = Get-Content -Path (Resolve-Path -Path $Source).Path -Raw -Encoding UTF8 -ErrorAction Stop
+            $rawText = Get-Content -LiteralPath (Resolve-Path -LiteralPath $Source).Path -Raw -Encoding UTF8 -ErrorAction Stop
         }
 
         $descriptions = $rawText | ConvertFrom-Json -AsHashtable -ErrorAction Stop
@@ -951,6 +976,26 @@ function Read-TextFileSmart {
     }
 }
 
+function Get-BroadReadRule {
+    <#
+    .SYNOPSIS
+        Returns the allow rules among the given file access rules that let Everyone, Users or
+        Authenticated Users read the file. SIDs are compared, since the group names are
+        localised.
+    #>
+    [OutputType([object[]])]
+    param (
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rule
+    )
+    $broadSids = "S-1-1-0", "S-1-5-32-545", "S-1-5-11"
+    $readData  = [System.Security.AccessControl.FileSystemRights]::ReadData
+    return ,@($Rule | Where-Object {
+        [string]$_.AccessControlType -eq "Allow" -and
+        $_.IdentityReference.Value -in $broadSids -and
+        ($_.FileSystemRights -band $readData) -eq $readData
+    })
+}
+
 function Get-ClientCertificate {
     <#
     .SYNOPSIS
@@ -959,7 +1004,8 @@ function Get-ClientCertificate {
     .DESCRIPTION
         Two sources are supported, in this order:
 
-          Thumbprint : looked up in the CurrentUser\My store. That store is the login
+          Thumbprint : looked up in the CurrentUser\My store (or LocalMachine\My with
+                       -StoreLocation). The CurrentUser store is the login
                        Keychain on macOS and the certificate store on Windows, so the key
                        never leaves the OS keystore. Preferred for interactive use.
           Path       : a PFX file, for environments with no usable store such as a
@@ -976,6 +1022,7 @@ function Get-ClientCertificate {
     [OutputType([System.Security.Cryptography.X509Certificates.X509Certificate2])]
     param (
         [Parameter()][AllowEmptyString()][string]$Thumbprint,
+        [Parameter()][ValidateSet("CurrentUser", "LocalMachine")][string]$StoreLocation = "CurrentUser",
         [Parameter()][AllowEmptyString()][string]$Path,
         [Parameter()][AllowEmptyString()][string]$Password
     )
@@ -988,7 +1035,7 @@ function Get-ClientCertificate {
         # Strip spaces and any invisible characters that survive a copy from the portal
         $normalized = ($Thumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
 
-        $store = [System.Security.Cryptography.X509Certificates.X509Store]::new("My", "CurrentUser")
+        $store = [System.Security.Cryptography.X509Certificates.X509Store]::new("My", $StoreLocation)
         try {
             $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
             $found = $store.Certificates | Where-Object { $_.Thumbprint -eq $normalized }
@@ -999,7 +1046,7 @@ function Get-ClientCertificate {
 
         $certificate = @($found) | Select-Object -First 1
         if (-not $certificate) {
-            throw "No certificate with thumbprint '$normalized' in the CurrentUser store. Import the PFX first, or use -CertificatePath."
+            throw "No certificate with thumbprint '$normalized' in the $StoreLocation store. Import the PFX first, or use -CertificatePath."
         }
         if (-not $certificate.HasPrivateKey) {
             throw "Certificate '$normalized' has no private key. Import the PFX, not just the .cer public part."
@@ -1008,10 +1055,10 @@ function Get-ClientCertificate {
     }
 
     if ($Path) {
-        if (-not (Test-Path -Path $Path -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
             throw "Certificate file '$Path' does not exist or is not a file."
         }
-        $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -Path $Path).Path)
+        $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path).Path)
         $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]
 
         # EphemeralKeySet keeps the private key out of any on-disk keystore, but it is not
@@ -1321,9 +1368,11 @@ function Expand-AppPackage {
     # an instance filesystem) cannot delete each other's extraction mid-step
     $tempDir = Join-Path -Path $parentDir -ChildPath ("AppUnzip_{0}" -f [guid]::NewGuid().ToString("N").Substring(0, 8))
 
-    # -WhatIf:$false so local preparation always runs; -WhatIf only gates the Intune upload
-    New-Item -Path $tempDir -ItemType Directory -WhatIf:$false | Out-Null
-    Expand-Archive -Path $ZipPath -DestinationPath $tempDir -Force -WhatIf:$false
+    # -WhatIf:$false so local preparation always runs; -WhatIf only gates the Intune upload.
+    # Expand-Archive creates the directory: creating it first with New-Item, which has no
+    # -LiteralPath, made [ ] in the zip's folder a wildcard and Expand-Archive then failed with
+    # "already exists".
+    Expand-Archive -LiteralPath $ZipPath -DestinationPath $tempDir -Force -WhatIf:$false
     return $tempDir
 }
 
@@ -2278,14 +2327,14 @@ try {
     # and -in compares case-insensitively, as -Filter did.
     $appInfoNames  = "ApplicationInformation.txt", "ApplicationInformation.md"
     $findAppInfo   = { param($dir) Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -in $appInfoNames } }
-    $candidateDirs = @(Get-ChildItem -Path $tempDir -Directory | Where-Object { $_.Name -ne "__MACOSX" })
+    $candidateDirs = @(Get-ChildItem -LiteralPath $tempDir -Directory | Where-Object { $_.Name -ne "__MACOSX" })
     $unzippedDir   = $candidateDirs |
         Where-Object { @(& $findAppInfo $_.FullName).Count -gt 0 } |
         Select-Object -First 1
 
     # Zips built without a wrapping folder put the files straight in the root
     if (-not $unzippedDir -and @(& $findAppInfo $tempDir).Count -gt 0) {
-        $unzippedDir = Get-Item -Path $tempDir
+        $unzippedDir = Get-Item -LiteralPath $tempDir
     }
 
     $unzippedDir ??= ($candidateDirs | Select-Object -First 1)
@@ -2300,14 +2349,14 @@ try {
         throw "Both $($appInfoFiles.Name -join ' and ') found in $($unzippedDir.FullName). Keep one."
     }
     $appInfoFile   = $appInfoFiles | Select-Object -First 1
-    $intunewinFiles = @(Get-ChildItem -Path $unzippedDir.FullName -Filter "*.intunewin")
+    $intunewinFiles = @(Get-ChildItem -LiteralPath $unzippedDir.FullName -Filter "*.intunewin")
     # Picking the first of several would publish whichever sorts first - an old build under the
     # new version's name, which then supersedes and retires the version that works
     if ($intunewinFiles.Count -gt 1) {
         throw "More than one .intunewin file in $($unzippedDir.FullName): $($intunewinFiles.Name -join ', '). The package must contain exactly one."
     }
     $intunewinFile = $intunewinFiles | Select-Object -First 1
-    $pngFile      = Get-ChildItem -Path $unzippedDir.FullName -Filter "*.png" | Select-Object -First 1
+    $pngFile      = Get-ChildItem -LiteralPath $unzippedDir.FullName -Filter "*.png" | Select-Object -First 1
 
     if (-not $appInfoFile)   { throw "ApplicationInformation.txt or .md not found in $($unzippedDir.FullName)" }
     if (-not $intunewinFile) { throw "No .intunewin file found in $($unzippedDir.FullName)" }
@@ -2571,6 +2620,7 @@ else {
         Import-Module @moduleSplat
 
         $clientCertificate = Get-ClientCertificate -Thumbprint $CertificateThumbprint `
+                                                   -StoreLocation $CertificateStoreLocation `
                                                    -Path       $CertificatePath `
                                                    -Password   $CertificatePassword
 
@@ -3103,12 +3153,12 @@ elseif ($RetireSuperseded -and $WhatIfPreference) {
 if ($WhatIfPreference) {
     Write-Host "`nWhatIf: leaving $tempDir in place so the generated JSON can be inspected." -ForegroundColor Yellow
 }
-elseif (Test-Path -Path $tempDir) {
+elseif (Test-Path -LiteralPath $tempDir) {
     # The JSON lives inside the temp directory, so preserve it next to the zip before
     # cleanup - otherwise the JsonPath returned to the caller points at a deleted file
     try {
         $preservedPath = Join-Path -Path ([System.IO.Path]::GetDirectoryName($AppPath)) -ChildPath $safeFileName
-        Copy-Item -Path $outputPath -Destination $preservedPath -Force
+        Copy-Item -LiteralPath $outputPath -Destination $preservedPath -Force
         $outputPath = $preservedPath
         Write-Host "`nJSON kept at: $outputPath" -ForegroundColor DarkGray
     }
@@ -3116,7 +3166,7 @@ elseif (Test-Path -Path $tempDir) {
         Write-Warning "Could not preserve the JSON artifact before cleanup: $($PSItem.Exception.Message)"
     }
 
-    Remove-Item -Path $tempDir -Recurse -Force
+    Remove-Item -LiteralPath $tempDir -Recurse -Force
     Write-Host "Cleaned up: $tempDir" -ForegroundColor DarkGray
 }
 
