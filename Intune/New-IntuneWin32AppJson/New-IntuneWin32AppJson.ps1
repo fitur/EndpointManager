@@ -2003,8 +2003,8 @@ function Select-SupersedenceTarget {
         actually deployed.
 
     .NOTES
-        createdDateTime comes from the inventory; only the assignment count is fetched per
-        candidate.
+        createdDateTime comes from the inventory. Assignments come from one expanded request,
+        with a read per candidate for any it does not cover.
     #>
     [OutputType([pscustomobject])]
     param (
@@ -2023,14 +2023,45 @@ function Select-SupersedenceTarget {
         }
     }
 
+    # One request per chunk of candidates with the assignments expanded, instead of one per
+    # candidate. Only a candidate the response covers with a real assignments array is taken
+    # from it; any other, or any failure here, is read on its own below, as before. A response
+    # that ignored $expand therefore cannot make a candidate look unassigned.
+    $expanded = @{}
+    $candidateIds = @($Candidate | ForEach-Object { [string]$_.Id } | Where-Object { $_ -match '^[0-9a-fA-F-]{36}$' })
+    for ($offset = 0; $offset -lt $candidateIds.Count; $offset += 25) {
+        $chunk = @($candidateIds[$offset..([math]::Min($offset + 24, $candidateIds.Count - 1))])
+        try {
+            $expandResponse = Invoke-RestMethod -Method Get `
+                -Uri ("https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$filter=id in ({0})&`$select=id&`$expand=assignments" -f (($chunk | ForEach-Object { "'$_'" }) -join ",")) `
+                -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            $expandValue = $expandResponse.PSObject.Properties["value"]
+            foreach ($expandedApp in @($expandValue ? $expandValue.Value : @())) {
+                $expandedId          = $expandedApp.PSObject.Properties["id"]
+                $expandedAssignments = $expandedApp.PSObject.Properties["assignments"]
+                if ($expandedId -and [string]$expandedId.Value -in $chunk -and $expandedAssignments -and $expandedAssignments.Value -is [array]) {
+                    $expanded[[string]$expandedId.Value] = @($expandedAssignments.Value)
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Expanded assignment lookup failed, reading them one by one: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
+        }
+    }
+
     $failedLookups = 0
     $enriched = foreach ($item in $Candidate) {
         $assignmentCount = 0
         $deployingCount  = 0
         try {
-            $assignmentResponse = Invoke-RestMethod -Method Get `
-                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)/assignments" `
-                -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            if ($expanded.ContainsKey([string]$item.Id)) {
+                $assignmentResponse = [pscustomobject]@{ value = $expanded[[string]$item.Id] }
+            }
+            else {
+                $assignmentResponse = Invoke-RestMethod -Method Get `
+                    -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)/assignments" `
+                    -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            }
             if ($assignmentResponse.PSObject.Properties["value"]) {
                 $assignments     = @($assignmentResponse.value)
                 $assignmentCount = $assignments.Count
