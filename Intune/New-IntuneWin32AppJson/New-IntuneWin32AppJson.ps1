@@ -998,6 +998,31 @@ function Get-ClientCertificate {
     return $null
 }
 
+function Get-AccessTokenTenantId {
+    <#
+    .SYNOPSIS
+        Returns the tid claim of a bearer token, or an empty string when it cannot be read.
+        The signature is not checked; this only tells which tenant the token was issued for.
+    #>
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory)][string]$Authorization
+    )
+    $parts = ($Authorization -replace '^Bearer\s+', '').Split('.')
+    if ($parts.Count -lt 2) { return "" }
+    $payload = $parts[1].Replace('-', '+').Replace('_', '/')
+    $payload = $payload.PadRight($payload.Length + (4 - $payload.Length % 4) % 4, '=')
+    try {
+        $claims = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload)) |
+            ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return ""
+    }
+    $tidProp = $claims.PSObject.Properties["tid"]
+    return $tidProp ? ([string]$tidProp.Value).ToLowerInvariant() : ""
+}
+
 function Get-Win32AppInventory {
     <#
     .SYNOPSIS
@@ -2381,6 +2406,10 @@ else {
                                                    -Path       $CertificatePath `
                                                    -Password   $CertificatePassword
 
+        # A token left in the session by an earlier run - possibly for another customer - must not
+        # survive a connect that fails without throwing; everything below reads this variable
+        Remove-Variable -Name AuthenticationHeader -Scope Global -ErrorAction SilentlyContinue
+
         if ($clientCertificate) {
             Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientCert $clientCertificate | Out-Null
             Write-Host "Authenticated to Microsoft Graph using certificate $($clientCertificate.Thumbprint)"
@@ -2388,6 +2417,20 @@ else {
         else {
             Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
             Write-Host "Authenticated to Microsoft Graph using client secret"
+        }
+
+        $connectedHeader = Get-Variable -Name AuthenticationHeader -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+        if (-not ($connectedHeader -and $connectedHeader.Authorization)) {
+            throw "Connect-MSIntuneGraph returned without an access token."
+        }
+        # The token's tid claim names the tenant it was issued for. Only comparable when the
+        # tenant was given as a GUID; a domain name is left to Entra.
+        $tenantGuid = [guid]::Empty
+        if ([guid]::TryParse($TenantID, [ref]$tenantGuid)) {
+            $tokenTenant = Get-AccessTokenTenantId -Authorization $connectedHeader.Authorization
+            if ($tokenTenant -ne $tenantGuid.ToString()) {
+                throw "The access token is for tenant '$tokenTenant', not '$TenantID'. Nothing was uploaded."
+            }
         }
     }
     catch {
