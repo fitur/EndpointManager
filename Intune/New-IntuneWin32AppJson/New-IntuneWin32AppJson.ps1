@@ -746,8 +746,9 @@ function Get-AppDescription {
         key preferred so more specific entries win.
 
     .OUTPUTS
-        PSCustomObject with Found (bool), Description (string) and DisplayName (string or $null).
-        DisplayName is only populated when the matched entry supplies a name override.
+        PSCustomObject with Found (bool), Description (string), DisplayName (string or $null)
+        and LoadFailed (bool). DisplayName is only populated when the matched entry supplies a
+        name override. LoadFailed is true when the file could not be read at all.
     #>
     [OutputType([pscustomobject])]
     param (
@@ -756,11 +757,12 @@ function Get-AppDescription {
         [Parameter(Mandatory)][AllowEmptyString()][string]$Source
     )
 
-    $notFound = [pscustomobject]@{ Found = $false; Description = $FallbackName; DisplayName = $null }
+    $notFound   = [pscustomobject]@{ Found = $false; Description = $FallbackName; DisplayName = $null; LoadFailed = $false }
+    $loadFailed = [pscustomobject]@{ Found = $false; Description = $FallbackName; DisplayName = $null; LoadFailed = $true }
 
     if ([string]::IsNullOrWhiteSpace($Source)) {
         Write-Warning "DescriptionsPath not set - app treated as not found."
-        return $notFound
+        return $loadFailed
     }
 
     try {
@@ -780,12 +782,12 @@ function Get-AppDescription {
     }
     catch {
         Write-Warning "Could not load app descriptions from '$Source': $($PSItem.Exception.Message) - app treated as not found."
-        return $notFound
+        return $loadFailed
     }
 
     if ($descriptions.Count -eq 0) {
         Write-Warning "Descriptions file '$Source' contained no entries."
-        return $notFound
+        return $loadFailed
     }
 
     $matchedKey = $null
@@ -822,6 +824,7 @@ function Get-AppDescription {
             Found       = $true
             Description = [string]::IsNullOrWhiteSpace($entry.Description) ? $FallbackName : $entry.Description
             DisplayName = $entry.DisplayName
+            LoadFailed  = $false
         }
     }
 
@@ -2169,7 +2172,13 @@ try {
     # replaces the vendor/name part, e.g. "IgorPavlov 7Zip 26.02" -> "7-Zip 26.02"
     $defaultDisplayName = "$vendor $appName $appVersion"
     $descResult         = Get-AppDescription -AppName $appName -FallbackName $defaultDisplayName -Source $DescriptionsPath
-    $appDescription     = $descResult.Description
+    # Without the descriptions file the app would be published under its fallback name, which
+    # the duplicate check does not know - a package already uploaded as "7-Zip 26.02" would be
+    # uploaded again as "IgorPavlov 7Zip 26.02". -WhatIf only warns, since it uploads nothing.
+    if ($descResult.LoadFailed -and -not $WhatIfPreference) {
+        throw "The descriptions file could not be loaded from '$DescriptionsPath'. The app name depends on it, so nothing is uploaded. Fix the source or point -DescriptionsPath at a local copy."
+    }
+    $appDescription    = $descResult.Description
     $displayName        = $descResult.DisplayName ? "$($descResult.DisplayName) $appVersion" : $defaultDisplayName
     # notes: "Base Application <date>" when the app is known in IntuneAppDescriptions.json, otherwise just the date
     $appNotes       = $descResult.Found ? "Base Application $today" : $today
