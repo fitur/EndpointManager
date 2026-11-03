@@ -2085,8 +2085,14 @@ try {
     Write-Host "Extracted directory: $($unzippedDir.FullName)"
 
     $appInfoFile   = Get-ChildItem -Path $unzippedDir.FullName -Filter "ApplicationInformation.txt" | Select-Object -First 1
-    $intunewinFile = Get-ChildItem -Path $unzippedDir.FullName -Filter "*.intunewin" | Select-Object -First 1
-    $pngFile       = Get-ChildItem -Path $unzippedDir.FullName -Filter "*.png" | Select-Object -First 1
+    $intunewinFiles = @(Get-ChildItem -Path $unzippedDir.FullName -Filter "*.intunewin")
+    # Picking the first of several would publish whichever sorts first - an old build under the
+    # new version's name, which then supersedes and retires the version that works
+    if ($intunewinFiles.Count -gt 1) {
+        throw "More than one .intunewin file in $($unzippedDir.FullName): $($intunewinFiles.Name -join ', '). The package must contain exactly one."
+    }
+    $intunewinFile = $intunewinFiles | Select-Object -First 1
+    $pngFile      = Get-ChildItem -Path $unzippedDir.FullName -Filter "*.png" | Select-Object -First 1
 
     if (-not $appInfoFile)   { throw "ApplicationInformation.txt not found in $($unzippedDir.FullName)" }
     if (-not $intunewinFile) { throw "No .intunewin file found in $($unzippedDir.FullName)" }
