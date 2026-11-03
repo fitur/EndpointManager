@@ -228,7 +228,11 @@
             with missing components filled in, so 1.0 no longer counts as earlier than 1.0.0.
             A name that differs only in case from an earlier version is reported, a failed
             run says where the extracted files were left, and step 8 prints the names it
-            searches for. customers.json is now in .gitignore.
+            searches for. customers.json is now in .gitignore. The descriptions file is no
+            longer matched by substring, which let "Chrome Remote Desktop" take the name
+            "Google Chrome" and with it the supersedence and retirement of Chrome's versions;
+            a near match only warns, and the app counts as not found. NewTeams, the one name
+            in use that relied on it, has its own entry in the descriptions files.
 
         3.0.2 - 2026-09-28
             File detection rules work. The rule's path was split with System.IO.Path, which
