@@ -2622,6 +2622,8 @@ if ($appId -and $uploadVerified) {
         # apps uploaded before a displayName override existed are still found. The regex and
         # the strict version comparison in Select-SupersedableApp are unchanged.
         $nameBases = @($descResult.DisplayName, "$vendor $appName") | Where-Object { $_ }
+        # Write-Information rather than Write-Host: it shows the same, and adds no analyser warning
+        Write-Information "Looking for earlier versions named: $(($nameBases | ForEach-Object { "'$_ <version>'" }) -join ' or ')" -InformationAction Continue
 
         $supersedeCandidates = Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
                                                       -ExcludeId $appId -AllApps $appInventory

@@ -297,7 +297,12 @@ than the one being uploaded.
 Uploading `7-Zip 26.02` therefore supersedes `7-Zip 26.01` and `IgorPavlov 7Zip 25.00`,
 while leaving `7-Zip 27.00`, `7-Zip Pro 26.01`, `My 7-Zip 26.01` and a plain `7-Zip` alone.
 Both naming conventions are checked so apps uploaded before a `displayName` override existed
-are still recognised.
+are still recognised. Step 8 prints the names it looks for.
+
+For an app without a `displayName` entry the base is `<Vendor> <Name>`, so `Application -
+Vendor` in the `.txt` and `Application - Publisher` in the `.md` must be the same string
+across versions. If a version changes it, earlier versions are not found and nothing is
+superseded - add a `displayName` entry to pin the name.
 
 Of the candidates, one is kept and superseded against: the highest version that still has a
 `required` or `available` include assignment. Uninstall and exclusion assignments do not
