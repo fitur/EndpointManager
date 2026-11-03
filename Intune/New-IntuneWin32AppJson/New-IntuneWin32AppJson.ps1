@@ -1113,7 +1113,14 @@ function Select-SupersedableApp {
         if ($app.id -eq $ExcludeId) { continue }
         foreach ($pattern in $patterns) {
             $match = [regex]::Match($app.displayName, $pattern)
-            if (-not $match.Success) { continue }
+            if (-not $match.Success) {
+                # Matching stays case-sensitive; a name that differs only in case is reported so the
+                # missed supersedence is visible
+                if ($Relation -eq "Earlier" -and [regex]::IsMatch($app.displayName, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+                    Write-Warning "'$($app.displayName)' differs only in case from the name being searched for, so it is not treated as an earlier version."
+                }
+                continue
+            }
 
             $oldParsed = $null
             if (-not [version]::TryParse($match.Groups[1].Value, [ref]$oldParsed)) {
