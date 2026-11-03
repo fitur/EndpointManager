@@ -66,7 +66,9 @@ IgorPavlov_7Zip_26.02_Intune.zip
 ```
 
 A `__MACOSX` folder, which macOS adds when zipping, is ignored. The files may also sit
-directly in the zip root without a wrapping folder.
+directly in the zip root without a wrapping folder. The package must hold exactly one
+`.intunewin` file; with more than one the run stops, since there is no telling which build is
+the right one.
 
 ### ApplicationInformation.txt
 
