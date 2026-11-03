@@ -1932,8 +1932,9 @@ function Remove-KeptAppSupersedence {
         }
     })
 
+    # A declined -Confirm is not a success: the caller treats $true as "kept app is clean"
     if (-not $PSCmdlet.ShouldProcess($KeptAppId, "Remove supersedence to retired versions")) {
-        return $true
+        return $false
     }
 
     # foreach ($x in 1) absorbs the module's `break` on a Begin-block validation failure;
@@ -2633,6 +2634,10 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
     elseif ($retireSet.Count -eq 0) {
         Write-Host "`n=== Step 10: Retirement ===" -ForegroundColor Cyan
         Write-Host "No earlier versions to retire beyond the one kept."
+    }
+    # The Step 6 confirmation was for the upload; retiring other apps gets its own
+    elseif (-not $PSCmdlet.ShouldProcess(($retireSet.DisplayName -join ", "), "Retire: remove supersedence and assignments, rename to (TBD)")) {
+        Write-Warning "Retirement declined; the earlier versions are left unchanged."
     }
     else {
         Write-Host "`n=== Step 10: Retirement ===" -ForegroundColor Cyan
