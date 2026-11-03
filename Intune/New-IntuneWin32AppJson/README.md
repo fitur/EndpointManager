@@ -416,6 +416,10 @@ Descriptions are written in Markdown. Adding a new base application means editin
 alone — the script reads it from the repo by default, so the change applies everywhere at
 once.
 
+If the file cannot be loaded - the source is unreachable, the JSON is invalid or empty, or
+`DescriptionsPath` is blank - the run stops before uploading, because the app name depends on
+it. Under `-WhatIf` it only warns. Point `-DescriptionsPath` at a local copy to work offline.
+
 ## On the code itself
 
 This script was written with heavy AI assistance. That is worth saying plainly rather than
