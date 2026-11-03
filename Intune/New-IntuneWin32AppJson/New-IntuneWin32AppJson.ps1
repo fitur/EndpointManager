@@ -2138,6 +2138,40 @@ function Select-SupersedenceTarget {
     return $fallback
 }
 
+function Invoke-ModuleWrite {
+    <#
+    .SYNOPSIS
+        Runs one IntuneWin32App module call that writes to the tenant and returns the warnings
+        it wrote. An empty result means it reported nothing wrong.
+
+    .DESCRIPTION
+        The module reports failures with Write-Warning, and ends the whole script with `break`
+        on a validation failure in a Begin block, which try/catch does not catch. The
+        foreach ($x in 1) absorbs that break, and a default -WarningVariable on every cmdlet
+        called here collects the warnings. The action is dot-sourced so the variable lands in
+        this scope; run with & it would be set in a child scope and lost. A call that ended
+        through `break` counts as failed even when it wrote no warning.
+    #>
+    [OutputType([object[]])]
+    param (
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+    $PSDefaultParameterValues = @{ "*:WarningVariable" = "moduleWarnings" }
+    $moduleWarnings = $null
+    $completed      = $false
+    foreach ($breakGuard in 1) {
+        . $Action | Out-Null
+        $completed = $true
+    }
+    $result = @($moduleWarnings | Where-Object { $_ })
+    # A break with no warning must not count as success: the call did not finish
+    if (-not $completed) {
+        Write-Warning "The module call ended early without finishing; treating it as failed."
+        $result += "ended early"
+    }
+    return ,$result
+}
+
 function Remove-KeptAppSupersedence {
     <#
     .SYNOPSIS
@@ -2227,15 +2261,12 @@ function Remove-KeptAppSupersedence {
         return $false
     }
 
-    # foreach ($x in 1) absorbs the module's `break` on a Begin-block validation failure;
-    # -WarningVariable captures both that and Graph errors
-    $writeWarnings = $null
-    foreach ($breakGuard in 1) {
+    $writeWarnings = Invoke-ModuleWrite {
         if ($rebuilt.Count -gt 0) {
-            Add-IntuneWin32AppSupersedence -ID $KeptAppId -Supersedence $rebuilt -WarningVariable writeWarnings | Out-Null
+            Add-IntuneWin32AppSupersedence -ID $KeptAppId -Supersedence $rebuilt
         }
         else {
-            Remove-IntuneWin32AppSupersedence -ID $KeptAppId -WarningVariable writeWarnings | Out-Null
+            Remove-IntuneWin32AppSupersedence -ID $KeptAppId
         }
     }
     return -not $writeWarnings
@@ -2971,13 +3002,8 @@ elseif ($appId -and $uploadVerified) {
                     }
                 )
 
-                # foreach ($x in 1) absorbs the module's `break` on a Begin-block validation
-                # failure, which try/catch does not catch and which otherwise exits the script
-                # silently with exit code 0. -WarningVariable still captures the module warnings.
-                $supersedenceWarnings = $null
-                foreach ($breakGuard in 1) {
-                    Add-IntuneWin32AppSupersedence -ID $appId -Supersedence $supersedenceSet `
-                        -WarningVariable supersedenceWarnings | Out-Null
+                $supersedenceWarnings = Invoke-ModuleWrite {
+                    Add-IntuneWin32AppSupersedence -ID $appId -Supersedence $supersedenceSet
                 }
 
                 if ($supersedenceWarnings) {
@@ -3123,19 +3149,11 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
             # name and is picked up on the next run.
 
             # 1. Clear supersedence relations (dependencies are preserved), wrapped against break
-            $removeSupersedenceWarnings = $null
-            foreach ($breakGuard in 1) {
-                Remove-IntuneWin32AppSupersedence -ID $retireApp.Id `
-                    -WarningVariable removeSupersedenceWarnings | Out-Null
-            }
+            $removeSupersedenceWarnings = Invoke-ModuleWrite { Remove-IntuneWin32AppSupersedence -ID $retireApp.Id }
             if ($removeSupersedenceWarnings) { $retireAppFailed = $true }
 
             # 2. Remove all assignments, wrapped against break
-            $removeAssignmentWarnings = $null
-            foreach ($breakGuard in 1) {
-                Remove-IntuneWin32AppAssignment -ID $retireApp.Id `
-                    -WarningVariable removeAssignmentWarnings | Out-Null
-            }
+            $removeAssignmentWarnings = Invoke-ModuleWrite { Remove-IntuneWin32AppAssignment -ID $retireApp.Id }
             if ($removeAssignmentWarnings) { $retireAppFailed = $true }
 
             # 3. Rename to "... (TBD)" via raw PATCH; skip when already suffixed so it is idempotent.
