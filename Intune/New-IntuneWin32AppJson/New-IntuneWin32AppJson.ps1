@@ -2151,6 +2151,16 @@ catch {
     throw "Error during extraction: $($PSItem.Exception.Message)"
 }
 
+# A failed run leaves the extracted files in place for troubleshooting; say where. `break`
+# lets the original error through unchanged, and the check keeps an early failure, before
+# $tempDir exists, from being masked.
+trap {
+    if (Get-Variable -Name tempDir -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
+        Write-Warning "The extracted files were left in $tempDir"
+    }
+    break
+}
+
 #endregion
 
 #region Step 3 - Locate extracted directory and files
