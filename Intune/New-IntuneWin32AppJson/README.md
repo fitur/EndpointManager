@@ -134,7 +134,9 @@ HKLM\Software\<COMPANY>\IgorPavlov 7Zip 26.02 x64 = Installed
 %ProgramFiles%\App\file.exe >= 1.2.3
 ```
 
-Short hive names (`HKLM`, `HKCU`, `HKCR`, `HKU`, `HKCC`) are expanded automatically. Spaces
+Short hive names (`HKLM`, `HKCR`, `HKCC`) are expanded automatically. `HKCU` and `HKU` are
+refused: the app is installed and detected as the system account, so a per-user rule would
+upload fine and never match. Spaces
 are handled in both the key path and the value name. The `=` operator is treated as a
 version comparison when the value looks like a version number, and as a string comparison
 otherwise. String comparison exists for registry rules only: Intune's file detection compares

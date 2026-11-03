@@ -15,7 +15,8 @@
     (declared as DetectionMethod.(REG), DetectionMethod.(MSI) or DetectionMethod.(FILE)),
     or in ApplicationInformation.md (Detection type REG, MSI or FILE and a Detection string):
       Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0.0
-                 Short hives HKLM, HKCU, HKCR, HKU and HKCC are also accepted.
+                 Short hives HKLM, HKCR and HKCC are also accepted. HKCU and HKU are refused,
+                 since the app is detected as the system account.
       File     : %ProgramFiles%\App\file.exe >= 1.0.0
       MSI      : {ProductCode-GUID}
 
@@ -1374,6 +1375,13 @@ function ConvertFrom-DetectionRule {
         }
     }
 
+    # The app installs and is detected as the system account (runAsAccount = system), whose
+    # HKCU is its own hive and whose HKU holds no user SID. Such a rule uploads fine and
+    # never matches, so the install is reported as failed and retried.
+    if ($DetectionString -match '^HKEY_(CURRENT_USER|USERS)\\') {
+        throw "Detection rule '$DetectionString' reads a per-user hive, but the app is detected as the system account. Use HKEY_LOCAL_MACHINE."
+    }
+
     # --- Registry: HKEY_...\KeyPath\ValueName <op> value ---
     # Greedy first group splits on the LAST backslash, so spaces in both the key path
     # and the value name are handled ("...\Uninstall\FileZilla Client\DisplayVersion").
@@ -1495,7 +1503,7 @@ function ConvertFrom-DetectionRule {
 Detection rule could not be parsed. Unsupported format or missing operator.
   Raw value: '$DetectionString'
   Supported formats:
-    Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0   (HKLM/HKCU/HKCR/HKU/HKCC also accepted)
+    Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0   (HKLM/HKCR/HKCC also accepted; HKCU/HKU refused)
     File     : %ProgramFiles%\App\file.exe >= 1.0
     MSI      : {ProductCode-GUID}
 "@
