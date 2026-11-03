@@ -2254,13 +2254,15 @@ catch {
     throw "Error during extraction: $($PSItem.Exception.Message)"
 }
 
-# A failed run leaves the extracted files in place for troubleshooting; say where. `break`
-# lets the original error through unchanged, and the check keeps an early failure, before
-# $tempDir exists, from being masked.
+# A failed run leaves the extracted files in place for troubleshooting; say where, and drop the
+# token. `break` lets the original error through unchanged, and the check keeps an early
+# failure, before $tempDir exists, from being masked.
 trap {
     if (Get-Variable -Name tempDir -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
         Write-Warning "The extracted files were left in $tempDir"
     }
+    # The token must not outlive a failed run in an interactive session
+    Remove-Variable -Name AuthenticationHeader -Scope Global -ErrorAction SilentlyContinue -WhatIf:$false
     break
 }
 
@@ -3119,6 +3121,11 @@ elseif (Test-Path -Path $tempDir) {
 }
 
 #endregion
+
+# The token in this variable is valid for an hour and would otherwise stay in an interactive
+# session, where the next run - possibly for another customer - could find it. -WhatIf:$false
+# because this only touches the session, and -WhatIf would otherwise leave the variable.
+Remove-Variable -Name AuthenticationHeader -Scope Global -ErrorAction SilentlyContinue -WhatIf:$false
 
 # Structured result so the script can be consumed by other tooling
 [pscustomobject]@{
