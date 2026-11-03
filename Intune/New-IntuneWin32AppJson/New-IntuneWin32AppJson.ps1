@@ -772,9 +772,8 @@ function Get-AppDescription {
         read from either an http(s) URL or a local file path.
 
     .DESCRIPTION
-        Matching is attempted in three passes: exact name, normalised name
-        (case/punctuation insensitive), then normalised substring with the longest
-        key preferred so more specific entries win.
+        Matching is exact name, then normalised name (case/punctuation insensitive). A
+        substring match is only reported, never used.
 
     .OUTPUTS
         PSCustomObject with Found (bool), Description (string), DisplayName (string or $null)
@@ -836,15 +835,15 @@ function Get-AppDescription {
         }
     }
 
-    # Pass 3: normalised substring, longest key first so specific entries win
-    # Guarded on length because a short name matches almost anything, and a wrong match here
-    # also applies the wrong displayName override.
+    # A substring match is reported, never used. The matched entry's displayName becomes the
+    # app name, the duplicate check and the supersedence name base, so a guess here makes
+    # "Chrome Remote Desktop" an earlier version of "Google Chrome" and retires the real one.
     if (-not $matchedKey -and $target.Length -ge 3) {
         foreach ($key in ($descriptions.Keys | Sort-Object -Property Length -Descending)) {
             $normKey = Get-NormalizedKey -Value $key
             if ($normKey.Length -ge 3 -and ($target.Contains($normKey) -or $normKey.Contains($target))) {
-                Write-Verbose "Matched '$AppName' to descriptions entry '$key' by substring."
-                $matchedKey = $key; break
+                Write-Warning "'$AppName' resembles descriptions entry '$key' but is not an exact match - not used. Add an entry for '$AppName' if it is the same product."
+                break
             }
         }
     }

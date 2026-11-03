@@ -83,6 +83,10 @@
         "displayName": "Microsoft Teams",
         "description": "## Microsoft Teams\n\nMicrosoft Teams is a communication and collaboration platform included in Microsoft 365. It is used for chat, video meetings, file sharing, and collaboration in teams and channels.\n\n### Use cases\n\n- Chat and direct messages with colleagues\n- Video and audio meetings\n- File sharing and collaboration in teams and channels\n- Integration with other Microsoft 365 services\n\n### Prerequisites\n\nA Microsoft 365 license with Teams is required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
     },
+    "NewTeams": {
+        "displayName": "Microsoft Teams",
+        "description": "## Microsoft Teams\n\nMicrosoft Teams is a communication and collaboration platform included in Microsoft 365. It is used for chat, video meetings, file sharing, and collaboration in teams and channels.\n\n### Use cases\n\n- Chat and direct messages with colleagues\n- Video and audio meetings\n- File sharing and collaboration in teams and channels\n- Integration with other Microsoft 365 services\n\n### Prerequisites\n\nA Microsoft 365 license with Teams is required.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
+    },
     "Workspace LTSR": {
         "displayName": "Citrix Workspace LTSR",
         "description": "## Citrix Workspace LTSR\n\nCitrix Workspace LTSR (Long Term Service Release) is a client for accessing virtual applications and desktops published via Citrix infrastructure. The LTSR version focuses on stability and long-term support.\n\n### Use cases\n\n- Access to virtual Windows applications and remote desktops\n- Connection to Citrix-published resources and environments\n\n### Prerequisites\n\nAccess to a Citrix environment and a valid user license are required. Server address is provided by the IT department.\n\n### Support\n\nFor technical questions related to installation or usage, contact IT support."
