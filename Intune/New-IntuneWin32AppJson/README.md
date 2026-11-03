@@ -60,7 +60,7 @@ issued regardless of what roles it carries.
 ```
 IgorPavlov_7Zip_26.02_Intune.zip
 └── IgorPavlov_7Zip_26.02_Intune/
-    ├── ApplicationInformation.txt
+    ├── ApplicationInformation.txt       ← or ApplicationInformation.md
     ├── 7Zip_26.02.intunewin
     └── 7Zip.png                     ← optional
 ```
@@ -93,6 +93,33 @@ The file may be UTF-8, UTF-16 (with or without BOM), Mac Roman or Windows-1252. 
 is detected automatically and any byte order mark is stripped, so `å ä ö` survive and the
 first field in the file is read correctly regardless of whether the package was built on
 macOS or Windows.
+
+### ApplicationInformation.md
+
+The Markdown form carries the same values. Each one is the bold text at the end of a bullet
+line:
+
+```
+* Application - Publisher     **IgorPavlov**
+* Application - Name          **7Zip**
+* Application - Version       **26.02**
+* Install command             **Invoke-AppDeployToolkit.exe Install Silent**
+* Uninstall command           **Invoke-AppDeployToolkit.exe Uninstall Silent**
+* Disk space required (MB)    **15**
+* Detection type              **REG**
+* Detection string            **HKLM\Software\<COMPANY>\IgorPavlov 7Zip 26.02 x64 = Installed**
+```
+
+`Application - Publisher` takes the place of `Application - Vendor`, and the unit of the disk
+space is in the label. A value of `n/a`, `None` or nothing counts as missing. Other fields,
+such as `Architecture`, are not read; the `-Architecture` parameter still applies.
+
+Markdown escapes are not undone, so write the detection string exactly as it should be
+matched, with single backslashes.
+
+The package must hold one of the two files, never both. In the `.md` file a label that occurs
+twice stops the run. So does a declared detection type that disagrees with what the detection
+string parses as, in either form, or a `Detection type` that is not `REG`, `MSI` or `FILE`.
 
 ### Detection rules
 
