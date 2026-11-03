@@ -10,6 +10,9 @@ secrets.*
 *secret*.json
 *credential*.json
 appsettings.*.json
+customers.json
+customers.*.json
+!customers.sample.json
 
 # PowerShell / build artifacts
 *.log

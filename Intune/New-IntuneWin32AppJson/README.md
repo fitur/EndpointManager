@@ -60,13 +60,15 @@ issued regardless of what roles it carries.
 ```
 IgorPavlov_7Zip_26.02_Intune.zip
 └── IgorPavlov_7Zip_26.02_Intune/
-    ├── ApplicationInformation.txt
+    ├── ApplicationInformation.txt       ← or ApplicationInformation.md
     ├── 7Zip_26.02.intunewin
     └── 7Zip.png                     ← optional
 ```
 
 A `__MACOSX` folder, which macOS adds when zipping, is ignored. The files may also sit
-directly in the zip root without a wrapping folder.
+directly in the zip root without a wrapping folder. The package must hold exactly one
+`.intunewin` file; with more than one the run stops, since there is no telling which build is
+the right one.
 
 ### ApplicationInformation.txt
 
@@ -94,6 +96,36 @@ is detected automatically and any byte order mark is stripped, so `å ä ö` sur
 first field in the file is read correctly regardless of whether the package was built on
 macOS or Windows.
 
+### ApplicationInformation.md
+
+The Markdown form carries the same values. Each one is the bold text at the end of a bullet
+line:
+
+```
+* Application - Publisher     **IgorPavlov**
+* Application - Name          **7Zip**
+* Application - Version       **26.02**
+* Install command             **Invoke-AppDeployToolkit.exe Install Silent**
+* Uninstall command           **Invoke-AppDeployToolkit.exe Uninstall Silent**
+* Disk space required (MB)    **15**
+* Detection type              **REG**
+* Detection string            **HKLM\Software\<COMPANY>\IgorPavlov 7Zip 26.02 x64 = Installed**
+```
+
+`Application - Publisher` takes the place of `Application - Vendor`, and the unit of the disk
+space is in the label. A value of `n/a`, `None` or nothing counts as missing.
+
+`Architecture` (`x64`, `x86` or `arm64`) sets the architecture requirement when `-Architecture`
+is not given. If both are given and differ, or the file holds any other value, the run stops.
+Other fields in the file are not read.
+
+Markdown escapes are not undone, so write the detection string exactly as it should be
+matched, with single backslashes.
+
+The package must hold one of the two files, never both. In the `.md` file a label that occurs
+twice stops the run. So does a declared detection type that disagrees with what the detection
+string parses as, in either form, or a `Detection type` that is not `REG`, `MSI` or `FILE`.
+
 ### Detection rules
 
 The label may be `DetectionMethod.(REG)`, `.(MSI)` or `.(FILE)`:
@@ -105,7 +137,9 @@ HKLM\Software\<COMPANY>\IgorPavlov 7Zip 26.02 x64 = Installed
 %ProgramFiles%\App\file.exe >= 1.2.3
 ```
 
-Short hive names (`HKLM`, `HKCU`, `HKCR`, `HKU`, `HKCC`) are expanded automatically. Spaces
+Short hive names (`HKLM`, `HKCR`, `HKCC`) are expanded automatically. `HKCU` and `HKU` are
+refused: the app is installed and detected as the system account, so a per-user rule would
+upload fine and never match. Spaces
 are handled in both the key path and the value name. The `=` operator is treated as a
 version comparison when the value looks like a version number, and as a string comparison
 otherwise. String comparison exists for registry rules only: Intune's file detection compares
@@ -167,6 +201,7 @@ entirely. See [Working across several customers](#working-across-several-custome
 | `-CustomerConfigPath` | — | Local JSON file with credentials for several customers |
 | `-CustomerName` | — | Selects a customer without prompting |
 | `-CertificateThumbprint` | env var | Certificate in the CurrentUser store |
+| `-CertificateStoreLocation` | `CurrentUser` | `CurrentUser` or `LocalMachine`, for the thumbprint lookup. Scheduled tasks on Windows usually keep the certificate in `LocalMachine` |
 | `-CertificatePath` `-CertificatePassword` | env vars | PFX file instead of a store lookup |
 | `-TenantID` `-ClientID` `-ClientSecret` | env vars | Avoid on the command line |
 | `-Quiet` | off | Suppresses the per-chunk upload progress |
@@ -221,6 +256,13 @@ deadline.
 
 If today happens to be a Patch Tuesday, the next month is used rather than the same day.
 
+**Times are the clock of the machine running the script.** With the default
+`-UseLocalTime $true` the clock components are sent as given, so each device reads them as its
+own local time. That covers `-AvailableTime`, `-DeadlineTime`, the Patch Tuesday times and the
+ring schedule (`now + -ProductionDelayHours`). A script running in UTC against devices in
+CET/CEST therefore starts an hour or two earlier, by the devices' clocks, than "now + 24 h"
+suggests. Run it on a host in the devices' time zone, or pass explicit times.
+
 ### Ring rollout
 
 Set both `-PilotGroupId` and `-ProductionGroupId` (or `pilotGroupId` / `productionGroupId` in
@@ -256,6 +298,9 @@ $result.AppId
 | `SupersededApp` | The earlier version kept and superseded (name + id), or `$null` |
 | `RetiredApps` | Earlier versions retired by `-RetireSuperseded` |
 | `UploadVerified` | Whether the upload was confirmed to have committed content |
+| `ReturnCodePatched` | Whether return code 1641 was corrected to `softReboot` |
+| `SupersedenceConfigured` | Whether the supersedence relation was actually set. `SupersededApp` only names the version chosen |
+| `RetireFailed` | Earlier versions `-RetireSuperseded` could not fully retire (name + id), left under their own name |
 
 ### Version lifecycle
 
@@ -268,11 +313,29 @@ than the one being uploaded.
 Uploading `7-Zip 26.02` therefore supersedes `7-Zip 26.01` and `IgorPavlov 7Zip 25.00`,
 while leaving `7-Zip 27.00`, `7-Zip Pro 26.01`, `My 7-Zip 26.01` and a plain `7-Zip` alone.
 Both naming conventions are checked so apps uploaded before a `displayName` override existed
-are still recognised.
+are still recognised. Step 8 prints the names it looks for.
 
-Of the candidates, one is kept and superseded against: the highest version that still has an
-assignment. A half-finished earlier run can leave a higher version with no assignments, and
-superseding - then retiring - that one would drop the version actually deployed.
+For an app without a `displayName` entry the base is `<Vendor> <Name>`, so `Application -
+Vendor` in the `.txt` and `Application - Publisher` in the `.md` must be the same string
+across versions. If a version changes it, earlier versions are not found and nothing is
+superseded - add a `displayName` entry to pin the name.
+
+Of the candidates, one is kept and superseded against: the highest version that still has a
+`required` or `available` include assignment. Uninstall and exclusion assignments do not
+count as deployed. A half-finished earlier run can leave a higher version with no
+assignments, and superseding - then retiring - that one would drop the version actually
+deployed. If a higher version has only uninstall or exclusion assignments, as after a
+rollback, it is unclear which version is deployed, so supersedence and retirement are skipped
+for that run.
+
+If a version newer than the one being uploaded already exists under the same name, the run
+skips supersedence and retirement with a warning: superseding the older versions would leave
+both deployed. The upload itself is not stopped.
+
+Before supersedence and before retirement the script checks how long the access token has
+left. With less than ten minutes it connects again; if that does not help, supersedence or
+retirement is skipped with a warning, so a token that runs out mid-way cannot leave versions
+half retired.
 
 The keep decision needs the assignment state of every earlier version. If any of those
 lookups fails, the run skips supersedence and retirement rather than guess.
@@ -282,7 +345,9 @@ lookups fails, the run skips supersedence and retirement rather than guess.
 With `-RetireSuperseded`, and only once the upload is verified and the assignment fully
 succeeds, the other earlier versions are retired: their own supersedence relations and
 their assignments are removed, the kept version's link to them is removed too, and they are
-renamed `... (TBD)`, ready for a manual delete during scheduled maintenance. Afterwards
+renamed `... (TBD)`, ready for a manual delete during scheduled maintenance. An app is only
+renamed once its relations and assignments are gone; if removing them failed it keeps its
+name and the next run picks it up again. Afterwards
 exactly two versions remain linked - the new one and the one it supersedes. Without the
 switch the script only lists which apps it would retire.
 
@@ -360,8 +425,9 @@ otherwise be assigned into the wrong tenant's group. The file is authoritative.
 **Explicitly passed parameters still win**, so `-Owner` on the command line overrides
 whatever the file says for that run.
 
-The script warns if the file is readable by anyone but its owner. Run `chmod 600` on it and
-add it to `.gitignore` — never commit a filled-in copy.
+The script warns if the file is readable by anyone but its owner: on macOS and Linux by its
+mode, on Windows when Everyone, Users or Authenticated Users can read it (`icacls` fixes that).
+Run `chmod 600` on it and keep it out of the repo - `customers.json` is in `.gitignore`.
 
 ## App names and descriptions
 
@@ -386,6 +452,10 @@ functioning.
 Descriptions are written in Markdown. Adding a new base application means editing this file
 alone — the script reads it from the repo by default, so the change applies everywhere at
 once.
+
+If the file cannot be loaded - the source is unreachable, the JSON is invalid or empty, or
+`DescriptionsPath` is blank - the run stops before uploading, because the app name depends on
+it. Under `-WhatIf` it only warns. Point `-DescriptionsPath` at a local copy to work offline.
 
 ## On the code itself
 
@@ -418,6 +488,7 @@ read it before running it against a tenant you care about, and use `-WhatIf` fir
 
 - **Rerunning the same package is refused.** If an app with the same name is already in the
   tenant the script stops before uploading - raise the version or remove the old app first.
+  The same version written differently counts too: `7-Zip 26.5` is `7-Zip 26.05`.
   The check needs the tenant inventory, so it is skipped under `-WhatIf`.
 - **The app uploads immediately**, even when the assignment is scheduled. Only the
   assignment is deferred; the app is visible in the portal right away.

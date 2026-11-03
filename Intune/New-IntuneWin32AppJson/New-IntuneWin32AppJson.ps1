@@ -6,15 +6,17 @@
 
 .DESCRIPTION
     The script accepts a path to a zip file, extracts it to a temporary directory
-    alongside the zip file, reads ApplicationInformation.txt, and retrieves the
+    alongside the zip file, reads ApplicationInformation.txt or .md, and retrieves the
     intunewin and png files. A JSON file in Intune Graph API format (UTF-16 LE)
     is written to the extracted application directory, and the app is uploaded to
     Intune via the IntuneWin32App module using non-interactive client credentials.
 
     Supported detection rule formats in ApplicationInformation.txt
-    (declared as DetectionMethod.(REG), DetectionMethod.(MSI) or DetectionMethod.(FILE)):
+    (declared as DetectionMethod.(REG), DetectionMethod.(MSI) or DetectionMethod.(FILE)),
+    or in ApplicationInformation.md (Detection type REG, MSI or FILE and a Detection string):
       Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0.0
-                 Short hives HKLM, HKCU, HKCR, HKU and HKCC are also accepted.
+                 Short hives HKLM, HKCR and HKCC are also accepted. HKCU and HKU are refused,
+                 since the app is detected as the system account.
       File     : %ProgramFiles%\App\file.exe >= 1.0.0
       MSI      : {ProductCode-GUID}
 
@@ -49,6 +51,11 @@
     the certificate store on Windows. Preferred over a client secret: the private key
     stays in the OS keystore. Falls back to $env:INTUNE_CERT_THUMBPRINT.
 
+.PARAMETER CertificateStoreLocation
+    Store the thumbprint is looked up in: CurrentUser (default) or LocalMachine. Scheduled
+    tasks and service accounts on Windows usually keep their certificate in LocalMachine.
+    Ignored with -CertificatePath.
+
 .PARAMETER CertificatePath
     Path to a PFX file, for environments without a usable certificate store such as a
     Linux-based Azure Function. Falls back to $env:INTUNE_CERT_PATH.
@@ -71,7 +78,9 @@
     without one it is "<Vendor> <Name> <Version>" (IgorPavlov 7Zip 26.02).
 
 .PARAMETER Architecture
-    Architecture requirement sent to Intune. Defaults to x64.
+    Architecture requirement sent to Intune. Defaults to x64. When not given, the
+    Architecture of an ApplicationInformation.md (x64, x86 or arm64) is used instead; a
+    value given here must agree with it.
 
 .PARAMETER MinimumWindowsRelease
     Minimum supported Windows release sent to Intune. Defaults to W11_21H2, the
@@ -138,7 +147,10 @@
     setting this to $false shifts a locally entered time by the UTC offset.
 
 .OUTPUTS
-    PSCustomObject with DisplayName, AppId, JsonPath, DetectionType and DescriptionFound.
+    PSCustomObject with DisplayName, AppId, JsonPath, DetectionType, DescriptionFound,
+    AssignedGroupId, PilotGroupId, ProductionGroupId, SupersededApp, RetiredApps,
+    UploadVerified, ReturnCodePatched, SupersedenceConfigured and RetireFailed. AppId is
+    $null under -WhatIf.
 
 .EXAMPLE
     .\New-IntuneWin32AppJson.ps1 -AppPath "C:\AppTest\MyApp_1.0.zip"
@@ -187,9 +199,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        3.0.2
+    Version:        3.1.0
     Creation Date:  2026-05-07
-    Last Updated:   2026-09-28
+    Last Updated:   2026-11-03
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -197,7 +209,58 @@
     automatically on first run. Graph permission: DeviceManagementApps.ReadWrite.All
     as an Application permission with admin consent.
 
+    The Get-ClientCertificate function in this file has a -StoreLocation parameter that the
+    copies in the export and import scripts lack. It was deliberately not synced to them.
+
     CHANGELOG
+
+        3.1.0 - 2026-11-03
+            Fixes from a review of 3.0.2. The package may now carry ApplicationInformation.md
+            instead of .txt: the values are the bold text on bullet lines, Publisher stands in
+            for Vendor and the detection type and string are separate lines. A package with
+            both files, a label that occurs twice, an unknown detection type, or a declared
+            type that disagrees with what the detection string parses as (also for .txt)
+            stops the run before anything is written, as does a package with more than one
+            .intunewin file - the first one used to be uploaded under the new version's name.
+            A detection string with a doubled backslash is refused instead of becoming a rule
+            that never detects. The keep decision counts only required and available include
+            assignments as deployed: a rolled-back version with an uninstall assignment used
+            to be kept while the deployed one was retired, and where a newer version has only
+            such assignments supersedence and retirement are skipped. They are also skipped
+            when a newer version of the same name already exists. Retirement no longer renames
+            an app to (TBD) after its supersedence or assignments failed to clear, which hid
+            it from every later run while it stayed assigned. A No to -Confirm on the kept
+            app's supersedence cleanup is no longer reported as success, and retirement has
+            its own prompt. An unreadable descriptions file stops the run before upload
+            instead of publishing under the fallback name, which the duplicate check did not
+            know; -WhatIf only warns. The token is checked before anything is uploaded: the
+            session's old header is removed before connecting, a connect that returns no
+            token stops the run, and the token's tid claim must match a GUID TenantID. The
+            duplicate check also treats 7-Zip 26.5 as 7-Zip 26.05, and versions are compared
+            with missing components filled in, so 1.0 no longer counts as earlier than 1.0.0.
+            A name that differs only in case from an earlier version is reported, a failed
+            run says where the extracted files were left, and step 8 prints the names it
+            searches for. customers.json is now in .gitignore. The descriptions file is no
+            longer matched by substring, which let "Chrome Remote Desktop" take the name
+            "Google Chrome" and with it the supersedence and retirement of Chrome's versions;
+            a near match only warns, and the app counts as not found. NewTeams, the one name
+            in use that relied on it, has its own entry in the descriptions files.
+            Also in 3.1.0: HKCU and HKU detection rules are refused, since the app is detected
+            as the system account; the Architecture of an ApplicationInformation.md is used
+            when -Architecture is not given and must agree with it when it is; the output
+            object gains ReturnCodePatched, SupersedenceConfigured and RetireFailed; the
+            assignment POST is no longer retried by PowerShell, and a failed one is checked by
+            reading the assignments back; the module's break is absorbed around the connect,
+            icon, requirement rule and upload calls; the token's remaining life is checked
+            before supersedence and retirement, with a reconnect; the token is removed from
+            the session when the script ends; paths containing [ ] work; on Windows the
+            customer file's ACL is checked; -CertificateStoreLocation allows a LocalMachine
+            certificate; and the earlier versions' assignments are read in one request,
+            falling back to one per version. Internally, Graph calls go through
+            Invoke-GraphRequest and the module's write calls through Invoke-ModuleWrite; a
+            module call that ended through break without a warning now counts as failed, so
+            a retired app is no longer renamed after one. An inventory entry without a name
+            is skipped instead of throwing.
 
         3.0.2 - 2026-09-28
             File detection rules work. The rule's path was split with System.IO.Path, which
@@ -358,7 +421,7 @@
 param (
     [Parameter(Mandatory = $true)]
     [ValidateScript({
-        if (-not (Test-Path -Path $_ -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $_ -PathType Leaf)) {
             throw "AppPath '$_' does not exist or is not a file."
         }
         if ([System.IO.Path]::GetExtension($_) -ne ".zip") {
@@ -383,6 +446,10 @@ param (
     # Linux-based Azure Function.
     [Parameter()]
     [string]$CertificateThumbprint = $env:INTUNE_CERT_THUMBPRINT,
+
+    [Parameter()]
+    [ValidateSet("CurrentUser", "LocalMachine")]
+    [string]$CertificateStoreLocation = "CurrentUser",
 
     [Parameter()]
     [string]$CertificatePath = $env:INTUNE_CERT_PATH,
@@ -498,7 +565,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # Resolve to absolute path so relative input works from any working directory
-$AppPath = (Resolve-Path -Path $AppPath).Path
+$AppPath = (Resolve-Path -LiteralPath $AppPath).Path
 
 #region Customer selection
 
@@ -510,22 +577,35 @@ $AppPath = (Resolve-Path -Path $AppPath).Path
 # by setting the environment.
 if ($CustomerConfigPath) {
 
-    if (-not (Test-Path -Path $CustomerConfigPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $CustomerConfigPath -PathType Leaf)) {
         throw "Customer config '$CustomerConfigPath' does not exist or is not a file."
     }
-    $customerConfigResolved = (Resolve-Path -Path $CustomerConfigPath).Path
+    $customerConfigResolved = (Resolve-Path -LiteralPath $CustomerConfigPath).Path
 
     # Warn when the file is readable by more than its owner. UnixMode is not populated on Windows.
     if (-not $IsWindows) {
-        $configItem = Get-Item -Path $customerConfigResolved
+        $configItem = Get-Item -LiteralPath $customerConfigResolved
         if ($configItem.PSObject.Properties.Name -contains "UnixMode" -and
             $configItem.UnixMode.Substring(4) -match '[rwx]') {
             Write-Warning "'$customerConfigResolved' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$customerConfigResolved'"
         }
     }
+    else {
+        # Windows has no UnixMode; look at the ACL for read access granted to everyone. A failure
+        # to read the ACL is not worth stopping for, so it only produces a verbose note.
+        try {
+            $broadRules = Get-BroadReadRule -Rule (Get-Acl -LiteralPath $customerConfigResolved).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
+            if ($broadRules.Count -gt 0) {
+                Write-Warning "'$customerConfigResolved' is readable by Everyone, Users or Authenticated Users. Run: icacls '$customerConfigResolved' /inheritance:r /grant:r `"$($env:USERNAME):(R,W)`""
+            }
+        }
+        catch {
+            Write-Verbose "Could not read the ACL of '$customerConfigResolved': $($PSItem.Exception.Message)"
+        }
+    }
 
     try {
-        $customerConfig = Get-Content -Path $customerConfigResolved -Raw -Encoding UTF8 |
+        $customerConfig = Get-Content -LiteralPath $customerConfigResolved -Raw -Encoding UTF8 |
             ConvertFrom-Json -AsHashtable -ErrorAction Stop
     }
     catch {
@@ -666,8 +746,6 @@ if ($CustomerConfigPath) {
 
 #endregion
 
-# These mirror the lookup tables inside New-IntuneWin32AppRequirementRule so the generated
-# JSON artifact records the same values that are actually sent to Intune.
 # Return codes written to the JSON artifact and used to correct the module's defaults after
 # upload. Defined once so the two can never drift apart.
 $script:Win32AppReturnCodes = @(
@@ -681,6 +759,8 @@ $script:Win32AppReturnCodes = @(
 # 1x1 transparent PNG, used when a package ships without an icon
 $script:BlankPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 
+# These mirror the lookup tables inside New-IntuneWin32AppRequirementRule so the generated
+# JSON artifact records the same values that are actually sent to Intune.
 $architectureMap = @{
     "x64" = "x64"; "x86" = "x86"; "arm64" = "arm64"
     "x64x86" = "x64,x86"; "AllWithARM64" = "x64,x86,arm64"
@@ -741,13 +821,13 @@ function Get-AppDescription {
         read from either an http(s) URL or a local file path.
 
     .DESCRIPTION
-        Matching is attempted in three passes: exact name, normalised name
-        (case/punctuation insensitive), then normalised substring with the longest
-        key preferred so more specific entries win.
+        Matching is exact name, then normalised name (case/punctuation insensitive). A
+        substring match is only reported, never used.
 
     .OUTPUTS
-        PSCustomObject with Found (bool), Description (string) and DisplayName (string or $null).
-        DisplayName is only populated when the matched entry supplies a name override.
+        PSCustomObject with Found (bool), Description (string), DisplayName (string or $null)
+        and LoadFailed (bool). DisplayName is only populated when the matched entry supplies a
+        name override. LoadFailed is true when the file could not be read at all.
     #>
     [OutputType([pscustomobject])]
     param (
@@ -756,11 +836,12 @@ function Get-AppDescription {
         [Parameter(Mandatory)][AllowEmptyString()][string]$Source
     )
 
-    $notFound = [pscustomobject]@{ Found = $false; Description = $FallbackName; DisplayName = $null }
+    $notFound   = [pscustomobject]@{ Found = $false; Description = $FallbackName; DisplayName = $null; LoadFailed = $false }
+    $loadFailed = [pscustomobject]@{ Found = $false; Description = $FallbackName; DisplayName = $null; LoadFailed = $true }
 
     if ([string]::IsNullOrWhiteSpace($Source)) {
         Write-Warning "DescriptionsPath not set - app treated as not found."
-        return $notFound
+        return $loadFailed
     }
 
     try {
@@ -773,19 +854,19 @@ function Get-AppDescription {
             $rawText  = $response -is [string] ? $response : ($response | ConvertTo-Json -Depth 20)
         }
         else {
-            $rawText = Get-Content -Path (Resolve-Path -Path $Source).Path -Raw -Encoding UTF8 -ErrorAction Stop
+            $rawText = Get-Content -LiteralPath (Resolve-Path -LiteralPath $Source).Path -Raw -Encoding UTF8 -ErrorAction Stop
         }
 
         $descriptions = $rawText | ConvertFrom-Json -AsHashtable -ErrorAction Stop
     }
     catch {
         Write-Warning "Could not load app descriptions from '$Source': $($PSItem.Exception.Message) - app treated as not found."
-        return $notFound
+        return $loadFailed
     }
 
     if ($descriptions.Count -eq 0) {
         Write-Warning "Descriptions file '$Source' contained no entries."
-        return $notFound
+        return $loadFailed
     }
 
     $matchedKey = $null
@@ -803,15 +884,15 @@ function Get-AppDescription {
         }
     }
 
-    # Pass 3: normalised substring, longest key first so specific entries win
-    # Guarded on length because a short name matches almost anything, and a wrong match here
-    # also applies the wrong displayName override.
+    # A substring match is reported, never used. The matched entry's displayName becomes the
+    # app name, the duplicate check and the supersedence name base, so a guess here makes
+    # "Chrome Remote Desktop" an earlier version of "Google Chrome" and retires the real one.
     if (-not $matchedKey -and $target.Length -ge 3) {
         foreach ($key in ($descriptions.Keys | Sort-Object -Property Length -Descending)) {
             $normKey = Get-NormalizedKey -Value $key
             if ($normKey.Length -ge 3 -and ($target.Contains($normKey) -or $normKey.Contains($target))) {
-                Write-Verbose "Matched '$AppName' to descriptions entry '$key' by substring."
-                $matchedKey = $key; break
+                Write-Warning "'$AppName' resembles descriptions entry '$key' but is not an exact match - not used. Add an entry for '$AppName' if it is the same product."
+                break
             }
         }
     }
@@ -822,6 +903,7 @@ function Get-AppDescription {
             Found       = $true
             Description = [string]::IsNullOrWhiteSpace($entry.Description) ? $FallbackName : $entry.Description
             DisplayName = $entry.DisplayName
+            LoadFailed  = $false
         }
     }
 
@@ -910,6 +992,26 @@ function Read-TextFileSmart {
     }
 }
 
+function Get-BroadReadRule {
+    <#
+    .SYNOPSIS
+        Returns the allow rules among the given file access rules that let Everyone, Users or
+        Authenticated Users read the file. SIDs are compared, since the group names are
+        localised.
+    #>
+    [OutputType([object[]])]
+    param (
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rule
+    )
+    $broadSids = "S-1-1-0", "S-1-5-32-545", "S-1-5-11"
+    $readData  = [System.Security.AccessControl.FileSystemRights]::ReadData
+    return ,@($Rule | Where-Object {
+        [string]$_.AccessControlType -eq "Allow" -and
+        $_.IdentityReference.Value -in $broadSids -and
+        ($_.FileSystemRights -band $readData) -eq $readData
+    })
+}
+
 function Get-ClientCertificate {
     <#
     .SYNOPSIS
@@ -918,7 +1020,8 @@ function Get-ClientCertificate {
     .DESCRIPTION
         Two sources are supported, in this order:
 
-          Thumbprint : looked up in the CurrentUser\My store. That store is the login
+          Thumbprint : looked up in the CurrentUser\My store (or LocalMachine\My with
+                       -StoreLocation). The CurrentUser store is the login
                        Keychain on macOS and the certificate store on Windows, so the key
                        never leaves the OS keystore. Preferred for interactive use.
           Path       : a PFX file, for environments with no usable store such as a
@@ -935,6 +1038,7 @@ function Get-ClientCertificate {
     [OutputType([System.Security.Cryptography.X509Certificates.X509Certificate2])]
     param (
         [Parameter()][AllowEmptyString()][string]$Thumbprint,
+        [Parameter()][ValidateSet("CurrentUser", "LocalMachine")][string]$StoreLocation = "CurrentUser",
         [Parameter()][AllowEmptyString()][string]$Path,
         [Parameter()][AllowEmptyString()][string]$Password
     )
@@ -947,7 +1051,7 @@ function Get-ClientCertificate {
         # Strip spaces and any invisible characters that survive a copy from the portal
         $normalized = ($Thumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
 
-        $store = [System.Security.Cryptography.X509Certificates.X509Store]::new("My", "CurrentUser")
+        $store = [System.Security.Cryptography.X509Certificates.X509Store]::new("My", $StoreLocation)
         try {
             $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
             $found = $store.Certificates | Where-Object { $_.Thumbprint -eq $normalized }
@@ -958,7 +1062,7 @@ function Get-ClientCertificate {
 
         $certificate = @($found) | Select-Object -First 1
         if (-not $certificate) {
-            throw "No certificate with thumbprint '$normalized' in the CurrentUser store. Import the PFX first, or use -CertificatePath."
+            throw "No certificate with thumbprint '$normalized' in the $StoreLocation store. Import the PFX first, or use -CertificatePath."
         }
         if (-not $certificate.HasPrivateKey) {
             throw "Certificate '$normalized' has no private key. Import the PFX, not just the .cer public part."
@@ -967,10 +1071,10 @@ function Get-ClientCertificate {
     }
 
     if ($Path) {
-        if (-not (Test-Path -Path $Path -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
             throw "Certificate file '$Path' does not exist or is not a file."
         }
-        $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -Path $Path).Path)
+        $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path).Path)
         $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]
 
         # EphemeralKeySet keeps the private key out of any on-disk keystore, but it is not
@@ -992,6 +1096,97 @@ function Get-ClientCertificate {
     }
 
     return $null
+}
+
+function Get-AccessTokenClaim {
+    <#
+    .SYNOPSIS
+        Returns the claims of a bearer token as an object, or $null when they cannot be read.
+        The signature is not checked; this only reads what the token says about itself.
+    #>
+    [OutputType([pscustomobject])]
+    param (
+        [Parameter(Mandatory)][string]$Authorization
+    )
+    $parts = ($Authorization -replace '^Bearer\s+', '').Split('.')
+    if ($parts.Count -lt 2) { return $null }
+    $payload = $parts[1].Replace('-', '+').Replace('_', '/')
+    $payload = $payload.PadRight($payload.Length + (4 - $payload.Length % 4) % 4, '=')
+    try {
+        return [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload)) |
+            ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-AccessTokenTenantId {
+    <#
+    .SYNOPSIS
+        Returns the tid claim of a bearer token, or an empty string when it cannot be read.
+        This only tells which tenant the token was issued for.
+    #>
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory)][string]$Authorization
+    )
+    $claims = Get-AccessTokenClaim -Authorization $Authorization
+    $tidProp = $claims ? $claims.PSObject.Properties["tid"] : $null
+    return $tidProp ? ([string]$tidProp.Value).ToLowerInvariant() : ""
+}
+
+function Get-AccessTokenRemaining {
+    <#
+    .SYNOPSIS
+        Returns how long a bearer token is still valid (from its exp claim), or $null when
+        that cannot be read.
+    #>
+    [OutputType([nullable[timespan]])]
+    param (
+        [Parameter(Mandatory)][string]$Authorization
+    )
+    $claims  = Get-AccessTokenClaim -Authorization $Authorization
+    $expProp = $claims ? $claims.PSObject.Properties["exp"] : $null
+    if (-not $expProp) { return $null }
+    $expiry = $null
+    try { $expiry = [datetimeoffset]::FromUnixTimeSeconds([long]$expProp.Value) } catch { return $null }
+    return $expiry - [datetimeoffset]::UtcNow
+}
+
+function Invoke-GraphRequest {
+    <#
+    .SYNOPSIS
+        One Microsoft Graph call with the session's bearer token, throwing on any failure.
+
+    .DESCRIPTION
+        GET and PATCH are retried three times, 5 s apart. PowerShell's retry covers 4xx and 5xx
+        alike, which is harmless for a read or a PATCH that sets fixed values, but a POST the
+        server had already completed would be made again, so a POST is never retried. The
+        token is read from the variable the IntuneWin32App module sets.
+    #>
+    [OutputType([object])]
+    param (
+        [Parameter()][ValidateSet("Get", "Post", "Patch")][string]$Method = "Get",
+        [Parameter(Mandatory)][string]$Uri,
+        [Parameter()][string]$Body
+    )
+    $header  = Get-Variable -Name AuthenticationHeader -Scope Global -ValueOnly -ErrorAction Stop
+    $request = @{
+        Method      = $Method
+        Uri         = $Uri
+        Headers     = @{ Authorization = $header.Authorization }
+        ErrorAction = "Stop"
+    }
+    if ($Body) {
+        $request["Body"] = $Body
+        $request["Headers"]["Content-Type"] = "application/json"
+    }
+    if ($Method -ne "Post") {
+        $request["MaximumRetryCount"] = 3
+        $request["RetryIntervalSec"]  = 5
+    }
+    return Invoke-RestMethod @request
 }
 
 function Get-Win32AppInventory {
@@ -1017,15 +1212,26 @@ function Get-Win32AppInventory {
     $apps = [System.Collections.Generic.List[pscustomobject]]::new()
 
     while ($uri) {
-        $response = Invoke-RestMethod -Uri $uri -Method Get `
-            -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
-            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+        $response = Invoke-GraphRequest -Uri $uri
 
         foreach ($item in $response.value) { $apps.Add($item) }
         $uri = $response.PSObject.Properties.Name -contains "@odata.nextLink" ? $response.'@odata.nextLink' : $null
     }
 
     return ,$apps.ToArray()
+}
+
+function ConvertTo-ComparableVersion {
+    <#
+    .SYNOPSIS
+        Fills in a missing build and revision, so that 1.0 and 1.0.0 compare as equal.
+        [version]'1.0' is -lt [version]'1.0.0' because an absent component is -1.
+    #>
+    [OutputType([version])]
+    param (
+        [Parameter(Mandatory)][version]$Version
+    )
+    return [version]::new($Version.Major, $Version.Minor, [Math]::Max($Version.Build, 0), [Math]::Max($Version.Revision, 0))
 }
 
 function Select-SupersedableApp {
@@ -1051,7 +1257,9 @@ function Select-SupersedableApp {
         [Parameter(Mandatory)][AllowEmptyString()][string[]]$NameBases,
         [Parameter(Mandatory)][string]$NewVersion,
         [Parameter(Mandatory)][AllowEmptyString()][string]$ExcludeId,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AllApps
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AllApps,
+        # Which apps to return: strictly earlier (default), strictly newer, or the same version
+        [ValidateSet("Earlier", "Newer", "Same")][string]$Relation = "Earlier"
     )
 
     $newParsed = $null
@@ -1059,6 +1267,7 @@ function Select-SupersedableApp {
         Write-Warning "Version '$NewVersion' is not comparable - skipping supersedence to avoid superseding the wrong app."
         return ,@()
     }
+    $newParsed = ConvertTo-ComparableVersion -Version $newParsed
 
     $patterns = foreach ($base in ($NameBases | Where-Object { $_ } | Select-Object -Unique)) {
         "^" + [regex]::Escape($base) + '\s+(\d+(?:\.\d+){0,3})$'
@@ -1066,18 +1275,34 @@ function Select-SupersedableApp {
 
     $matched = foreach ($app in $AllApps) {
         if ($app.id -eq $ExcludeId) { continue }
+        # An entry without a name cannot be a version of anything; under StrictMode reading it would throw
+        $appName = $app.PSObject.Properties["displayName"] ? [string]$app.displayName : ""
+        if (-not $appName) { continue }
         foreach ($pattern in $patterns) {
-            $match = [regex]::Match($app.displayName, $pattern)
-            if (-not $match.Success) { continue }
+            $match = [regex]::Match($appName, $pattern)
+            if (-not $match.Success) {
+                # Matching stays case-sensitive; a name that differs only in case is reported so the
+                # missed supersedence is visible
+                if ($Relation -eq "Earlier" -and [regex]::IsMatch($appName, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+                    Write-Warning "'$appName' differs only in case from the name being searched for, so it is not treated as an earlier version."
+                }
+                continue
+            }
 
             $oldParsed = $null
             if (-not [version]::TryParse($match.Groups[1].Value, [ref]$oldParsed)) {
-                Write-Verbose "Skipping '$($app.displayName)': version not comparable."
+                Write-Verbose "Skipping '$appName': version not comparable."
                 continue
             }
-            if ($oldParsed -ge $newParsed) { continue }
+            $oldParsed = ConvertTo-ComparableVersion -Version $oldParsed
+            $qualifies = switch ($Relation) {
+                "Earlier" { $oldParsed -lt $newParsed }
+                "Newer"   { $oldParsed -gt $newParsed }
+                "Same"    { $oldParsed -eq $newParsed }
+            }
+            if (-not $qualifies) { continue }
 
-            [pscustomobject]@{ Id = $app.id; DisplayName = $app.displayName; Version = $oldParsed }
+            [pscustomobject]@{ Id = $app.id; DisplayName = $appName; Version = $oldParsed }
             break
         }
     }
@@ -1128,6 +1353,33 @@ function Get-AppInfoValue {
     return $null
 }
 
+function Get-AppInfoMarkdownValue {
+    <#
+    .SYNOPSIS
+        Reads a value from ApplicationInformation.md, the Markdown form of the file.
+        Returns $null if the label is not present or its value is n/a or None.
+
+    .DESCRIPTION
+        Each value is the bold text at the end of a bullet line:
+          * Application - Name          **7Zip**
+        Markdown backslash escapes are deliberately not undone: a detection path such as
+        ...\Uninstall\{GUID} would lose its backslash before the brace. A label that occurs
+        more than once throws, since picking one of the values would be a guess.
+    #>
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
+        [Parameter(Mandatory)][string]$Label
+    )
+    $found = [regex]::Matches($Content, "(?m)^\s*[*-]\s+$([regex]::Escape($Label))\s+\*\*(.*)\*\*\s*$")
+    if ($found.Count -gt 1) {
+        throw "'$Label' occurs $($found.Count) times in ApplicationInformation.md."
+    }
+    if ($found.Count -eq 0) { return $null }
+    $value = $found[0].Groups[1].Value.Trim()
+    return ($value -in "", "n/a", "None") ? $null : $value
+}
+
 function ConvertTo-MB {
     <#
     .SYNOPSIS
@@ -1156,8 +1408,8 @@ function ConvertTo-MB {
 function Expand-AppPackage {
     <#
     .SYNOPSIS
-        Extracts a zip file to an AppUnzip directory next to the zip file.
-        An existing directory is cleared first. Returns the temp directory path.
+        Extracts a zip file to a new AppUnzip_<id> directory next to the zip file and returns
+        its path. The directory is unique per run, so nothing existing is touched.
     #>
     [OutputType([string])]
     param (
@@ -1168,9 +1420,11 @@ function Expand-AppPackage {
     # an instance filesystem) cannot delete each other's extraction mid-step
     $tempDir = Join-Path -Path $parentDir -ChildPath ("AppUnzip_{0}" -f [guid]::NewGuid().ToString("N").Substring(0, 8))
 
-    # -WhatIf:$false so local preparation always runs; -WhatIf only gates the Intune upload
-    New-Item -Path $tempDir -ItemType Directory -WhatIf:$false | Out-Null
-    Expand-Archive -Path $ZipPath -DestinationPath $tempDir -Force -WhatIf:$false
+    # -WhatIf:$false so local preparation always runs; -WhatIf only gates the Intune upload.
+    # Expand-Archive creates the directory: creating it first with New-Item, which has no
+    # -LiteralPath, made [ ] in the zip's folder a wildcard and Expand-Archive then failed with
+    # "already exists".
+    Expand-Archive -LiteralPath $ZipPath -DestinationPath $tempDir -Force -WhatIf:$false
     return $tempDir
 }
 
@@ -1226,6 +1480,13 @@ function ConvertFrom-DetectionRule {
         [Parameter(Mandatory)][string]$DetectionString
     )
 
+    # A path here never has a doubled backslash, and UNC is not supported. A doubled one is an
+    # escaped string (JSON, PowerShell) that would parse into a rule that uploads fine and never
+    # detects. Not decoded: that would be a guess.
+    if ($DetectionString.Contains('\\')) {
+        throw "Detection rule '$DetectionString' contains a doubled backslash (\\). Write the path with single backslashes."
+    }
+
     $operatorMap = @{
         ">=" = "greaterThanOrEqual"
         "="  = "equal"
@@ -1247,6 +1508,13 @@ function ConvertFrom-DetectionRule {
             $DetectionString = $DetectionString -replace "^$abbreviation\\", "$($hiveMap[$abbreviation])\"
             break
         }
+    }
+
+    # The app installs and is detected as the system account (runAsAccount = system), whose
+    # HKCU is its own hive and whose HKU holds no user SID. Such a rule uploads fine and
+    # never matches, so the install is reported as failed and retried.
+    if ($DetectionString -match '^HKEY_(CURRENT_USER|USERS)\\') {
+        throw "Detection rule '$DetectionString' reads a per-user hive, but the app is detected as the system account. Use HKEY_LOCAL_MACHINE."
     }
 
     # --- Registry: HKEY_...\KeyPath\ValueName <op> value ---
@@ -1370,7 +1638,7 @@ function ConvertFrom-DetectionRule {
 Detection rule could not be parsed. Unsupported format or missing operator.
   Raw value: '$DetectionString'
   Supported formats:
-    Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0   (HKLM/HKCU/HKCR/HKU/HKCC also accepted)
+    Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0   (HKLM/HKCR/HKCC also accepted; HKCU/HKU refused)
     File     : %ProgramFiles%\App\file.exe >= 1.0
     MSI      : {ProductCode-GUID}
 "@
@@ -1677,25 +1945,50 @@ function Invoke-Win32AppAssignment {
     )
 
     $where   = $RingLabel ? " ($RingLabel ring)" : ""
-    $headers = @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" }
 
     $body = New-Win32AppAssignmentBody -Intent $Intent -GroupId $GroupId -Notification $Notification `
         -UseLocalTime $UseLocalTime -AvailableTime $AvailableTime -DeadlineTime $DeadlineTime `
         -EnableAutoUpdate:$EnableAutoUpdate
 
+    # No -MaximumRetryCount: PowerShell retries a POST on 4xx and 5xx as well, so one the server
+    # had already completed would be made again - a duplicate assignment, or a 400 that reports
+    # a ring as unassigned when it is assigned.
     try {
-        $response = Invoke-RestMethod -Method Post `
+        $response = Invoke-GraphRequest -Method Post `
             -Uri  "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments" `
-            -Headers $headers -Body ($body | ConvertTo-Json -Depth 20) `
-            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            -Body ($body | ConvertTo-Json -Depth 20)
     }
     catch {
         # The raw REST path surfaces a real exception where the module only warned; make sure
         # the Graph message in clear text reaches the operator.
         $graphMessage = Get-GraphErrorMessage -ErrorRecord $PSItem
-        Write-Warning "Assignment to group $GroupId$where failed: $graphMessage"
-        Write-Warning "Assign the app to $GroupId manually in the Intune portal."
-        return $false
+
+        # An error does not show the assignment is missing (a timeout can follow a request the
+        # server completed), so read the assignments back before reporting the result
+        $existing = $null
+        try {
+            $listed = Invoke-GraphRequest `
+                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments"
+            $listedProp = $listed.PSObject.Properties["value"]
+            $existing = @($listedProp ? $listedProp.Value : @()) | Where-Object {
+                $targetProp = $_.PSObject.Properties["target"]
+                $groupProp  = ($targetProp -and $targetProp.Value) ? $targetProp.Value.PSObject.Properties["groupId"] : $null
+                $typeProp   = ($targetProp -and $targetProp.Value) ? $targetProp.Value.PSObject.Properties["@odata.type"] : $null
+                $groupProp -and [string]$groupProp.Value -eq $GroupId -and
+                    (-not $typeProp -or [string]$typeProp.Value -notmatch 'exclusion')
+            } | Select-Object -First 1
+        }
+        catch {
+            Write-Warning "Could not read the assignments of app $AppId back after the failed request: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
+        }
+
+        if (-not $existing) {
+            Write-Warning "Assignment to group $GroupId$where failed: $graphMessage"
+            Write-Warning "Assign the app to $GroupId manually in the Intune portal."
+            return $false
+        }
+        Write-Warning "The request to assign group $GroupId$where reported an error ($graphMessage), but the assignment exists; treating it as assigned."
+        $response = $existing
     }
 
     $availableText = $AvailableTime ? (ConvertTo-Win32AssignmentDate -Value $AvailableTime) : "immediately"
@@ -1711,10 +2004,8 @@ function Invoke-Win32AppAssignment {
     $autoUpdateState = ""
     if ($assignmentId) {
         try {
-            $check = Invoke-RestMethod -Method Get `
-                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments/$assignmentId" `
-                -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
-                -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            $check = Invoke-GraphRequest `
+                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments/$assignmentId"
 
             $settingsProp = $check.PSObject.Properties["settings"]
             if ($settingsProp -and $settingsProp.Value) {
@@ -1745,7 +2036,8 @@ function Select-SupersedenceTarget {
         Picks the single earlier-version app to keep and supersede against.
 
     .DESCRIPTION
-        The kept app is the highest version that still has at least one assignment. A
+        The kept app is the highest version that still has at least one required or available
+        include assignment; uninstall and exclusion assignments do not count as deployed. A
         half-finished earlier run can leave a higher version with no assignments, and keeping
         that one would supersede - and later retire - the version that is actually deployed.
         Ties on version are broken by createdDateTime. When no candidate has any assignment
@@ -1758,16 +2050,14 @@ function Select-SupersedenceTarget {
         actually deployed.
 
     .NOTES
-        createdDateTime comes from the inventory; only the assignment count is fetched per
-        candidate.
+        createdDateTime comes from the inventory. Assignments come from one expanded request,
+        with a read per candidate for any it does not cover.
     #>
     [OutputType([pscustomobject])]
     param (
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Candidate,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Inventory
     )
-
-    $authHeader = @{ Authorization = $Global:AuthenticationHeader.Authorization }
 
     $createdById = @{}
     foreach ($inventoryApp in $Inventory) {
@@ -1778,15 +2068,55 @@ function Select-SupersedenceTarget {
         }
     }
 
+    # One request per chunk of candidates with the assignments expanded, instead of one per
+    # candidate. Only a candidate the response covers with a real assignments array is taken
+    # from it; any other, or any failure here, is read on its own below, as before. A response
+    # that ignored $expand therefore cannot make a candidate look unassigned.
+    $expanded = @{}
+    $candidateIds = @($Candidate | ForEach-Object { [string]$_.Id } | Where-Object { $_ -match '^[0-9a-fA-F-]{36}$' })
+    for ($offset = 0; $offset -lt $candidateIds.Count; $offset += 25) {
+        $chunk = @($candidateIds[$offset..([math]::Min($offset + 24, $candidateIds.Count - 1))])
+        try {
+            $expandResponse = Invoke-GraphRequest `
+                -Uri ("https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$filter=id in ({0})&`$select=id&`$expand=assignments" -f (($chunk | ForEach-Object { "'$_'" }) -join ","))
+            $expandValue = $expandResponse.PSObject.Properties["value"]
+            foreach ($expandedApp in @($expandValue ? $expandValue.Value : @())) {
+                $expandedId          = $expandedApp.PSObject.Properties["id"]
+                $expandedAssignments = $expandedApp.PSObject.Properties["assignments"]
+                if ($expandedId -and [string]$expandedId.Value -in $chunk -and $expandedAssignments -and $expandedAssignments.Value -is [array]) {
+                    $expanded[[string]$expandedId.Value] = @($expandedAssignments.Value)
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Expanded assignment lookup failed, reading them one by one: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
+        }
+    }
+
     $failedLookups = 0
     $enriched = foreach ($item in $Candidate) {
         $assignmentCount = 0
+        $deployingCount  = 0
         try {
-            $assignmentResponse = Invoke-RestMethod -Method Get `
-                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)/assignments" `
-                -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            if ($expanded.ContainsKey([string]$item.Id)) {
+                $assignmentResponse = [pscustomobject]@{ value = $expanded[[string]$item.Id] }
+            }
+            else {
+                $assignmentResponse = Invoke-GraphRequest `
+                    -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)/assignments"
+            }
             if ($assignmentResponse.PSObject.Properties["value"]) {
-                $assignmentCount = @($assignmentResponse.value).Count
+                $assignments     = @($assignmentResponse.value)
+                $assignmentCount = $assignments.Count
+                # Only an include assignment that installs shows the version is deployed. An
+                # uninstall intent or an exclusion target - a rollback, say - shows the opposite.
+                $deployingCount  = @($assignments | Where-Object {
+                    $intentProp = $_.PSObject.Properties["intent"]
+                    $targetProp = $_.PSObject.Properties["target"]
+                    $typeProp   = ($targetProp -and $targetProp.Value) ? $targetProp.Value.PSObject.Properties["@odata.type"] : $null
+                    $intentProp -and [string]$intentProp.Value -in "required", "available" -and
+                        $typeProp -and [string]$typeProp.Value -notmatch 'exclusion'
+                }).Count
             }
         }
         catch {
@@ -1801,6 +2131,7 @@ function Select-SupersedenceTarget {
             DisplayName     = $item.DisplayName
             Version         = $item.Version
             AssignmentCount = $assignmentCount
+            DeployingCount  = $deployingCount
             CreatedDateTime = $createdById.ContainsKey($itemId) ? $createdById[$itemId] : [datetime]::MinValue
         }
     }
@@ -1813,14 +2144,60 @@ function Select-SupersedenceTarget {
     $enriched = @($enriched)
     if ($enriched.Count -eq 0) { return $null }
 
-    $withAssignment = @($enriched | Where-Object { $_.AssignmentCount -gt 0 })
+    $withAssignment = @($enriched | Where-Object { $_.DeployingCount -gt 0 })
     if ($withAssignment.Count -gt 0) {
-        return $withAssignment | Sort-Object -Property Version, CreatedDateTime -Descending | Select-Object -First 1
+        $keep = $withAssignment | Sort-Object -Property Version, CreatedDateTime -Descending | Select-Object -First 1
+        # A higher version that is assigned, but not so that it deploys, is a state this
+        # decision does not understand - skip rather than retire around it
+        $unclear = @($enriched | Where-Object { $_.Version -gt $keep.Version -and $_.AssignmentCount -gt 0 })
+        if ($unclear.Count -gt 0) {
+            Write-Warning "'$($unclear[0].DisplayName)' is newer than '$($keep.DisplayName)' and has only uninstall or exclusion assignments. Supersedence and retirement are skipped for this run."
+            return $null
+        }
+        return $keep
+    }
+    if (@($enriched | Where-Object { $_.AssignmentCount -gt 0 }).Count -gt 0) {
+        Write-Warning "Earlier versions have only uninstall or exclusion assignments; none is clearly deployed. Supersedence and retirement are skipped for this run."
+        return $null
     }
 
     $fallback = $enriched | Sort-Object -Property Version, CreatedDateTime -Descending | Select-Object -First 1
     Write-Warning "None of the earlier versions has an assignment; keeping '$($fallback.DisplayName)' (highest version) without assignment evidence."
     return $fallback
+}
+
+function Invoke-ModuleWrite {
+    <#
+    .SYNOPSIS
+        Runs one IntuneWin32App module call that writes to the tenant and returns the warnings
+        it wrote. An empty result means it reported nothing wrong.
+
+    .DESCRIPTION
+        The module reports failures with Write-Warning, and ends the whole script with `break`
+        on a validation failure in a Begin block, which try/catch does not catch. The
+        foreach ($x in 1) absorbs that break, and a default -WarningVariable on every cmdlet
+        called here collects the warnings. The action is dot-sourced so the variable lands in
+        this scope; run with & it would be set in a child scope and lost. A call that ended
+        through `break` counts as failed even when it wrote no warning.
+    #>
+    [OutputType([object[]])]
+    param (
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+    $PSDefaultParameterValues = @{ "*:WarningVariable" = "moduleWarnings" }
+    $moduleWarnings = $null
+    $completed      = $false
+    foreach ($breakGuard in 1) {
+        . $Action | Out-Null
+        $completed = $true
+    }
+    $result = @($moduleWarnings | Where-Object { $_ })
+    # A break with no warning must not count as success: the call did not finish
+    if (-not $completed) {
+        Write-Warning "The module call ended early without finishing; treating it as failed."
+        $result += "ended early"
+    }
+    return ,$result
 }
 
 function Remove-KeptAppSupersedence {
@@ -1849,10 +2226,8 @@ function Remove-KeptAppSupersedence {
     )
 
     try {
-        $response = Invoke-RestMethod -Method Get `
-            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$KeptAppId/relationships" `
-            -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
-            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+        $response = Invoke-GraphRequest `
+            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$KeptAppId/relationships"
     }
     catch {
         Write-Warning "Could not read the relationships of kept app ${KeptAppId}: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
@@ -1907,19 +2282,17 @@ function Remove-KeptAppSupersedence {
         }
     })
 
+    # A declined -Confirm is not a success: the caller treats $true as "kept app is clean"
     if (-not $PSCmdlet.ShouldProcess($KeptAppId, "Remove supersedence to retired versions")) {
-        return $true
+        return $false
     }
 
-    # foreach ($x in 1) absorbs the module's `break` on a Begin-block validation failure;
-    # -WarningVariable captures both that and Graph errors
-    $writeWarnings = $null
-    foreach ($breakGuard in 1) {
+    $writeWarnings = Invoke-ModuleWrite {
         if ($rebuilt.Count -gt 0) {
-            Add-IntuneWin32AppSupersedence -ID $KeptAppId -Supersedence $rebuilt -WarningVariable writeWarnings | Out-Null
+            Add-IntuneWin32AppSupersedence -ID $KeptAppId -Supersedence $rebuilt
         }
         else {
-            Remove-IntuneWin32AppSupersedence -ID $KeptAppId -WarningVariable writeWarnings | Out-Null
+            Remove-IntuneWin32AppSupersedence -ID $KeptAppId
         }
     }
     return -not $writeWarnings
@@ -1942,7 +2315,7 @@ if ($missingCredentials.Count -gt 0) {
     throw "Missing required authentication credentials: $($missingCredentials -join ', ')"
 }
 
-# Assignment input is validated up front so a misconfiguration fails before extraction (§7.2)
+# Assignment input is validated up front so a misconfiguration fails before extraction
 
 # GUID check for every supplied group id, same pattern as the original AssignmentGroupId check
 foreach ($groupIdField in @(
@@ -2033,6 +2406,18 @@ catch {
     throw "Error during extraction: $($PSItem.Exception.Message)"
 }
 
+# A failed run leaves the extracted files in place for troubleshooting; say where, and drop the
+# token. `break` lets the original error through unchanged, and the check keeps an early
+# failure, before $tempDir exists, from being masked.
+trap {
+    if (Get-Variable -Name tempDir -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
+        Write-Warning "The extracted files were left in $tempDir"
+    }
+    # The token must not outlive a failed run in an interactive session
+    Remove-Variable -Name AuthenticationHeader -Scope Global -ErrorAction SilentlyContinue -WhatIf:$false
+    break
+}
+
 #endregion
 
 #region Step 3 - Locate extracted directory and files
@@ -2040,16 +2425,19 @@ catch {
 Write-Host "`n=== Step 3: Files ===" -ForegroundColor Cyan
 
 try {
-    # Skip macOS metadata folders (__MACOSX) and prefer the directory that actually
-    # contains ApplicationInformation.txt
-    $candidateDirs = @(Get-ChildItem -Path $tempDir -Directory | Where-Object { $_.Name -ne "__MACOSX" })
+    # Skip macOS metadata folders (__MACOSX) and prefer the directory that actually contains
+    # ApplicationInformation. Packagers moved from the .txt to a Markdown .md; both are read,
+    # and -in compares case-insensitively, as -Filter did.
+    $appInfoNames  = "ApplicationInformation.txt", "ApplicationInformation.md"
+    $findAppInfo   = { param($dir) Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -in $appInfoNames } }
+    $candidateDirs = @(Get-ChildItem -LiteralPath $tempDir -Directory | Where-Object { $_.Name -ne "__MACOSX" })
     $unzippedDir   = $candidateDirs |
-        Where-Object { Test-Path -Path (Join-Path $_.FullName "ApplicationInformation.txt") } |
+        Where-Object { @(& $findAppInfo $_.FullName).Count -gt 0 } |
         Select-Object -First 1
 
     # Zips built without a wrapping folder put the files straight in the root
-    if (-not $unzippedDir -and (Test-Path -Path (Join-Path $tempDir "ApplicationInformation.txt"))) {
-        $unzippedDir = Get-Item -Path $tempDir
+    if (-not $unzippedDir -and @(& $findAppInfo $tempDir).Count -gt 0) {
+        $unzippedDir = Get-Item -LiteralPath $tempDir
     }
 
     $unzippedDir ??= ($candidateDirs | Select-Object -First 1)
@@ -2058,11 +2446,22 @@ try {
     }
     Write-Host "Extracted directory: $($unzippedDir.FullName)"
 
-    $appInfoFile   = Get-ChildItem -Path $unzippedDir.FullName -Filter "ApplicationInformation.txt" | Select-Object -First 1
-    $intunewinFile = Get-ChildItem -Path $unzippedDir.FullName -Filter "*.intunewin" | Select-Object -First 1
-    $pngFile       = Get-ChildItem -Path $unzippedDir.FullName -Filter "*.png" | Select-Object -First 1
+    $appInfoFiles  = @(& $findAppInfo $unzippedDir.FullName)
+    # Both forms in one package means choosing between two sets of values; refuse instead
+    if ($appInfoFiles.Count -gt 1) {
+        throw "Both $($appInfoFiles.Name -join ' and ') found in $($unzippedDir.FullName). Keep one."
+    }
+    $appInfoFile   = $appInfoFiles | Select-Object -First 1
+    $intunewinFiles = @(Get-ChildItem -LiteralPath $unzippedDir.FullName -Filter "*.intunewin")
+    # Picking the first of several would publish whichever sorts first - an old build under the
+    # new version's name, which then supersedes and retires the version that works
+    if ($intunewinFiles.Count -gt 1) {
+        throw "More than one .intunewin file in $($unzippedDir.FullName): $($intunewinFiles.Name -join ', '). The package must contain exactly one."
+    }
+    $intunewinFile = $intunewinFiles | Select-Object -First 1
+    $pngFile      = Get-ChildItem -LiteralPath $unzippedDir.FullName -Filter "*.png" | Select-Object -First 1
 
-    if (-not $appInfoFile)   { throw "ApplicationInformation.txt not found in $($unzippedDir.FullName)" }
+    if (-not $appInfoFile)   { throw "ApplicationInformation.txt or .md not found in $($unzippedDir.FullName)" }
     if (-not $intunewinFile) { throw "No .intunewin file found in $($unzippedDir.FullName)" }
 
     Write-Host "ApplicationInformation : $($appInfoFile.Name)"
@@ -2076,25 +2475,61 @@ catch {
 
 #endregion
 
-#region Step 4 - Read and parse ApplicationInformation.txt
+#region Step 4 - Read and parse ApplicationInformation
 
-Write-Host "`n=== Step 4: ApplicationInformation.txt ===" -ForegroundColor Cyan
+Write-Host "`n=== Step 4: ApplicationInformation ($($appInfoFile.Extension)) ===" -ForegroundColor Cyan
 
 try {
     $appInfo = Read-TextFileSmart -Path $appInfoFile.FullName
+    $declaredDetectionType = $null
 
-    $vendor       = Get-AppInfoValue -Content $appInfo -Label "Application - Vendor"
-    $appName      = Get-AppInfoValue -Content $appInfo -Label "Application - Name"
-    $appVersion   = Get-AppInfoValue -Content $appInfo -Label "Application - Version"
-    $installCmd   = Get-AppInfoValue -Content $appInfo -Label "Install command"
-    $uninstallCmd = Get-AppInfoValue -Content $appInfo -Label "Uninstall command"
-    $diskSpace    = Get-AppInfoValue -Content $appInfo -Label "Estimated Disk Space"
+    if ($appInfoFile.Extension -eq ".md") {
+        # Same values as the .txt, under the Markdown form's labels: Publisher instead of Vendor,
+        # the disk unit in the label, and the detection type and string on separate lines
+        $vendor       = Get-AppInfoMarkdownValue -Content $appInfo -Label "Application - Publisher"
+        $appName      = Get-AppInfoMarkdownValue -Content $appInfo -Label "Application - Name"
+        $appVersion   = Get-AppInfoMarkdownValue -Content $appInfo -Label "Application - Version"
+        $installCmd   = Get-AppInfoMarkdownValue -Content $appInfo -Label "Install command"
+        $uninstallCmd = Get-AppInfoMarkdownValue -Content $appInfo -Label "Uninstall command"
+        $diskValue    = Get-AppInfoMarkdownValue -Content $appInfo -Label "Disk space required (MB)"
+        $diskSpace    = $diskValue ? "$diskValue MB" : $null
 
-    # Detection method may be declared as REG, MSI or FILE - use whichever is present
-    $detectionMethod = $null
-    foreach ($detectionLabel in "REG", "MSI", "FILE") {
-        $detectionMethod = Get-AppInfoValue -Content $appInfo -Label "DetectionMethod\.\($detectionLabel\)"
-        if ($detectionMethod) { break }
+        $declaredDetectionType = Get-AppInfoMarkdownValue -Content $appInfo -Label "Detection type"
+        if ($declaredDetectionType -and $declaredDetectionType -notin "REG", "MSI", "FILE") {
+            throw "Detection type '$declaredDetectionType' is not REG, MSI or FILE."
+        }
+        $detectionMethod = Get-AppInfoMarkdownValue -Content $appInfo -Label "Detection string"
+
+        # The package states its architecture; -Architecture, which defaults to x64, would
+        # otherwise ignore it and upload an x86 or arm64 build with an x64 requirement. An
+        # explicit -Architecture must agree with the file, and an unknown value is not guessed at.
+        $fileArchitecture = Get-AppInfoMarkdownValue -Content $appInfo -Label "Architecture"
+        if ($fileArchitecture) {
+            if ($fileArchitecture -notin "x64", "x86", "arm64") {
+                throw "Architecture '$fileArchitecture' in $($appInfoFile.Name) is not x64, x86 or arm64."
+            }
+            if (-not $PSBoundParameters.ContainsKey("Architecture")) {
+                $Architecture = $fileArchitecture.ToLowerInvariant()
+            }
+            elseif ($Architecture -ne $fileArchitecture) {
+                throw "-Architecture $Architecture disagrees with Architecture '$fileArchitecture' in $($appInfoFile.Name)."
+            }
+        }
+    }
+    else {
+        $vendor       = Get-AppInfoValue -Content $appInfo -Label "Application - Vendor"
+        $appName      = Get-AppInfoValue -Content $appInfo -Label "Application - Name"
+        $appVersion   = Get-AppInfoValue -Content $appInfo -Label "Application - Version"
+        $installCmd   = Get-AppInfoValue -Content $appInfo -Label "Install command"
+        $uninstallCmd = Get-AppInfoValue -Content $appInfo -Label "Uninstall command"
+        $diskSpace    = Get-AppInfoValue -Content $appInfo -Label "Estimated Disk Space"
+
+        # Detection method may be declared as REG, MSI or FILE - use whichever is present
+        $detectionMethod = $null
+        foreach ($detectionLabel in "REG", "MSI", "FILE") {
+            $detectionMethod = Get-AppInfoValue -Content $appInfo -Label "DetectionMethod\.\($detectionLabel\)"
+            if ($detectionMethod) { $declaredDetectionType = $detectionLabel; break }
+        }
     }
 
     $missingFields = @()
@@ -2106,7 +2541,7 @@ try {
     if (-not $detectionMethod) { $missingFields += "DetectionMethod.(REG/MSI/FILE)" }
 
     if ($missingFields.Count -gt 0) {
-        throw "Missing required fields in ApplicationInformation.txt: $($missingFields -join ', ')"
+        throw "Missing required fields in $($appInfoFile.Name): $($missingFields -join ', ')"
     }
 
     Write-Host "Vendor   : $vendor"
@@ -2118,7 +2553,7 @@ try {
     Write-Host "Disk     : $($diskSpace ?? '(not specified)')"
 }
 catch {
-    throw "Error while parsing ApplicationInformation.txt: $($PSItem.Exception.Message)"
+    throw "Error while parsing ApplicationInformation: $($PSItem.Exception.Message)"
 }
 
 #endregion
@@ -2137,12 +2572,29 @@ try {
     # replaces the vendor/name part, e.g. "IgorPavlov 7Zip 26.02" -> "7-Zip 26.02"
     $defaultDisplayName = "$vendor $appName $appVersion"
     $descResult         = Get-AppDescription -AppName $appName -FallbackName $defaultDisplayName -Source $DescriptionsPath
+    # Without the descriptions file the app would be published under its fallback name, which
+    # the duplicate check does not know - a package already uploaded as "7-Zip 26.02" would be
+    # uploaded again as "IgorPavlov 7Zip 26.02". -WhatIf only warns, since it uploads nothing.
+    if ($descResult.LoadFailed -and -not $WhatIfPreference) {
+        throw "The descriptions file could not be loaded from '$DescriptionsPath'. The app name depends on it, so nothing is uploaded. Fix the source or point -DescriptionsPath at a local copy."
+    }
     $appDescription     = $descResult.Description
     $displayName        = $descResult.DisplayName ? "$($descResult.DisplayName) $appVersion" : $defaultDisplayName
     # notes: "Base Application <date>" when the app is known in IntuneAppDescriptions.json, otherwise just the date
     $appNotes       = $descResult.Found ? "Base Application $today" : $today
 
     $parsed = ConvertFrom-DetectionRule -DetectionString $detectionMethod
+
+    # The parser classifies by the string's shape; a declared type that disagrees means the
+    # packager meant something else, and a wrong rule uploads without error and never detects
+    $expectedOdataType = @{
+        REG  = "#microsoft.graph.win32LobAppRegistryDetection"
+        MSI  = "#microsoft.graph.win32LobAppProductCodeDetection"
+        FILE = "#microsoft.graph.win32LobAppFileSystemDetection"
+    }[[string]$declaredDetectionType]   # [string] because a hashtable cannot be indexed with $null
+    if ($expectedOdataType -and $parsed.DetectionRule.'@odata.type' -ne $expectedOdataType) {
+        throw "Detection rule is declared as $declaredDetectionType but parses as $($parsed.DetectionRule.'@odata.type'): '$detectionMethod'."
+    }
 
     $detectionOdataType = $parsed.DetectionRule.'@odata.type' -replace '#microsoft\.graph\.win32LobApp', ''
     # Registry/file rules expose detectionType, MSI rules expose productVersionOperator
@@ -2252,6 +2704,7 @@ Write-Host "`n=== Step 6: Upload to Intune ===" -ForegroundColor Cyan
 
 $appId        = $null
 $appInventory = @()
+$returnCodePatched = $false
 
 # ShouldProcess returns $false under -WhatIf, which skips authentication as well as the upload
 if (-not $PSCmdlet.ShouldProcess($displayName, "Upload Win32 app to Intune")) {
@@ -2270,16 +2723,39 @@ else {
         Import-Module @moduleSplat
 
         $clientCertificate = Get-ClientCertificate -Thumbprint $CertificateThumbprint `
+                                                   -StoreLocation $CertificateStoreLocation `
                                                    -Path       $CertificatePath `
                                                    -Password   $CertificatePassword
 
-        if ($clientCertificate) {
-            Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientCert $clientCertificate | Out-Null
-            Write-Host "Authenticated to Microsoft Graph using certificate $($clientCertificate.Thumbprint)"
+        # A token left in the session by an earlier run - possibly for another customer - must not
+        # survive a connect that fails without throwing; everything below reads this variable
+        Remove-Variable -Name AuthenticationHeader -Scope Global -ErrorAction SilentlyContinue
+
+        # foreach ($x in 1) absorbs the module's `break`, which try/catch does not catch and
+        # which otherwise ends the whole script silently; the token check below then reports it
+        foreach ($breakGuard in 1) {
+            if ($clientCertificate) {
+                Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientCert $clientCertificate | Out-Null
+                Write-Host "Authenticated to Microsoft Graph using certificate $($clientCertificate.Thumbprint)"
+            }
+            else {
+                Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
+                Write-Host "Authenticated to Microsoft Graph using client secret"
+            }
         }
-        else {
-            Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
-            Write-Host "Authenticated to Microsoft Graph using client secret"
+
+        $connectedHeader = Get-Variable -Name AuthenticationHeader -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+        if (-not ($connectedHeader -and $connectedHeader.Authorization)) {
+            throw "Connect-MSIntuneGraph returned without an access token."
+        }
+        # The token's tid claim names the tenant it was issued for. Only comparable when the
+        # tenant was given as a GUID; a domain name is left to Entra.
+        $tenantGuid = [guid]::Empty
+        if ([guid]::TryParse($TenantID, [ref]$tenantGuid)) {
+            $tokenTenant = Get-AccessTokenTenantId -Authorization $connectedHeader.Authorization
+            if ($tokenTenant -ne $tenantGuid.ToString()) {
+                throw "The access token is for tenant '$tokenTenant', not '$TenantID'. Nothing was uploaded."
+            }
         }
     }
     catch {
@@ -2300,16 +2776,16 @@ else {
     # check sits before the upload, so it throws without leaving anything behind. -WhatIf never
     # reaches here because ShouldProcess short-circuits authentication.
     $candidateNames   = @($displayName, $defaultDisplayName) | Select-Object -Unique
-    $existingDuplicate = $null
-    foreach ($inventoryApp in $appInventory) {
-        if (-not $inventoryApp.PSObject.Properties["displayName"]) { continue }
-        foreach ($candidateName in $candidateNames) {
-            if ([string]::Equals($candidateName, [string]$inventoryApp.displayName, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $existingDuplicate = $inventoryApp
-                break
-            }
-        }
-        if ($existingDuplicate) { break }
+    # -in compares case-insensitively; the property check keeps StrictMode from throwing on an entry without a name
+    $existingDuplicate = $appInventory |
+        Where-Object { $_.PSObject.Properties["displayName"] -and $_.displayName -in $candidateNames } |
+        Select-Object -First 1
+    # The same version written differently ("7-Zip 26.5" for 26.05) is the same package
+    if (-not $existingDuplicate) {
+        $sameVersion = Select-SupersedableApp -NameBases @($descResult.DisplayName, "$vendor $appName") -NewVersion $appVersion `
+                                              -ExcludeId "" -AllApps $appInventory -Relation Same
+        $existingDuplicate = $sameVersion | Select-Object -First 1
+        if ($existingDuplicate) { $existingDuplicate = [pscustomobject]@{ id = $existingDuplicate.Id; displayName = $existingDuplicate.DisplayName } }
     }
     if ($existingDuplicate) {
         $existingId = $existingDuplicate.PSObject.Properties["id"] ? $existingDuplicate.id : "unknown"
@@ -2326,6 +2802,11 @@ else {
             [System.IO.File]::WriteAllBytes($blankPngPath, [System.Convert]::FromBase64String($script:BlankPngBase64))
             $blankPngPath
         }
+        # The module functions below end the whole script silently with `break` on a validation
+        # failure; the guard turns that into a result that can be checked and reported
+        $icon = $null
+        foreach ($breakGuard in 1) { $icon = New-IntuneWin32AppIcon -FilePath $iconPath }
+        if (-not $icon) { throw "New-IntuneWin32AppIcon returned nothing for '$iconPath'. Nothing was uploaded." }
 
         # Without an explicit requirement rule the module falls back to hardcoded defaults
         # ("x64,x86" and minimum release "2H20" = Windows 10 20H2) and silently drops
@@ -2338,35 +2819,48 @@ else {
         if ($diskSpaceMB) {
             $requirementSplat["MinimumFreeDiskSpaceInMB"] = $diskSpaceMB
         }
-        $requirementRule = New-IntuneWin32AppRequirementRule @requirementSplat
+        $requirementRule = $null
+        foreach ($breakGuard in 1) { $requirementRule = New-IntuneWin32AppRequirementRule @requirementSplat }
+        if (-not $requirementRule) { throw "New-IntuneWin32AppRequirementRule returned nothing. Nothing was uploaded." }
 
         # -ReturnCode is deliberately omitted: the module always adds its own default set
         # (0/1707 success, 3010 softReboot, 1641 hardReboot, 1618 retry) and appends anything
         # passed in without deduplicating, which produced duplicate entries. 1641 is corrected
         # to softReboot with a PATCH below instead.
-        $win32App = Add-IntuneWin32App `
-            -FilePath             $intunewinFile.FullName `
-            -DisplayName          $displayName `
-            -Description          $appDescription `
-            -Publisher            $vendor `
-            -Owner                $Owner `
-            -AppVersion           $appVersion `
-            -Notes                $appNotes `
-            -InstallCommandLine   $installCmd `
-            -UninstallCommandLine $uninstallCmd `
-            -InstallExperience    "system" `
-            -RestartBehavior      "basedOnReturnCode" `
-            -DetectionRule        (New-IntuneDetectionRuleObject -ParsedRule $parsed) `
-            -RequirementRule      $requirementRule `
-            -Icon                 (New-IntuneWin32AppIcon -FilePath $iconPath) `
-            -Verbose:(-not $Quiet)
+        $win32App       = $null
+        $moduleReturned = $false
+        foreach ($breakGuard in 1) {
+            $win32App = Add-IntuneWin32App `
+                -FilePath             $intunewinFile.FullName `
+                -DisplayName          $displayName `
+                -Description          $appDescription `
+                -Publisher            $vendor `
+                -Owner                $Owner `
+                -AppVersion           $appVersion `
+                -Notes                $appNotes `
+                -InstallCommandLine   $installCmd `
+                -UninstallCommandLine $uninstallCmd `
+                -InstallExperience    "system" `
+                -RestartBehavior      "basedOnReturnCode" `
+                -DetectionRule        (New-IntuneDetectionRuleObject -ParsedRule $parsed) `
+                -RequirementRule      $requirementRule `
+                -Icon                 $icon `
+                -Verbose:(-not $Quiet)
+            $moduleReturned = $true
+        }
+        if (-not $moduleReturned) {
+            # The module ended with `break`, and its app record may already exist because it is
+            # created before the content is uploaded. Warn rather than throw, as the no-id case
+            # below does: the app may exist, and a fatal error invites a rerun.
+            Write-Warning "Add-IntuneWin32App ended without returning. An app named '$displayName' may exist in Intune without content; check the portal. A rerun is refused while it does."
+        }
 
         # The module emits several pipeline objects, including status strings;
         # pick the one carrying the app id
         # PSObject.Properties rather than $_.id: StrictMode throws PropertyNotFoundException
         # on an object without the property, which would surface as an upload failure even
         # though the app already exists - and a rerun would then create a duplicate.
-        $appObject = @($win32App) | Where-Object { $_ -isnot [string] -and $_.PSObject.Properties["id"] } | Select-Object -First 1
+        $appObject = @($win32App) | Where-Object { $_ -and $_ -isnot [string] -and $_.PSObject.Properties["id"] } | Select-Object -First 1
         $appId     = ${appObject}?.id
 
         if (-not $appId) {
@@ -2384,15 +2878,12 @@ else {
             # Separate try/catch: the app already exists in Intune at this point, so a failed
             # patch must not be reported as an upload failure - a rerun would create a duplicate.
             try {
-                # Reuse the authentication header established by Connect-MSIntuneGraph
-                Invoke-RestMethod `
-                    -Uri               "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId" `
-                    -Method            Patch `
-                    -Headers           @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" } `
-                    -Body              $patchBody `
-                    -MaximumRetryCount 3 `
-                    -RetryIntervalSec  5 | Out-Null
+                # Reuses the authentication header established by Connect-MSIntuneGraph
+                Invoke-GraphRequest -Method Patch `
+                    -Uri  "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId" `
+                    -Body $patchBody | Out-Null
 
+                $returnCodePatched = $true
                 Write-Host "Return code 1641 patched to softReboot." -ForegroundColor Green
             }
             catch {
@@ -2422,10 +2913,8 @@ if ($appId) {
         # No $select: committedContentVersion lives on the derived mobileLobApp type and the
         # mobileApps collection is typed mobileApp, so selecting it fails with 400 on every app.
         # The unselected GET returns the full win32LobApp, derived properties included.
-        $verifyResponse = Invoke-RestMethod -Method Get `
-            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId" `
-            -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
-            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+        $verifyResponse = Invoke-GraphRequest `
+            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId"
 
         $stateProp     = $verifyResponse.PSObject.Properties["publishingState"]
         $contentProp   = $verifyResponse.PSObject.Properties["committedContentVersion"]
@@ -2453,22 +2942,66 @@ if ($appId) {
 
 #region Step 8 - Supersede the previous version
 
+# Uploading a large package can use most of the token's life. Steps 8 and 10 make several calls
+# each, and a token that runs out in the middle of retirement leaves apps half retired, so both
+# check first and reconnect when less than ten minutes remain. A token whose lifetime cannot be
+# read is used as it is. False means the lifetime is short and a reconnect did not fix it.
+$ensureFreshToken = {
+    $minimum = [timespan]::FromMinutes(10)
+    $header  = Get-Variable -Name AuthenticationHeader -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    $left    = $header ? (Get-AccessTokenRemaining -Authorization $header.Authorization) : [timespan]::Zero
+    if ($null -eq $left -or $left -gt $minimum) { return $true }
+
+    Write-Warning "The access token has $([math]::Max(0, [int]$left.TotalMinutes)) minute(s) left; connecting again."
+    try {
+        foreach ($breakGuard in 1) {
+            if ($clientCertificate) {
+                Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientCert $clientCertificate | Out-Null
+            }
+            else {
+                Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
+            }
+        }
+    }
+    catch {
+        Write-Warning "Connecting again failed: $($PSItem.Exception.Message)"
+    }
+    $header = Get-Variable -Name AuthenticationHeader -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    $left   = $header ? (Get-AccessTokenRemaining -Authorization $header.Authorization) : [timespan]::Zero
+    return ($null -eq $left -or $left -gt $minimum)
+}
+
 $supersedenceConfigured = $false
 $keptApp                = $null
 $supersedeCandidates    = @()
 
-if ($appId -and $uploadVerified) {
+$tokenFresh = $true
+if ($appId -and $uploadVerified) { $tokenFresh = & $ensureFreshToken }
+if ($appId -and $uploadVerified -and -not $tokenFresh) {
+    Write-Warning "Supersedence is skipped: the access token is about to expire and connecting again did not help. The upload succeeded; set the supersedence in the Intune portal. A rerun is refused while the app exists."
+}
+elseif ($appId -and $uploadVerified) {
     Write-Host "`n=== Step 8: Supersedence ===" -ForegroundColor Cyan
     try {
         # Both naming conventions: the resolved name and the "<Vendor> <Name>" fallback, so
         # apps uploaded before a displayName override existed are still found. The regex and
         # the strict version comparison in Select-SupersedableApp are unchanged.
         $nameBases = @($descResult.DisplayName, "$vendor $appName") | Where-Object { $_ }
+        # Write-Information rather than Write-Host: it shows the same, and adds no analyser warning
+        Write-Information "Looking for earlier versions named: $(($nameBases | ForEach-Object { "'$_ <version>'" }) -join ' or ')" -InformationAction Continue
 
         $supersedeCandidates = Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
                                                       -ExcludeId $appId -AllApps $appInventory
+        $newerApps = Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
+                                            -ExcludeId $appId -AllApps $appInventory -Relation Newer
 
-        if ($supersedeCandidates.Count -eq 0) {
+        # Superseding the earlier versions while a newer one exists would leave both deployed,
+        # and the newer one is the one that should be kept. Nothing here shows which is right,
+        # so supersedence and retirement are skipped (Step 10 reports the skipped retirement).
+        if ($newerApps.Count -gt 0) {
+            Write-Warning "'$($newerApps[0].DisplayName)' already exists and is newer than $appVersion. Supersedence and retirement are skipped for this run."
+        }
+        elseif ($supersedeCandidates.Count -eq 0) {
             Write-Host "No earlier versions found."
         }
         else {
@@ -2489,13 +3022,8 @@ if ($appId -and $uploadVerified) {
                     }
                 )
 
-                # foreach ($x in 1) absorbs the module's `break` on a Begin-block validation
-                # failure, which try/catch does not catch and which otherwise exits the script
-                # silently with exit code 0. -WarningVariable still captures the module warnings.
-                $supersedenceWarnings = $null
-                foreach ($breakGuard in 1) {
-                    Add-IntuneWin32AppSupersedence -ID $appId -Supersedence $supersedenceSet `
-                        -WarningVariable supersedenceWarnings | Out-Null
+                $supersedenceWarnings = Invoke-ModuleWrite {
+                    Add-IntuneWin32AppSupersedence -ID $appId -Supersedence $supersedenceSet
                 }
 
                 if ($supersedenceWarnings) {
@@ -2591,6 +3119,7 @@ elseif (($singleGroupMode -or $ringMode) -and $WhatIfPreference) {
 #region Step 10 - Retire superseded versions
 
 $retiredApps = @()
+$retireFailedApps = @()
 
 if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
     $retireSet = @($supersedeCandidates | Where-Object { $_.Id -ne $keptApp.Id })
@@ -2608,6 +3137,13 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
     elseif ($retireSet.Count -eq 0) {
         Write-Host "`n=== Step 10: Retirement ===" -ForegroundColor Cyan
         Write-Host "No earlier versions to retire beyond the one kept."
+    }
+    # The Step 6 confirmation was for the upload; retiring other apps gets its own
+    elseif (-not $PSCmdlet.ShouldProcess(($retireSet.DisplayName -join ", "), "Retire: remove supersedence and assignments, rename to (TBD)")) {
+        Write-Warning "Retirement declined; the earlier versions are left unchanged."
+    }
+    elseif (-not (& $ensureFreshToken)) {
+        Write-Warning "Retirement is skipped: the access token is about to expire and connecting again did not help. Retiring with a token that runs out would leave versions half retired. Retire the earlier versions in the portal."
     }
     else {
         Write-Host "`n=== Step 10: Retirement ===" -ForegroundColor Cyan
@@ -2633,32 +3169,28 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
             # name and is picked up on the next run.
 
             # 1. Clear supersedence relations (dependencies are preserved), wrapped against break
-            $removeSupersedenceWarnings = $null
-            foreach ($breakGuard in 1) {
-                Remove-IntuneWin32AppSupersedence -ID $retireApp.Id `
-                    -WarningVariable removeSupersedenceWarnings | Out-Null
-            }
+            $removeSupersedenceWarnings = Invoke-ModuleWrite { Remove-IntuneWin32AppSupersedence -ID $retireApp.Id }
             if ($removeSupersedenceWarnings) { $retireAppFailed = $true }
 
             # 2. Remove all assignments, wrapped against break
-            $removeAssignmentWarnings = $null
-            foreach ($breakGuard in 1) {
-                Remove-IntuneWin32AppAssignment -ID $retireApp.Id `
-                    -WarningVariable removeAssignmentWarnings | Out-Null
-            }
+            $removeAssignmentWarnings = Invoke-ModuleWrite { Remove-IntuneWin32AppAssignment -ID $retireApp.Id }
             if ($removeAssignmentWarnings) { $retireAppFailed = $true }
 
-            # 3. Rename to "... (TBD)" via raw PATCH; skip when already suffixed so it is idempotent
-            if ($retireApp.DisplayName -notmatch ' \(TBD\)$') {
+            # 3. Rename to "... (TBD)" via raw PATCH; skip when already suffixed so it is idempotent.
+            # Never after a failed step 1 or 2: the suffix hides the app from every later run, so
+            # an app that is still assigned would stay assigned for good.
+            if ($retireAppFailed) {
+                Write-Warning "Not renaming '$($retireApp.DisplayName)': its supersedence or assignments were not fully removed. It keeps its name so the next run picks it up again."
+            }
+            elseif ($retireApp.DisplayName -notmatch ' \(TBD\)$') {
                 try {
                     $renameBody = @{
                         "@odata.type" = "#microsoft.graph.win32LobApp"
                         "displayName" = "$($retireApp.DisplayName) (TBD)"
                     } | ConvertTo-Json -Depth 20
-                    Invoke-RestMethod -Method Patch `
+                    Invoke-GraphRequest -Method Patch `
                         -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($retireApp.Id)" `
-                        -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" } `
-                        -Body $renameBody -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop | Out-Null
+                        -Body $renameBody | Out-Null
                 }
                 catch {
                     Write-Warning "Renaming '$($retireApp.DisplayName)' ($($retireApp.Id)) to '(TBD)' failed: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
@@ -2668,6 +3200,7 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
 
             if ($retireAppFailed) {
                 $retireFailureCount++
+                $retireFailedApps += [pscustomobject]@{ DisplayName = $retireApp.DisplayName; Id = $retireApp.Id }
                 Write-Warning "Retirement of '$($retireApp.DisplayName)' ($($retireApp.Id)) did not fully complete; continuing with the next app."
             }
             else {
@@ -2696,12 +3229,12 @@ elseif ($RetireSuperseded -and $WhatIfPreference) {
 if ($WhatIfPreference) {
     Write-Host "`nWhatIf: leaving $tempDir in place so the generated JSON can be inspected." -ForegroundColor Yellow
 }
-elseif (Test-Path -Path $tempDir) {
+elseif (Test-Path -LiteralPath $tempDir) {
     # The JSON lives inside the temp directory, so preserve it next to the zip before
     # cleanup - otherwise the JsonPath returned to the caller points at a deleted file
     try {
         $preservedPath = Join-Path -Path ([System.IO.Path]::GetDirectoryName($AppPath)) -ChildPath $safeFileName
-        Copy-Item -Path $outputPath -Destination $preservedPath -Force
+        Copy-Item -LiteralPath $outputPath -Destination $preservedPath -Force
         $outputPath = $preservedPath
         Write-Host "`nJSON kept at: $outputPath" -ForegroundColor DarkGray
     }
@@ -2709,23 +3242,31 @@ elseif (Test-Path -Path $tempDir) {
         Write-Warning "Could not preserve the JSON artifact before cleanup: $($PSItem.Exception.Message)"
     }
 
-    Remove-Item -Path $tempDir -Recurse -Force
+    Remove-Item -LiteralPath $tempDir -Recurse -Force
     Write-Host "Cleaned up: $tempDir" -ForegroundColor DarkGray
 }
 
 #endregion
 
+# The token in this variable is valid for an hour and would otherwise stay in an interactive
+# session, where the next run - possibly for another customer - could find it. -WhatIf:$false
+# because this only touches the session, and -WhatIf would otherwise leave the variable.
+Remove-Variable -Name AuthenticationHeader -Scope Global -ErrorAction SilentlyContinue -WhatIf:$false
+
 # Structured result so the script can be consumed by other tooling
 [pscustomobject]@{
-    DisplayName       = $displayName
-    AppId             = $appId
-    JsonPath          = $outputPath
-    DetectionType     = $detectionOdataType
-    DescriptionFound  = $descResult.Found
-    AssignedGroupId   = $assignedGroupId
-    PilotGroupId      = $pilotGroupAssigned
-    ProductionGroupId = $productionGroupAssigned
-    SupersededApp     = $keptApp ? ([pscustomobject]@{ DisplayName = $keptApp.DisplayName; Id = $keptApp.Id }) : $null
-    RetiredApps       = $retiredApps
-    UploadVerified    = $uploadVerified
+    DisplayName            = $displayName
+    AppId                  = $appId
+    JsonPath               = $outputPath
+    DetectionType          = $detectionOdataType
+    DescriptionFound       = $descResult.Found
+    AssignedGroupId        = $assignedGroupId
+    PilotGroupId           = $pilotGroupAssigned
+    ProductionGroupId      = $productionGroupAssigned
+    SupersededApp          = $keptApp ? ([pscustomobject]@{ DisplayName = $keptApp.DisplayName; Id = $keptApp.Id }) : $null
+    RetiredApps            = $retiredApps
+    UploadVerified         = $uploadVerified
+    ReturnCodePatched      = $returnCodePatched
+    SupersedenceConfigured = $supersedenceConfigured
+    RetireFailed           = $retireFailedApps
 }
