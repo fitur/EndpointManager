@@ -256,7 +256,11 @@
             the session when the script ends; paths containing [ ] work; on Windows the
             customer file's ACL is checked; -CertificateStoreLocation allows a LocalMachine
             certificate; and the earlier versions' assignments are read in one request,
-            falling back to one per version.
+            falling back to one per version. Internally, Graph calls go through
+            Invoke-GraphRequest and the module's write calls through Invoke-ModuleWrite; a
+            module call that ended through break without a warning now counts as failed, so
+            a retired app is no longer renamed after one. An inventory entry without a name
+            is skipped instead of throwing.
 
         3.0.2 - 2026-09-28
             File detection rules work. The rule's path was split with System.IO.Path, which
