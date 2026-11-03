@@ -1819,19 +1819,47 @@ function Invoke-Win32AppAssignment {
         -UseLocalTime $UseLocalTime -AvailableTime $AvailableTime -DeadlineTime $DeadlineTime `
         -EnableAutoUpdate:$EnableAutoUpdate
 
+    # No -MaximumRetryCount: PowerShell retries a POST on 4xx and 5xx as well, so one the server
+    # had already completed would be made again - a duplicate assignment, or a 400 that reports
+    # a ring as unassigned when it is assigned.
     try {
         $response = Invoke-RestMethod -Method Post `
             -Uri  "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments" `
             -Headers $headers -Body ($body | ConvertTo-Json -Depth 20) `
-            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            -ErrorAction Stop
     }
     catch {
         # The raw REST path surfaces a real exception where the module only warned; make sure
         # the Graph message in clear text reaches the operator.
         $graphMessage = Get-GraphErrorMessage -ErrorRecord $PSItem
-        Write-Warning "Assignment to group $GroupId$where failed: $graphMessage"
-        Write-Warning "Assign the app to $GroupId manually in the Intune portal."
-        return $false
+
+        # An error does not show the assignment is missing (a timeout can follow a request the
+        # server completed), so read the assignments back before reporting the result
+        $existing = $null
+        try {
+            $listed = Invoke-RestMethod -Method Get `
+                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments" `
+                -Headers $headers -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            $listedProp = $listed.PSObject.Properties["value"]
+            $existing = @($listedProp ? $listedProp.Value : @()) | Where-Object {
+                $targetProp = $_.PSObject.Properties["target"]
+                $groupProp  = ($targetProp -and $targetProp.Value) ? $targetProp.Value.PSObject.Properties["groupId"] : $null
+                $typeProp   = ($targetProp -and $targetProp.Value) ? $targetProp.Value.PSObject.Properties["@odata.type"] : $null
+                $groupProp -and [string]$groupProp.Value -eq $GroupId -and
+                    (-not $typeProp -or [string]$typeProp.Value -notmatch 'exclusion')
+            } | Select-Object -First 1
+        }
+        catch {
+            Write-Warning "Could not read the assignments of app $AppId back after the failed request: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
+        }
+
+        if (-not $existing) {
+            Write-Warning "Assignment to group $GroupId$where failed: $graphMessage"
+            Write-Warning "Assign the app to $GroupId manually in the Intune portal."
+            return $false
+        }
+        Write-Warning "The request to assign group $GroupId$where reported an error ($graphMessage), but the assignment exists; treating it as assigned."
+        $response = $existing
     }
 
     $availableText = $AvailableTime ? (ConvertTo-Win32AssignmentDate -Value $AvailableTime) : "immediately"
