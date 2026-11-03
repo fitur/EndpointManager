@@ -1035,29 +1035,60 @@ function Get-ClientCertificate {
     return $null
 }
 
+function Get-AccessTokenClaim {
+    <#
+    .SYNOPSIS
+        Returns the claims of a bearer token as an object, or $null when they cannot be read.
+        The signature is not checked; this only reads what the token says about itself.
+    #>
+    [OutputType([pscustomobject])]
+    param (
+        [Parameter(Mandatory)][string]$Authorization
+    )
+    $parts = ($Authorization -replace '^Bearer\s+', '').Split('.')
+    if ($parts.Count -lt 2) { return $null }
+    $payload = $parts[1].Replace('-', '+').Replace('_', '/')
+    $payload = $payload.PadRight($payload.Length + (4 - $payload.Length % 4) % 4, '=')
+    try {
+        return [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload)) |
+            ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return $null
+    }
+}
+
 function Get-AccessTokenTenantId {
     <#
     .SYNOPSIS
         Returns the tid claim of a bearer token, or an empty string when it cannot be read.
-        The signature is not checked; this only tells which tenant the token was issued for.
+        This only tells which tenant the token was issued for.
     #>
     [OutputType([string])]
     param (
         [Parameter(Mandatory)][string]$Authorization
     )
-    $parts = ($Authorization -replace '^Bearer\s+', '').Split('.')
-    if ($parts.Count -lt 2) { return "" }
-    $payload = $parts[1].Replace('-', '+').Replace('_', '/')
-    $payload = $payload.PadRight($payload.Length + (4 - $payload.Length % 4) % 4, '=')
-    try {
-        $claims = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload)) |
-            ConvertFrom-Json -ErrorAction Stop
-    }
-    catch {
-        return ""
-    }
-    $tidProp = $claims.PSObject.Properties["tid"]
+    $claims = Get-AccessTokenClaim -Authorization $Authorization
+    $tidProp = $claims ? $claims.PSObject.Properties["tid"] : $null
     return $tidProp ? ([string]$tidProp.Value).ToLowerInvariant() : ""
+}
+
+function Get-AccessTokenRemaining {
+    <#
+    .SYNOPSIS
+        Returns how long a bearer token is still valid (from its exp claim), or $null when
+        that cannot be read.
+    #>
+    [OutputType([nullable[timespan]])]
+    param (
+        [Parameter(Mandatory)][string]$Authorization
+    )
+    $claims  = Get-AccessTokenClaim -Authorization $Authorization
+    $expProp = $claims ? $claims.PSObject.Properties["exp"] : $null
+    if (-not $expProp) { return $null }
+    $expiry = $null
+    try { $expiry = [datetimeoffset]::FromUnixTimeSeconds([long]$expProp.Value) } catch { return $null }
+    return $expiry - [datetimeoffset]::UtcNow
 }
 
 function Get-Win32AppInventory {
@@ -2769,11 +2800,45 @@ if ($appId) {
 
 #region Step 8 - Supersede the previous version
 
+# Uploading a large package can use most of the token's life. Steps 8 and 10 make several calls
+# each, and a token that runs out in the middle of retirement leaves apps half retired, so both
+# check first and reconnect when less than ten minutes remain. A token whose lifetime cannot be
+# read is used as it is. False means the lifetime is short and a reconnect did not fix it.
+$ensureFreshToken = {
+    $minimum = [timespan]::FromMinutes(10)
+    $header  = Get-Variable -Name AuthenticationHeader -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    $left    = $header ? (Get-AccessTokenRemaining -Authorization $header.Authorization) : [timespan]::Zero
+    if ($null -eq $left -or $left -gt $minimum) { return $true }
+
+    Write-Warning "The access token has $([math]::Max(0, [int]$left.TotalMinutes)) minute(s) left; connecting again."
+    try {
+        foreach ($breakGuard in 1) {
+            if ($clientCertificate) {
+                Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientCert $clientCertificate | Out-Null
+            }
+            else {
+                Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
+            }
+        }
+    }
+    catch {
+        Write-Warning "Connecting again failed: $($PSItem.Exception.Message)"
+    }
+    $header = Get-Variable -Name AuthenticationHeader -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    $left   = $header ? (Get-AccessTokenRemaining -Authorization $header.Authorization) : [timespan]::Zero
+    return ($null -eq $left -or $left -gt $minimum)
+}
+
 $supersedenceConfigured = $false
 $keptApp                = $null
 $supersedeCandidates    = @()
 
-if ($appId -and $uploadVerified) {
+$tokenFresh = $true
+if ($appId -and $uploadVerified) { $tokenFresh = & $ensureFreshToken }
+if ($appId -and $uploadVerified -and -not $tokenFresh) {
+    Write-Warning "Supersedence is skipped: the access token is about to expire and connecting again did not help. The upload succeeded; set the supersedence in the Intune portal. A rerun is refused while the app exists."
+}
+elseif ($appId -and $uploadVerified) {
     Write-Host "`n=== Step 8: Supersedence ===" -ForegroundColor Cyan
     try {
         # Both naming conventions: the resolved name and the "<Vendor> <Name>" fallback, so
@@ -2939,6 +3004,9 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
     # The Step 6 confirmation was for the upload; retiring other apps gets its own
     elseif (-not $PSCmdlet.ShouldProcess(($retireSet.DisplayName -join ", "), "Retire: remove supersedence and assignments, rename to (TBD)")) {
         Write-Warning "Retirement declined; the earlier versions are left unchanged."
+    }
+    elseif (-not (& $ensureFreshToken)) {
+        Write-Warning "Retirement is skipped: the access token is about to expire and connecting again did not help. Retiring with a token that runs out would leave versions half retired. Retire the earlier versions in the portal."
     }
     else {
         Write-Host "`n=== Step 10: Retirement ===" -ForegroundColor Cyan

@@ -331,6 +331,11 @@ If a version newer than the one being uploaded already exists under the same nam
 skips supersedence and retirement with a warning: superseding the older versions would leave
 both deployed. The upload itself is not stopped.
 
+Before supersedence and before retirement the script checks how long the access token has
+left. With less than ten minutes it connects again; if that does not help, supersedence or
+retirement is skipped with a warning, so a token that runs out mid-way cannot leave versions
+half retired.
+
 The keep decision needs the assignment state of every earlier version. If any of those
 lookups fails, the run skips supersedence and retirement rather than guess.
 
