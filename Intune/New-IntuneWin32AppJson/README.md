@@ -297,6 +297,9 @@ $result.AppId
 | `SupersededApp` | The earlier version kept and superseded (name + id), or `$null` |
 | `RetiredApps` | Earlier versions retired by `-RetireSuperseded` |
 | `UploadVerified` | Whether the upload was confirmed to have committed content |
+| `ReturnCodePatched` | Whether return code 1641 was corrected to `softReboot` |
+| `SupersedenceConfigured` | Whether the supersedence relation was actually set. `SupersededApp` only names the version chosen |
+| `RetireFailed` | Earlier versions `-RetireSuperseded` could not fully retire (name + id), left under their own name |
 
 ### Version lifecycle
 

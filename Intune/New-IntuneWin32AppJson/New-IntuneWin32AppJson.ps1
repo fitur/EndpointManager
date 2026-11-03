@@ -143,8 +143,9 @@
 
 .OUTPUTS
     PSCustomObject with DisplayName, AppId, JsonPath, DetectionType, DescriptionFound,
-    AssignedGroupId, PilotGroupId, ProductionGroupId, SupersededApp, RetiredApps and
-    UploadVerified. AppId is $null under -WhatIf.
+    AssignedGroupId, PilotGroupId, ProductionGroupId, SupersededApp, RetiredApps,
+    UploadVerified, ReturnCodePatched, SupersedenceConfigured and RetireFailed. AppId is
+    $null under -WhatIf.
 
 .EXAMPLE
     .\New-IntuneWin32AppJson.ps1 -AppPath "C:\AppTest\MyApp_1.0.zip"
@@ -2490,6 +2491,7 @@ Write-Host "`n=== Step 6: Upload to Intune ===" -ForegroundColor Cyan
 
 $appId        = $null
 $appInventory = @()
+$returnCodePatched = $false
 
 # ShouldProcess returns $false under -WhatIf, which skips authentication as well as the upload
 if (-not $PSCmdlet.ShouldProcess($displayName, "Upload Win32 app to Intune")) {
@@ -2656,6 +2658,7 @@ else {
                     -MaximumRetryCount 3 `
                     -RetryIntervalSec  5 | Out-Null
 
+                $returnCodePatched = $true
                 Write-Host "Return code 1641 patched to softReboot." -ForegroundColor Green
             }
             catch {
@@ -2864,6 +2867,7 @@ elseif (($singleGroupMode -or $ringMode) -and $WhatIfPreference) {
 #region Step 10 - Retire superseded versions
 
 $retiredApps = @()
+$retireFailedApps = @()
 
 if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
     $retireSet = @($supersedeCandidates | Where-Object { $_.Id -ne $keptApp.Id })
@@ -2950,6 +2954,7 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
 
             if ($retireAppFailed) {
                 $retireFailureCount++
+                $retireFailedApps += [pscustomobject]@{ DisplayName = $retireApp.DisplayName; Id = $retireApp.Id }
                 Write-Warning "Retirement of '$($retireApp.DisplayName)' ($($retireApp.Id)) did not fully complete; continuing with the next app."
             }
             else {
@@ -2999,15 +3004,18 @@ elseif (Test-Path -Path $tempDir) {
 
 # Structured result so the script can be consumed by other tooling
 [pscustomobject]@{
-    DisplayName       = $displayName
-    AppId             = $appId
-    JsonPath          = $outputPath
-    DetectionType     = $detectionOdataType
-    DescriptionFound  = $descResult.Found
-    AssignedGroupId   = $assignedGroupId
-    PilotGroupId      = $pilotGroupAssigned
-    ProductionGroupId = $productionGroupAssigned
-    SupersededApp     = $keptApp ? ([pscustomobject]@{ DisplayName = $keptApp.DisplayName; Id = $keptApp.Id }) : $null
-    RetiredApps       = $retiredApps
-    UploadVerified    = $uploadVerified
+    DisplayName            = $displayName
+    AppId                  = $appId
+    JsonPath               = $outputPath
+    DetectionType          = $detectionOdataType
+    DescriptionFound       = $descResult.Found
+    AssignedGroupId        = $assignedGroupId
+    PilotGroupId           = $pilotGroupAssigned
+    ProductionGroupId      = $productionGroupAssigned
+    SupersededApp          = $keptApp ? ([pscustomobject]@{ DisplayName = $keptApp.DisplayName; Id = $keptApp.Id }) : $null
+    RetiredApps            = $retiredApps
+    UploadVerified         = $uploadVerified
+    ReturnCodePatched      = $returnCodePatched
+    SupersedenceConfigured = $supersedenceConfigured
+    RetireFailed           = $retireFailedApps
 }
