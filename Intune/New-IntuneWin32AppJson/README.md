@@ -299,9 +299,13 @@ while leaving `7-Zip 27.00`, `7-Zip Pro 26.01`, `My 7-Zip 26.01` and a plain `7-
 Both naming conventions are checked so apps uploaded before a `displayName` override existed
 are still recognised.
 
-Of the candidates, one is kept and superseded against: the highest version that still has an
-assignment. A half-finished earlier run can leave a higher version with no assignments, and
-superseding - then retiring - that one would drop the version actually deployed.
+Of the candidates, one is kept and superseded against: the highest version that still has a
+`required` or `available` include assignment. Uninstall and exclusion assignments do not
+count as deployed. A half-finished earlier run can leave a higher version with no
+assignments, and superseding - then retiring - that one would drop the version actually
+deployed. If a higher version has only uninstall or exclusion assignments, as after a
+rollback, it is unclear which version is deployed, so supersedence and retirement are skipped
+for that run.
 
 The keep decision needs the assignment state of every earlier version. If any of those
 lookups fails, the run skips supersedence and retirement rather than guess.
