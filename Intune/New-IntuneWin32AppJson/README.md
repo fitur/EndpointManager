@@ -312,6 +312,10 @@ deployed. If a higher version has only uninstall or exclusion assignments, as af
 rollback, it is unclear which version is deployed, so supersedence and retirement are skipped
 for that run.
 
+If a version newer than the one being uploaded already exists under the same name, the run
+skips supersedence and retirement with a warning: superseding the older versions would leave
+both deployed. The upload itself is not stopped.
+
 The keep decision needs the assignment state of every earlier version. If any of those
 lookups fails, the run skips supersedence and retirement rather than guess.
 

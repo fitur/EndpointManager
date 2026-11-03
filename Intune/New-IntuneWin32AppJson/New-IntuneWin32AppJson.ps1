@@ -1080,7 +1080,9 @@ function Select-SupersedableApp {
         [Parameter(Mandatory)][AllowEmptyString()][string[]]$NameBases,
         [Parameter(Mandatory)][string]$NewVersion,
         [Parameter(Mandatory)][AllowEmptyString()][string]$ExcludeId,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AllApps
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$AllApps,
+        # Return the apps strictly newer than the new version instead of the earlier ones
+        [switch]$Newer
     )
 
     $newParsed = $null
@@ -1104,7 +1106,7 @@ function Select-SupersedableApp {
                 Write-Verbose "Skipping '$($app.displayName)': version not comparable."
                 continue
             }
-            if ($oldParsed -ge $newParsed) { continue }
+            if ($Newer ? ($oldParsed -le $newParsed) : ($oldParsed -ge $newParsed)) { continue }
 
             [pscustomobject]@{ Id = $app.id; DisplayName = $app.displayName; Version = $oldParsed }
             break
@@ -2627,8 +2629,16 @@ if ($appId -and $uploadVerified) {
 
         $supersedeCandidates = Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
                                                       -ExcludeId $appId -AllApps $appInventory
+        $newerApps = Select-SupersedableApp -NameBases $nameBases -NewVersion $appVersion `
+                                            -ExcludeId $appId -AllApps $appInventory -Newer
 
-        if ($supersedeCandidates.Count -eq 0) {
+        # Superseding the earlier versions while a newer one exists would leave both deployed,
+        # and the newer one is the one that should be kept. Nothing here shows which is right,
+        # so supersedence and retirement are skipped (Step 10 reports the skipped retirement).
+        if ($newerApps.Count -gt 0) {
+            Write-Warning "'$($newerApps[0].DisplayName)' already exists and is newer than $appVersion. Supersedence and retirement are skipped for this run."
+        }
+        elseif ($supersedeCandidates.Count -eq 0) {
             Write-Host "No earlier versions found."
         }
         else {
