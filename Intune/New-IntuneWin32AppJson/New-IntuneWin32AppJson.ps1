@@ -1150,6 +1150,41 @@ function Get-AccessTokenRemaining {
     return $expiry - [datetimeoffset]::UtcNow
 }
 
+function Invoke-GraphRequest {
+    <#
+    .SYNOPSIS
+        One Microsoft Graph call with the session's bearer token, throwing on any failure.
+
+    .DESCRIPTION
+        GET and PATCH are retried three times, 5 s apart. PowerShell's retry covers 4xx and 5xx
+        alike, which is harmless for a read or a PATCH that sets fixed values, but a POST the
+        server had already completed would be made again, so a POST is never retried. The
+        token is read from the variable the IntuneWin32App module sets.
+    #>
+    [OutputType([object])]
+    param (
+        [Parameter()][ValidateSet("Get", "Post", "Patch")][string]$Method = "Get",
+        [Parameter(Mandatory)][string]$Uri,
+        [Parameter()][string]$Body
+    )
+    $header  = Get-Variable -Name AuthenticationHeader -Scope Global -ValueOnly -ErrorAction Stop
+    $request = @{
+        Method      = $Method
+        Uri         = $Uri
+        Headers     = @{ Authorization = $header.Authorization }
+        ErrorAction = "Stop"
+    }
+    if ($Body) {
+        $request["Body"] = $Body
+        $request["Headers"]["Content-Type"] = "application/json"
+    }
+    if ($Method -ne "Post") {
+        $request["MaximumRetryCount"] = 3
+        $request["RetryIntervalSec"]  = 5
+    }
+    return Invoke-RestMethod @request
+}
+
 function Get-Win32AppInventory {
     <#
     .SYNOPSIS
@@ -1173,9 +1208,7 @@ function Get-Win32AppInventory {
     $apps = [System.Collections.Generic.List[pscustomobject]]::new()
 
     while ($uri) {
-        $response = Invoke-RestMethod -Uri $uri -Method Get `
-            -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
-            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+        $response = Invoke-GraphRequest -Uri $uri
 
         foreach ($item in $response.value) { $apps.Add($item) }
         $uri = $response.PSObject.Properties.Name -contains "@odata.nextLink" ? $response.'@odata.nextLink' : $null
@@ -1908,7 +1941,6 @@ function Invoke-Win32AppAssignment {
     )
 
     $where   = $RingLabel ? " ($RingLabel ring)" : ""
-    $headers = @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" }
 
     $body = New-Win32AppAssignmentBody -Intent $Intent -GroupId $GroupId -Notification $Notification `
         -UseLocalTime $UseLocalTime -AvailableTime $AvailableTime -DeadlineTime $DeadlineTime `
@@ -1918,10 +1950,9 @@ function Invoke-Win32AppAssignment {
     # had already completed would be made again - a duplicate assignment, or a 400 that reports
     # a ring as unassigned when it is assigned.
     try {
-        $response = Invoke-RestMethod -Method Post `
+        $response = Invoke-GraphRequest -Method Post `
             -Uri  "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments" `
-            -Headers $headers -Body ($body | ConvertTo-Json -Depth 20) `
-            -ErrorAction Stop
+            -Body ($body | ConvertTo-Json -Depth 20)
     }
     catch {
         # The raw REST path surfaces a real exception where the module only warned; make sure
@@ -1932,9 +1963,8 @@ function Invoke-Win32AppAssignment {
         # server completed), so read the assignments back before reporting the result
         $existing = $null
         try {
-            $listed = Invoke-RestMethod -Method Get `
-                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments" `
-                -Headers $headers -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            $listed = Invoke-GraphRequest `
+                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments"
             $listedProp = $listed.PSObject.Properties["value"]
             $existing = @($listedProp ? $listedProp.Value : @()) | Where-Object {
                 $targetProp = $_.PSObject.Properties["target"]
@@ -1970,10 +2000,8 @@ function Invoke-Win32AppAssignment {
     $autoUpdateState = ""
     if ($assignmentId) {
         try {
-            $check = Invoke-RestMethod -Method Get `
-                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments/$assignmentId" `
-                -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
-                -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            $check = Invoke-GraphRequest `
+                -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments/$assignmentId"
 
             $settingsProp = $check.PSObject.Properties["settings"]
             if ($settingsProp -and $settingsProp.Value) {
@@ -2027,8 +2055,6 @@ function Select-SupersedenceTarget {
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Inventory
     )
 
-    $authHeader = @{ Authorization = $Global:AuthenticationHeader.Authorization }
-
     $createdById = @{}
     foreach ($inventoryApp in $Inventory) {
         $idProp      = $inventoryApp.PSObject.Properties["id"]
@@ -2047,9 +2073,8 @@ function Select-SupersedenceTarget {
     for ($offset = 0; $offset -lt $candidateIds.Count; $offset += 25) {
         $chunk = @($candidateIds[$offset..([math]::Min($offset + 24, $candidateIds.Count - 1))])
         try {
-            $expandResponse = Invoke-RestMethod -Method Get `
-                -Uri ("https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$filter=id in ({0})&`$select=id&`$expand=assignments" -f (($chunk | ForEach-Object { "'$_'" }) -join ",")) `
-                -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+            $expandResponse = Invoke-GraphRequest `
+                -Uri ("https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$filter=id in ({0})&`$select=id&`$expand=assignments" -f (($chunk | ForEach-Object { "'$_'" }) -join ","))
             $expandValue = $expandResponse.PSObject.Properties["value"]
             foreach ($expandedApp in @($expandValue ? $expandValue.Value : @())) {
                 $expandedId          = $expandedApp.PSObject.Properties["id"]
@@ -2073,9 +2098,8 @@ function Select-SupersedenceTarget {
                 $assignmentResponse = [pscustomobject]@{ value = $expanded[[string]$item.Id] }
             }
             else {
-                $assignmentResponse = Invoke-RestMethod -Method Get `
-                    -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)/assignments" `
-                    -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+                $assignmentResponse = Invoke-GraphRequest `
+                    -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)/assignments"
             }
             if ($assignmentResponse.PSObject.Properties["value"]) {
                 $assignments     = @($assignmentResponse.value)
@@ -2198,10 +2222,8 @@ function Remove-KeptAppSupersedence {
     )
 
     try {
-        $response = Invoke-RestMethod -Method Get `
-            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$KeptAppId/relationships" `
-            -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
-            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+        $response = Invoke-GraphRequest `
+            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$KeptAppId/relationships"
     }
     catch {
         Write-Warning "Could not read the relationships of kept app ${KeptAppId}: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
@@ -2852,14 +2874,10 @@ else {
             # Separate try/catch: the app already exists in Intune at this point, so a failed
             # patch must not be reported as an upload failure - a rerun would create a duplicate.
             try {
-                # Reuse the authentication header established by Connect-MSIntuneGraph
-                Invoke-RestMethod `
-                    -Uri               "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId" `
-                    -Method            Patch `
-                    -Headers           @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" } `
-                    -Body              $patchBody `
-                    -MaximumRetryCount 3 `
-                    -RetryIntervalSec  5 | Out-Null
+                # Reuses the authentication header established by Connect-MSIntuneGraph
+                Invoke-GraphRequest -Method Patch `
+                    -Uri  "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId" `
+                    -Body $patchBody | Out-Null
 
                 $returnCodePatched = $true
                 Write-Host "Return code 1641 patched to softReboot." -ForegroundColor Green
@@ -2891,10 +2909,8 @@ if ($appId) {
         # No $select: committedContentVersion lives on the derived mobileLobApp type and the
         # mobileApps collection is typed mobileApp, so selecting it fails with 400 on every app.
         # The unselected GET returns the full win32LobApp, derived properties included.
-        $verifyResponse = Invoke-RestMethod -Method Get `
-            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId" `
-            -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization } `
-            -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
+        $verifyResponse = Invoke-GraphRequest `
+            -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appId"
 
         $stateProp     = $verifyResponse.PSObject.Properties["publishingState"]
         $contentProp   = $verifyResponse.PSObject.Properties["committedContentVersion"]
@@ -3168,10 +3184,9 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
                         "@odata.type" = "#microsoft.graph.win32LobApp"
                         "displayName" = "$($retireApp.DisplayName) (TBD)"
                     } | ConvertTo-Json -Depth 20
-                    Invoke-RestMethod -Method Patch `
+                    Invoke-GraphRequest -Method Patch `
                         -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($retireApp.Id)" `
-                        -Headers @{ Authorization = $Global:AuthenticationHeader.Authorization; "Content-Type" = "application/json" } `
-                        -Body $renameBody -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop | Out-Null
+                        -Body $renameBody | Out-Null
                 }
                 catch {
                     Write-Warning "Renaming '$($retireApp.DisplayName)' ($($retireApp.Id)) to '(TBD)' failed: $(Get-GraphErrorMessage -ErrorRecord $PSItem)"
