@@ -250,6 +250,13 @@ deadline.
 
 If today happens to be a Patch Tuesday, the next month is used rather than the same day.
 
+**Times are the clock of the machine running the script.** With the default
+`-UseLocalTime $true` the clock components are sent as given, so each device reads them as its
+own local time. That covers `-AvailableTime`, `-DeadlineTime`, the Patch Tuesday times and the
+ring schedule (`now + -ProductionDelayHours`). A script running in UTC against devices in
+CET/CEST therefore starts an hour or two earlier, by the devices' clocks, than "now + 24 h"
+suggests. Run it on a host in the devices' time zone, or pass explicit times.
+
 ### Ring rollout
 
 Set both `-PilotGroupId` and `-ProductionGroupId` (or `pilotGroupId` / `productionGroupId` in
