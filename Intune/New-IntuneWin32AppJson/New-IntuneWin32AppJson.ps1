@@ -190,9 +190,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        3.0.2
+    Version:        3.1.0
     Creation Date:  2026-05-07
-    Last Updated:   2026-09-28
+    Last Updated:   2026-11-03
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -201,6 +201,34 @@
     as an Application permission with admin consent.
 
     CHANGELOG
+
+        3.1.0 - 2026-11-03
+            Fixes from a review of 3.0.2. The package may now carry ApplicationInformation.md
+            instead of .txt: the values are the bold text on bullet lines, Publisher stands in
+            for Vendor and the detection type and string are separate lines. A package with
+            both files, a label that occurs twice, an unknown detection type, or a declared
+            type that disagrees with what the detection string parses as (also for .txt)
+            stops the run before anything is written, as does a package with more than one
+            .intunewin file - the first one used to be uploaded under the new version's name.
+            A detection string with a doubled backslash is refused instead of becoming a rule
+            that never detects. The keep decision counts only required and available include
+            assignments as deployed: a rolled-back version with an uninstall assignment used
+            to be kept while the deployed one was retired, and where a newer version has only
+            such assignments supersedence and retirement are skipped. They are also skipped
+            when a newer version of the same name already exists. Retirement no longer renames
+            an app to (TBD) after its supersedence or assignments failed to clear, which hid
+            it from every later run while it stayed assigned. A No to -Confirm on the kept
+            app's supersedence cleanup is no longer reported as success, and retirement has
+            its own prompt. An unreadable descriptions file stops the run before upload
+            instead of publishing under the fallback name, which the duplicate check did not
+            know; -WhatIf only warns. The token is checked before anything is uploaded: the
+            session's old header is removed before connecting, a connect that returns no
+            token stops the run, and the token's tid claim must match a GUID TenantID. The
+            duplicate check also treats 7-Zip 26.5 as 7-Zip 26.05, and versions are compared
+            with missing components filled in, so 1.0 no longer counts as earlier than 1.0.0.
+            A name that differs only in case from an earlier version is reported, a failed
+            run says where the extracted files were left, and step 8 prints the names it
+            searches for. customers.json is now in .gitignore.
 
         3.0.2 - 2026-09-28
             File detection rules work. The rule's path was split with System.IO.Path, which
