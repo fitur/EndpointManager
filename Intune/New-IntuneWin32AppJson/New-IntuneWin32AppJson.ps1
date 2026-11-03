@@ -6,13 +6,14 @@
 
 .DESCRIPTION
     The script accepts a path to a zip file, extracts it to a temporary directory
-    alongside the zip file, reads ApplicationInformation.txt, and retrieves the
+    alongside the zip file, reads ApplicationInformation.txt or .md, and retrieves the
     intunewin and png files. A JSON file in Intune Graph API format (UTF-16 LE)
     is written to the extracted application directory, and the app is uploaded to
     Intune via the IntuneWin32App module using non-interactive client credentials.
 
     Supported detection rule formats in ApplicationInformation.txt
-    (declared as DetectionMethod.(REG), DetectionMethod.(MSI) or DetectionMethod.(FILE)):
+    (declared as DetectionMethod.(REG), DetectionMethod.(MSI) or DetectionMethod.(FILE)),
+    or in ApplicationInformation.md (Detection type REG, MSI or FILE and a Detection string):
       Registry : HKEY_LOCAL_MACHINE\...\KeyPath\ValueName >= 1.0.0
                  Short hives HKLM, HKCU, HKCR, HKU and HKCC are also accepted.
       File     : %ProgramFiles%\App\file.exe >= 1.0.0
@@ -1131,6 +1132,33 @@ function Get-AppInfoValue {
     return $null
 }
 
+function Get-AppInfoMarkdownValue {
+    <#
+    .SYNOPSIS
+        Reads a value from ApplicationInformation.md, the Markdown form of the file.
+        Returns $null if the label is not present or its value is n/a or None.
+
+    .DESCRIPTION
+        Each value is the bold text at the end of a bullet line:
+          * Application - Name          **7Zip**
+        Markdown backslash escapes are deliberately not undone: a detection path such as
+        ...\Uninstall\{GUID} would lose its backslash before the brace. A label that occurs
+        more than once throws, since picking one of the values would be a guess.
+    #>
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
+        [Parameter(Mandatory)][string]$Label
+    )
+    $found = [regex]::Matches($Content, "(?m)^\s*[*-]\s+$([regex]::Escape($Label))\s+\*\*(.*)\*\*\s*$")
+    if ($found.Count -gt 1) {
+        throw "'$Label' occurs $($found.Count) times in ApplicationInformation.md."
+    }
+    if ($found.Count -eq 0) { return $null }
+    $value = $found[0].Groups[1].Value.Trim()
+    return ($value -in "", "n/a", "None") ? $null : $value
+}
+
 function ConvertTo-MB {
     <#
     .SYNOPSIS
@@ -2069,15 +2097,18 @@ catch {
 Write-Host "`n=== Step 3: Files ===" -ForegroundColor Cyan
 
 try {
-    # Skip macOS metadata folders (__MACOSX) and prefer the directory that actually
-    # contains ApplicationInformation.txt
+    # Skip macOS metadata folders (__MACOSX) and prefer the directory that actually contains
+    # ApplicationInformation. Packagers moved from the .txt to a Markdown .md; both are read,
+    # and -in compares case-insensitively, as -Filter did.
+    $appInfoNames  = "ApplicationInformation.txt", "ApplicationInformation.md"
+    $findAppInfo   = { param($dir) Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -in $appInfoNames } }
     $candidateDirs = @(Get-ChildItem -Path $tempDir -Directory | Where-Object { $_.Name -ne "__MACOSX" })
     $unzippedDir   = $candidateDirs |
-        Where-Object { Test-Path -Path (Join-Path $_.FullName "ApplicationInformation.txt") } |
+        Where-Object { @(& $findAppInfo $_.FullName).Count -gt 0 } |
         Select-Object -First 1
 
     # Zips built without a wrapping folder put the files straight in the root
-    if (-not $unzippedDir -and (Test-Path -Path (Join-Path $tempDir "ApplicationInformation.txt"))) {
+    if (-not $unzippedDir -and @(& $findAppInfo $tempDir).Count -gt 0) {
         $unzippedDir = Get-Item -Path $tempDir
     }
 
@@ -2087,7 +2118,12 @@ try {
     }
     Write-Host "Extracted directory: $($unzippedDir.FullName)"
 
-    $appInfoFile   = Get-ChildItem -Path $unzippedDir.FullName -Filter "ApplicationInformation.txt" | Select-Object -First 1
+    $appInfoFiles  = @(& $findAppInfo $unzippedDir.FullName)
+    # Both forms in one package means choosing between two sets of values; refuse instead
+    if ($appInfoFiles.Count -gt 1) {
+        throw "Both $($appInfoFiles.Name -join ' and ') found in $($unzippedDir.FullName). Keep one."
+    }
+    $appInfoFile   = $appInfoFiles | Select-Object -First 1
     $intunewinFiles = @(Get-ChildItem -Path $unzippedDir.FullName -Filter "*.intunewin")
     # Picking the first of several would publish whichever sorts first - an old build under the
     # new version's name, which then supersedes and retires the version that works
@@ -2097,7 +2133,7 @@ try {
     $intunewinFile = $intunewinFiles | Select-Object -First 1
     $pngFile      = Get-ChildItem -Path $unzippedDir.FullName -Filter "*.png" | Select-Object -First 1
 
-    if (-not $appInfoFile)   { throw "ApplicationInformation.txt not found in $($unzippedDir.FullName)" }
+    if (-not $appInfoFile)   { throw "ApplicationInformation.txt or .md not found in $($unzippedDir.FullName)" }
     if (-not $intunewinFile) { throw "No .intunewin file found in $($unzippedDir.FullName)" }
 
     Write-Host "ApplicationInformation : $($appInfoFile.Name)"
@@ -2111,25 +2147,45 @@ catch {
 
 #endregion
 
-#region Step 4 - Read and parse ApplicationInformation.txt
+#region Step 4 - Read and parse ApplicationInformation
 
-Write-Host "`n=== Step 4: ApplicationInformation.txt ===" -ForegroundColor Cyan
+Write-Host "`n=== Step 4: ApplicationInformation ($($appInfoFile.Extension)) ===" -ForegroundColor Cyan
 
 try {
     $appInfo = Read-TextFileSmart -Path $appInfoFile.FullName
+    $declaredDetectionType = $null
 
-    $vendor       = Get-AppInfoValue -Content $appInfo -Label "Application - Vendor"
-    $appName      = Get-AppInfoValue -Content $appInfo -Label "Application - Name"
-    $appVersion   = Get-AppInfoValue -Content $appInfo -Label "Application - Version"
-    $installCmd   = Get-AppInfoValue -Content $appInfo -Label "Install command"
-    $uninstallCmd = Get-AppInfoValue -Content $appInfo -Label "Uninstall command"
-    $diskSpace    = Get-AppInfoValue -Content $appInfo -Label "Estimated Disk Space"
+    if ($appInfoFile.Extension -eq ".md") {
+        # Same values as the .txt, under the Markdown form's labels: Publisher instead of Vendor,
+        # the disk unit in the label, and the detection type and string on separate lines
+        $vendor       = Get-AppInfoMarkdownValue -Content $appInfo -Label "Application - Publisher"
+        $appName      = Get-AppInfoMarkdownValue -Content $appInfo -Label "Application - Name"
+        $appVersion   = Get-AppInfoMarkdownValue -Content $appInfo -Label "Application - Version"
+        $installCmd   = Get-AppInfoMarkdownValue -Content $appInfo -Label "Install command"
+        $uninstallCmd = Get-AppInfoMarkdownValue -Content $appInfo -Label "Uninstall command"
+        $diskValue    = Get-AppInfoMarkdownValue -Content $appInfo -Label "Disk space required (MB)"
+        $diskSpace    = $diskValue ? "$diskValue MB" : $null
 
-    # Detection method may be declared as REG, MSI or FILE - use whichever is present
-    $detectionMethod = $null
-    foreach ($detectionLabel in "REG", "MSI", "FILE") {
-        $detectionMethod = Get-AppInfoValue -Content $appInfo -Label "DetectionMethod\.\($detectionLabel\)"
-        if ($detectionMethod) { break }
+        $declaredDetectionType = Get-AppInfoMarkdownValue -Content $appInfo -Label "Detection type"
+        if ($declaredDetectionType -and $declaredDetectionType -notin "REG", "MSI", "FILE") {
+            throw "Detection type '$declaredDetectionType' is not REG, MSI or FILE."
+        }
+        $detectionMethod = Get-AppInfoMarkdownValue -Content $appInfo -Label "Detection string"
+    }
+    else {
+        $vendor       = Get-AppInfoValue -Content $appInfo -Label "Application - Vendor"
+        $appName      = Get-AppInfoValue -Content $appInfo -Label "Application - Name"
+        $appVersion   = Get-AppInfoValue -Content $appInfo -Label "Application - Version"
+        $installCmd   = Get-AppInfoValue -Content $appInfo -Label "Install command"
+        $uninstallCmd = Get-AppInfoValue -Content $appInfo -Label "Uninstall command"
+        $diskSpace    = Get-AppInfoValue -Content $appInfo -Label "Estimated Disk Space"
+
+        # Detection method may be declared as REG, MSI or FILE - use whichever is present
+        $detectionMethod = $null
+        foreach ($detectionLabel in "REG", "MSI", "FILE") {
+            $detectionMethod = Get-AppInfoValue -Content $appInfo -Label "DetectionMethod\.\($detectionLabel\)"
+            if ($detectionMethod) { $declaredDetectionType = $detectionLabel; break }
+        }
     }
 
     $missingFields = @()
@@ -2141,7 +2197,7 @@ try {
     if (-not $detectionMethod) { $missingFields += "DetectionMethod.(REG/MSI/FILE)" }
 
     if ($missingFields.Count -gt 0) {
-        throw "Missing required fields in ApplicationInformation.txt: $($missingFields -join ', ')"
+        throw "Missing required fields in $($appInfoFile.Name): $($missingFields -join ', ')"
     }
 
     Write-Host "Vendor   : $vendor"
@@ -2153,7 +2209,7 @@ try {
     Write-Host "Disk     : $($diskSpace ?? '(not specified)')"
 }
 catch {
-    throw "Error while parsing ApplicationInformation.txt: $($PSItem.Exception.Message)"
+    throw "Error while parsing ApplicationInformation: $($PSItem.Exception.Message)"
 }
 
 #endregion
@@ -2178,12 +2234,23 @@ try {
     if ($descResult.LoadFailed -and -not $WhatIfPreference) {
         throw "The descriptions file could not be loaded from '$DescriptionsPath'. The app name depends on it, so nothing is uploaded. Fix the source or point -DescriptionsPath at a local copy."
     }
-    $appDescription    = $descResult.Description
+    $appDescription     = $descResult.Description
     $displayName        = $descResult.DisplayName ? "$($descResult.DisplayName) $appVersion" : $defaultDisplayName
     # notes: "Base Application <date>" when the app is known in IntuneAppDescriptions.json, otherwise just the date
     $appNotes       = $descResult.Found ? "Base Application $today" : $today
 
     $parsed = ConvertFrom-DetectionRule -DetectionString $detectionMethod
+
+    # The parser classifies by the string's shape; a declared type that disagrees means the
+    # packager meant something else, and a wrong rule uploads without error and never detects
+    $expectedOdataType = @{
+        REG  = "#microsoft.graph.win32LobAppRegistryDetection"
+        MSI  = "#microsoft.graph.win32LobAppProductCodeDetection"
+        FILE = "#microsoft.graph.win32LobAppFileSystemDetection"
+    }[[string]$declaredDetectionType]   # [string] because a hashtable cannot be indexed with $null
+    if ($expectedOdataType -and $parsed.DetectionRule.'@odata.type' -ne $expectedOdataType) {
+        throw "Detection rule is declared as $declaredDetectionType but parses as $($parsed.DetectionRule.'@odata.type'): '$detectionMethod'."
+    }
 
     $detectionOdataType = $parsed.DetectionRule.'@odata.type' -replace '#microsoft\.graph\.win32LobApp', ''
     # Registry/file rules expose detectionType, MSI rules expose productVersionOperator
