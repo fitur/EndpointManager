@@ -245,6 +245,18 @@
             "Google Chrome" and with it the supersedence and retirement of Chrome's versions;
             a near match only warns, and the app counts as not found. NewTeams, the one name
             in use that relied on it, has its own entry in the descriptions files.
+            Also in 3.1.0: HKCU and HKU detection rules are refused, since the app is detected
+            as the system account; the Architecture of an ApplicationInformation.md is used
+            when -Architecture is not given and must agree with it when it is; the output
+            object gains ReturnCodePatched, SupersedenceConfigured and RetireFailed; the
+            assignment POST is no longer retried by PowerShell, and a failed one is checked by
+            reading the assignments back; the module's break is absorbed around the connect,
+            icon, requirement rule and upload calls; the token's remaining life is checked
+            before supersedence and retirement, with a reconnect; the token is removed from
+            the session when the script ends; paths containing [ ] work; on Windows the
+            customer file's ACL is checked; -CertificateStoreLocation allows a LocalMachine
+            certificate; and the earlier versions' assignments are read in one request,
+            falling back to one per version.
 
         3.0.2 - 2026-09-28
             File detection rules work. The rule's path was split with System.IO.Path, which
