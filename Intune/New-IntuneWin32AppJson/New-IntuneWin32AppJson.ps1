@@ -2673,8 +2673,13 @@ if ($appId -and $supersedeCandidates.Count -gt 0 -and $keptApp) {
             }
             if ($removeAssignmentWarnings) { $retireAppFailed = $true }
 
-            # 3. Rename to "... (TBD)" via raw PATCH; skip when already suffixed so it is idempotent
-            if ($retireApp.DisplayName -notmatch ' \(TBD\)$') {
+            # 3. Rename to "... (TBD)" via raw PATCH; skip when already suffixed so it is idempotent.
+            # Never after a failed step 1 or 2: the suffix hides the app from every later run, so
+            # an app that is still assigned would stay assigned for good.
+            if ($retireAppFailed) {
+                Write-Warning "Not renaming '$($retireApp.DisplayName)': its supersedence or assignments were not fully removed. It keeps its name so the next run picks it up again."
+            }
+            elseif ($retireApp.DisplayName -notmatch ' \(TBD\)$') {
                 try {
                     $renameBody = @{
                         "@odata.type" = "#microsoft.graph.win32LobApp"
