@@ -2545,13 +2545,17 @@ else {
         # survive a connect that fails without throwing; everything below reads this variable
         Remove-Variable -Name AuthenticationHeader -Scope Global -ErrorAction SilentlyContinue
 
-        if ($clientCertificate) {
-            Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientCert $clientCertificate | Out-Null
-            Write-Host "Authenticated to Microsoft Graph using certificate $($clientCertificate.Thumbprint)"
-        }
-        else {
-            Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
-            Write-Host "Authenticated to Microsoft Graph using client secret"
+        # foreach ($x in 1) absorbs the module's `break`, which try/catch does not catch and
+        # which otherwise ends the whole script silently; the token check below then reports it
+        foreach ($breakGuard in 1) {
+            if ($clientCertificate) {
+                Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientCert $clientCertificate | Out-Null
+                Write-Host "Authenticated to Microsoft Graph using certificate $($clientCertificate.Thumbprint)"
+            }
+            else {
+                Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -ClientSecret $ClientSecret | Out-Null
+                Write-Host "Authenticated to Microsoft Graph using client secret"
+            }
         }
 
         $connectedHeader = Get-Variable -Name AuthenticationHeader -Scope Global -ValueOnly -ErrorAction SilentlyContinue
@@ -2619,6 +2623,11 @@ else {
             [System.IO.File]::WriteAllBytes($blankPngPath, [System.Convert]::FromBase64String($script:BlankPngBase64))
             $blankPngPath
         }
+        # The module functions below end the whole script silently with `break` on a validation
+        # failure; the guard turns that into a result that can be checked and reported
+        $icon = $null
+        foreach ($breakGuard in 1) { $icon = New-IntuneWin32AppIcon -FilePath $iconPath }
+        if (-not $icon) { throw "New-IntuneWin32AppIcon returned nothing for '$iconPath'. Nothing was uploaded." }
 
         # Without an explicit requirement rule the module falls back to hardcoded defaults
         # ("x64,x86" and minimum release "2H20" = Windows 10 20H2) and silently drops
@@ -2631,35 +2640,48 @@ else {
         if ($diskSpaceMB) {
             $requirementSplat["MinimumFreeDiskSpaceInMB"] = $diskSpaceMB
         }
-        $requirementRule = New-IntuneWin32AppRequirementRule @requirementSplat
+        $requirementRule = $null
+        foreach ($breakGuard in 1) { $requirementRule = New-IntuneWin32AppRequirementRule @requirementSplat }
+        if (-not $requirementRule) { throw "New-IntuneWin32AppRequirementRule returned nothing. Nothing was uploaded." }
 
         # -ReturnCode is deliberately omitted: the module always adds its own default set
         # (0/1707 success, 3010 softReboot, 1641 hardReboot, 1618 retry) and appends anything
         # passed in without deduplicating, which produced duplicate entries. 1641 is corrected
         # to softReboot with a PATCH below instead.
-        $win32App = Add-IntuneWin32App `
-            -FilePath             $intunewinFile.FullName `
-            -DisplayName          $displayName `
-            -Description          $appDescription `
-            -Publisher            $vendor `
-            -Owner                $Owner `
-            -AppVersion           $appVersion `
-            -Notes                $appNotes `
-            -InstallCommandLine   $installCmd `
-            -UninstallCommandLine $uninstallCmd `
-            -InstallExperience    "system" `
-            -RestartBehavior      "basedOnReturnCode" `
-            -DetectionRule        (New-IntuneDetectionRuleObject -ParsedRule $parsed) `
-            -RequirementRule      $requirementRule `
-            -Icon                 (New-IntuneWin32AppIcon -FilePath $iconPath) `
-            -Verbose:(-not $Quiet)
+        $win32App       = $null
+        $moduleReturned = $false
+        foreach ($breakGuard in 1) {
+            $win32App = Add-IntuneWin32App `
+                -FilePath             $intunewinFile.FullName `
+                -DisplayName          $displayName `
+                -Description          $appDescription `
+                -Publisher            $vendor `
+                -Owner                $Owner `
+                -AppVersion           $appVersion `
+                -Notes                $appNotes `
+                -InstallCommandLine   $installCmd `
+                -UninstallCommandLine $uninstallCmd `
+                -InstallExperience    "system" `
+                -RestartBehavior      "basedOnReturnCode" `
+                -DetectionRule        (New-IntuneDetectionRuleObject -ParsedRule $parsed) `
+                -RequirementRule      $requirementRule `
+                -Icon                 $icon `
+                -Verbose:(-not $Quiet)
+            $moduleReturned = $true
+        }
+        if (-not $moduleReturned) {
+            # The module ended with `break`, and its app record may already exist because it is
+            # created before the content is uploaded. Warn rather than throw, as the no-id case
+            # below does: the app may exist, and a fatal error invites a rerun.
+            Write-Warning "Add-IntuneWin32App ended without returning. An app named '$displayName' may exist in Intune without content; check the portal. A rerun is refused while it does."
+        }
 
         # The module emits several pipeline objects, including status strings;
         # pick the one carrying the app id
         # PSObject.Properties rather than $_.id: StrictMode throws PropertyNotFoundException
         # on an object without the property, which would surface as an upload failure even
         # though the app already exists - and a rerun would then create a duplicate.
-        $appObject = @($win32App) | Where-Object { $_ -isnot [string] -and $_.PSObject.Properties["id"] } | Select-Object -First 1
+        $appObject = @($win32App) | Where-Object { $_ -and $_ -isnot [string] -and $_.PSObject.Properties["id"] } | Select-Object -First 1
         $appId     = ${appObject}?.id
 
         if (-not $appId) {
