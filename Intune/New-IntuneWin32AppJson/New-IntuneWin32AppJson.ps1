@@ -1745,7 +1745,8 @@ function Select-SupersedenceTarget {
         Picks the single earlier-version app to keep and supersede against.
 
     .DESCRIPTION
-        The kept app is the highest version that still has at least one assignment. A
+        The kept app is the highest version that still has at least one required or available
+        include assignment; uninstall and exclusion assignments do not count as deployed. A
         half-finished earlier run can leave a higher version with no assignments, and keeping
         that one would supersede - and later retire - the version that is actually deployed.
         Ties on version are broken by createdDateTime. When no candidate has any assignment
@@ -1781,12 +1782,23 @@ function Select-SupersedenceTarget {
     $failedLookups = 0
     $enriched = foreach ($item in $Candidate) {
         $assignmentCount = 0
+        $deployingCount  = 0
         try {
             $assignmentResponse = Invoke-RestMethod -Method Get `
                 -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($item.Id)/assignments" `
                 -Headers $authHeader -MaximumRetryCount 3 -RetryIntervalSec 5 -ErrorAction Stop
             if ($assignmentResponse.PSObject.Properties["value"]) {
-                $assignmentCount = @($assignmentResponse.value).Count
+                $assignments     = @($assignmentResponse.value)
+                $assignmentCount = $assignments.Count
+                # Only an include assignment that installs shows the version is deployed. An
+                # uninstall intent or an exclusion target - a rollback, say - shows the opposite.
+                $deployingCount  = @($assignments | Where-Object {
+                    $intentProp = $_.PSObject.Properties["intent"]
+                    $targetProp = $_.PSObject.Properties["target"]
+                    $typeProp   = ($targetProp -and $targetProp.Value) ? $targetProp.Value.PSObject.Properties["@odata.type"] : $null
+                    $intentProp -and [string]$intentProp.Value -in "required", "available" -and
+                        $typeProp -and [string]$typeProp.Value -notmatch 'exclusion'
+                }).Count
             }
         }
         catch {
@@ -1801,6 +1813,7 @@ function Select-SupersedenceTarget {
             DisplayName     = $item.DisplayName
             Version         = $item.Version
             AssignmentCount = $assignmentCount
+            DeployingCount  = $deployingCount
             CreatedDateTime = $createdById.ContainsKey($itemId) ? $createdById[$itemId] : [datetime]::MinValue
         }
     }
@@ -1813,9 +1826,21 @@ function Select-SupersedenceTarget {
     $enriched = @($enriched)
     if ($enriched.Count -eq 0) { return $null }
 
-    $withAssignment = @($enriched | Where-Object { $_.AssignmentCount -gt 0 })
+    $withAssignment = @($enriched | Where-Object { $_.DeployingCount -gt 0 })
     if ($withAssignment.Count -gt 0) {
-        return $withAssignment | Sort-Object -Property Version, CreatedDateTime -Descending | Select-Object -First 1
+        $keep = $withAssignment | Sort-Object -Property Version, CreatedDateTime -Descending | Select-Object -First 1
+        # A higher version that is assigned, but not so that it deploys, is a state this
+        # decision does not understand - skip rather than retire around it
+        $unclear = @($enriched | Where-Object { $_.Version -gt $keep.Version -and $_.AssignmentCount -gt 0 })
+        if ($unclear.Count -gt 0) {
+            Write-Warning "'$($unclear[0].DisplayName)' is newer than '$($keep.DisplayName)' and has only uninstall or exclusion assignments. Supersedence and retirement are skipped for this run."
+            return $null
+        }
+        return $keep
+    }
+    if (@($enriched | Where-Object { $_.AssignmentCount -gt 0 }).Count -gt 0) {
+        Write-Warning "Earlier versions have only uninstall or exclusion assignments; none is clearly deployed. Supersedence and retirement are skipped for this run."
+        return $null
     }
 
     $fallback = $enriched | Sort-Object -Property Version, CreatedDateTime -Descending | Select-Object -First 1
