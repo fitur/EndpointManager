@@ -1238,20 +1238,23 @@ function Select-SupersedableApp {
 
     $matched = foreach ($app in $AllApps) {
         if ($app.id -eq $ExcludeId) { continue }
+        # An entry without a name cannot be a version of anything; under StrictMode reading it would throw
+        $appName = $app.PSObject.Properties["displayName"] ? [string]$app.displayName : ""
+        if (-not $appName) { continue }
         foreach ($pattern in $patterns) {
-            $match = [regex]::Match($app.displayName, $pattern)
+            $match = [regex]::Match($appName, $pattern)
             if (-not $match.Success) {
                 # Matching stays case-sensitive; a name that differs only in case is reported so the
                 # missed supersedence is visible
-                if ($Relation -eq "Earlier" -and [regex]::IsMatch($app.displayName, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
-                    Write-Warning "'$($app.displayName)' differs only in case from the name being searched for, so it is not treated as an earlier version."
+                if ($Relation -eq "Earlier" -and [regex]::IsMatch($appName, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+                    Write-Warning "'$appName' differs only in case from the name being searched for, so it is not treated as an earlier version."
                 }
                 continue
             }
 
             $oldParsed = $null
             if (-not [version]::TryParse($match.Groups[1].Value, [ref]$oldParsed)) {
-                Write-Verbose "Skipping '$($app.displayName)': version not comparable."
+                Write-Verbose "Skipping '$appName': version not comparable."
                 continue
             }
             $oldParsed = ConvertTo-ComparableVersion -Version $oldParsed
@@ -1262,7 +1265,7 @@ function Select-SupersedableApp {
             }
             if (-not $qualifies) { continue }
 
-            [pscustomobject]@{ Id = $app.id; DisplayName = $app.displayName; Version = $oldParsed }
+            [pscustomobject]@{ Id = $app.id; DisplayName = $appName; Version = $oldParsed }
             break
         }
     }
@@ -2716,17 +2719,10 @@ else {
     # check sits before the upload, so it throws without leaving anything behind. -WhatIf never
     # reaches here because ShouldProcess short-circuits authentication.
     $candidateNames   = @($displayName, $defaultDisplayName) | Select-Object -Unique
-    $existingDuplicate = $null
-    foreach ($inventoryApp in $appInventory) {
-        if (-not $inventoryApp.PSObject.Properties["displayName"]) { continue }
-        foreach ($candidateName in $candidateNames) {
-            if ([string]::Equals($candidateName, [string]$inventoryApp.displayName, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $existingDuplicate = $inventoryApp
-                break
-            }
-        }
-        if ($existingDuplicate) { break }
-    }
+    # -in compares case-insensitively; the property check keeps StrictMode from throwing on an entry without a name
+    $existingDuplicate = $appInventory |
+        Where-Object { $_.PSObject.Properties["displayName"] -and $_.displayName -in $candidateNames } |
+        Select-Object -First 1
     # The same version written differently ("7-Zip 26.5" for 26.05) is the same package
     if (-not $existingDuplicate) {
         $sameVersion = Select-SupersedableApp -NameBases @($descResult.DisplayName, "$vendor $appName") -NewVersion $appVersion `
