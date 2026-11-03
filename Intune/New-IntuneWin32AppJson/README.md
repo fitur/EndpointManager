@@ -315,7 +315,9 @@ lookups fails, the run skips supersedence and retirement rather than guess.
 With `-RetireSuperseded`, and only once the upload is verified and the assignment fully
 succeeds, the other earlier versions are retired: their own supersedence relations and
 their assignments are removed, the kept version's link to them is removed too, and they are
-renamed `... (TBD)`, ready for a manual delete during scheduled maintenance. Afterwards
+renamed `... (TBD)`, ready for a manual delete during scheduled maintenance. An app is only
+renamed once its relations and assignments are gone; if removing them failed it keeps its
+name and the next run picks it up again. Afterwards
 exactly two versions remain linked - the new one and the one it supersedes. Without the
 switch the script only lists which apps it would retire.
 
