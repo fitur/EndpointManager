@@ -3456,7 +3456,6 @@ $inventory = [System.Collections.Generic.List[pscustomobject]]::new()
 $appInstallStatus = [System.Collections.Generic.List[pscustomobject]]::new()
 $deviceInventory = [System.Collections.Generic.List[pscustomobject]]::new()
 $areaResults = [System.Collections.Generic.List[pscustomobject]]::new()
-$skipped = [System.Collections.Generic.List[string]]::new()
 # Run-wide, deduplicated on definition id across every policy - see -IncludeSettingDefinitions.
 $settingDefinitions = @{}
 # Run-wide count of .ps1/.sh files written beside the sidecars - see Expand-ScriptContent.
@@ -3487,7 +3486,6 @@ foreach ($definition in $policyDefinitions) {
     catch [GraphAuthorizationException] {
         # Local: this resource needs a scope the token lacks. Skip it, keep the rest.
         Write-Warning ('{0}: skipped - {1}' -f $definition.Area, $PSItem.Exception.Message)
-        $skipped.Add(('{0} (needs {1})' -f $definition.Area, $definition.RequiredRole))
         $areaResults.Add((New-AreaResult -Definition $definition -Status 'skipped' -Reason $PSItem.Exception.Message))
         continue
     }
@@ -3503,7 +3501,6 @@ foreach ($definition in $policyDefinitions) {
         }
         if ($failedStatus -notin @(400, 501)) {
             Write-Warning ('{0}: skipped - {1}' -f $definition.Area, $PSItem.Exception.Message)
-            $skipped.Add($definition.Area)
             $areaResults.Add((New-AreaResult -Definition $definition -Status 'skipped' -Reason $PSItem.Exception.Message))
             continue
         }
@@ -3516,7 +3513,6 @@ foreach ($definition in $policyDefinitions) {
         }
         catch [System.Exception] {
             Write-Warning ('{0}: skipped - {1}' -f $definition.Area, $PSItem.Exception.Message)
-            $skipped.Add($definition.Area)
             $areaResults.Add((New-AreaResult -Definition $definition -Status 'skipped' -Reason $PSItem.Exception.Message))
             continue
         }
@@ -3805,7 +3801,7 @@ $manifest = [ordered]@{
     totalPolicies            = $inventory.Count
     areasExported            = @($areaResults | Where-Object { $PSItem.status -eq 'exported' }).Count
     areasSkipped             = @($areaResults | Where-Object { $PSItem.status -eq 'skipped' }).Count
-    exportComplete           = ($skipped.Count -eq 0)
+    exportComplete           = (@($areaResults | Where-Object { $PSItem.status -eq 'skipped' }).Count -eq 0)
     # Exported, but with a payload or assignment names that a failed call left incomplete.
     # A change on one of these is not evidence of a change in the tenant.
     degradedRecords          = @([System.Collections.Generic.SortedSet[string]]::new([string[]]@($degradedRecords), [System.StringComparer]::Ordinal))
@@ -4001,8 +3997,10 @@ catch [System.Exception] {
 
 # Incomplete exports must be obvious - a diffing agent would otherwise read a skipped
 # area as "everything in it was deleted".
-if ($skipped.Count -gt 0) {
-    Write-Warning ('INCOMPLETE EXPORT - {0} area(s) skipped: {1}' -f $skipped.Count, ($skipped -join '; '))
+$skippedAreas = @($areaResults | Where-Object { $PSItem.status -eq 'skipped' })
+if ($skippedAreas.Count -gt 0) {
+    Write-Warning ('INCOMPLETE EXPORT - {0} area(s) skipped: {1}' -f $skippedAreas.Count,
+        (($skippedAreas | ForEach-Object { '{0} (role: {1})' -f $PSItem.area, $PSItem.requiredRole }) -join '; '))
 }
 if ($degradedRecords.Count -gt 0) {
     Write-Warning ('{0} record(s) exported with an incomplete payload or unresolved assignment names - listed as degradedRecords in the manifest.' -f $degradedRecords.Count)
