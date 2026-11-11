@@ -102,13 +102,52 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.15.0
+    Version:        1.16.0
     Creation Date:  2026-07-30
-    Last Updated:   2026-11-02
+    Last Updated:   2026-11-11
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.16.0 - 2026-11-11
+            Review fixes (W46) and several customers in one run. No ConfigurationHash moves.
+            What changes in the output, once, is listed under CHANGED OUTPUT.
+
+            Several customers. -CustomerName takes several names, -AllCustomers takes every
+            customer in the file, and the picker allows multiple selection (cmd-click on
+            macOS; 1,3,5-7 or A in the console). With more than one customer the script runs
+            itself once per customer, in turn, each in its own script scope, passing on only
+            the customer name. A failed customer does not stop the others; the run ends with a
+            summary and, if any failed, an error. -TenantId, -ClientId, -ClientSecret,
+            -Certificate* and -TenantName cannot be combined with several customers.
+            -CustomerName and -AllCustomers now require -CustomerConfigPath (before, a
+            -CustomerName without it was silently ignored). The rest of the customer file is
+            cleared from memory once the chosen customer's values are read.
+
+            Correctness. Run and audit timestamps are written as ISO 8601 UTC; before, they
+            went through [string] on a DateTime (MM/dd/yyyy, no zone), which also sorted
+            auditActors wrongly across a year boundary and shifted the audit window by the
+            host's UTC offset. The script stops before writing if the tenant folder's newest
+            run belongs to another tenant, and the comparison refuses a baseline from another
+            tenant. A failed per-object assignment read marks the record degraded. An unknown
+            filter degrades a record only when the filter area itself could not be read. An
+            area read only in the current run makes the change set reliable = false. Paths
+            from the user are used with -LiteralPath, so a folder like "out [test]" works.
+
+            Other. A broadly readable customer file is warned about on Windows too. The git
+            work tree warning covers any output folder. Ordinal ordering for fieldChanges,
+            unreliableAreas, _settingdefinitions_ and deviceInventorySummary. exportComplete
+            and the incomplete-export warning come from the per-area results. The platform
+            functions read the taxonomy directly. OutputType added on the array-returning
+            helpers. Changelog entries 1.10.0 to 1.14.0 compressed to one line each.
+
+            CHANGED OUTPUT (once): baselineRunUtc / currentRunUtc in the change set and
+            activityDateTime in _auditevents_ and auditActors are ISO 8601 (...Z); the order
+            of fieldChanges and of the keys in the manifest's deviceInventorySummary can
+            change (ordinal: Windows before iOS); the INCOMPLETE EXPORT warning names each
+            area with its role. Not done: -NoPlatformSplit removal (waiting for a decision),
+            the hash of raw script bytes, datetime offsets, Functions timeout and folder names.
 
         1.15.0 - 2026-11-02
             Review fixes (W44). No hash wave: ConfigurationHash is unchanged for an unchanged
@@ -153,167 +192,24 @@
             comparabilityNotes. Not done: F14 (datetime offsets), the hash of raw script
             bytes (F11 part 2), F21-F24.
 
-        1.14.0 - 2026-10-21
-            Added -IncludeDeviceInventory (and includeDeviceInventory in the customer file).
-            With the switch, one row per Intune-managed device - all platforms - is read from
-            deviceManagement/managedDevices and written to DeviceInventory_<stamp>.csv:
-            operating system, osVersion split into OsBuild / OsRevision, the Windows release it
-            maps to, complianceState, last sync and owner type. It exists so a monthly report
-            can state Windows 11 versions and compliance per device, which the policy export
-            alone cannot. Like the install status it is a point-in-time reading, so the file is
-            kept out of the inventory CSV, out of every ConfigurationHash and out of the change
-            set. No UPN, e-mail, serial number or IMEI is requested or written; deviceName is.
-
-            NEW PERMISSION: DeviceManagementManagedDevices.Read.All (Application), with admin
-            consent in every customer tenant that wants the file. Without it the preflight
-            warns, the request returns 403, and the export completes unaffected - the manifest
-            then shows deviceInventoryRequested = true with zero rows. The manifest gains
-            deviceInventoryRequested, deviceInventoryRows and deviceInventorySummary (counts by
-            operating system and, for Windows, by release and compliance state); the result
-            object gains DeviceInventoryPath.
-
-            The release is an exact build-number lookup, not a range: 26H1 (build 28000) is
-            numerically above 26H2 (26300) but is a new-hardware-only branch. An unknown build
-            is reported as "unmapped build N", never guessed; extend the table by hand when
-            Microsoft ships a new release. Only operatingSystem = Windows is mapped; the other
-            platforms keep empty build and release columns but still carry their compliance state.
-
-        1.13.0 - 2026-09-03
-            The three script areas (Remediation Script, Platform Script, Shell Script) now
-            export the script body. Graph leaves detectionScriptContent /
-            remediationScriptContent as "" and scriptContent as null in the list response and
-            fills them only on the entity GET, so each script object costs one extra call -
-            gated by -SkipDetailedSettings, the same lever as the detail settings. Measured:
-            25 of 229 policies in the test tenant, 40 script files.
-
-            Each body is written twice: decoded into the configuration, so the
-            ConfigurationHash (taken over the sidecar bytes) reflects a changed body; and as a
-            standalone .ps1/.sh beside the sidecar, since a script inside a JSON string cannot
-            be read, run or diffed. Remediations produce two files, _detect and _remediate.
-            The text is left exactly as Graph returned it - no BOM stripped, no line endings
-            normalised: BOM and CRLF/LF were observed to differ between the two bodies of one
-            object, so they belong to the uploaded file and a change to either is a real
-            change that must show in the diff.
-
-            ONE-TIME WAVE: the content fields move from ""/null to real text, so the hash of
-            every remediation, platform script and shell script changes once. The first run
-            after upgrading reports those as modified (field diffs on detectionScriptContent /
-            remediationScriptContent / scriptContent); 25 of 229 in the test tenant. The run
-            after that is clean. Same pattern as the 1.8.0 VPP wave.
-
-            No new permission (DeviceManagementScripts.Read.All already covers the entity
-            GET), no new CSV column (the script files share the sidecar's base name), no
-            change to the archive. The manifest gains scriptFilesWritten. NOTE: a
-            -SkipDetailedSettings run now also skips the script bodies, so the field-diff
-            count that switch produced for the 1.12.0 verification will be different.
-
-        1.12.1 - 2026-08-31
-            Documentation only, no behaviour change. Changelog entries 1.9.0 and older are
-            compressed to one line each; the full text is in git history. The "certificate
-            object is never disposed" rationale moved from the 1.8.0 entry to a comment on
-            $script:AuthContext.Certificate, and Invoke-InventoryComparison's param block now
-            explains why four of its six parameters are never set by the in-script caller.
-
-        1.12.0 - 2026-08-31
-            The per-area sidecar folders are now packed into one archive per run,
-            <Tenant>_<stamp>_sidecars.zip, in the run folder. Measured: 16 area folders and
-            229 files collapse to a single archive. The area folders are deleted only after
-            the archive is verified to hold every file that went in; a mismatch or a failure
-            keeps them and warns, and never fails the export. Loose in the run root, as
-            before: the inventory CSV, AppInstallStatus_*.csv and the _manifest_ /
-            _changeset_ / _auditevents_ / _settingdefinitions_ JSON files.
-
-            BREAKING for a consumer that opened ConfigurationFile (and
-            previousConfigurationFile in the change set) as a plain path: it is now the name
-            of an entry inside <run>/<Tenant>_<stamp>_sidecars.zip. Each run folder holds its
-            own archive; the change set's new top-level sidecarArchive field names the
-            current run's, and the manifest gains sidecarArchive and sidecarCount. The
-            comparison reads sidecars through the archive (loose file first, archive second),
-            so diffing an already-archived previous run produces the same fieldChanges as
-            before. The archive is written after the comparison, so the run being diffed
-            still reads its own sidecars loose.
-
-            -CompressOutput is removed. Archiving the run is no longer opt-in, and the old
-            switch zipped the whole folder - CSV, manifest and all - which is not what a
-            consumer of the sidecars wants. The result object's ZipPath is replaced by
-            SidecarArchivePath.
-
-        1.11.0 - 2026-08-28
-            Fixed a double-wrapping in the sidecar: 'relationships' on Win32 apps and the
-            detail-settings key on Settings Catalog, ADMX and intents were assigned as
-            @(Get-GraphCollection ...), which nested the already-comma-guarded list inside
-            another array and serialised as [[...]]. Removed the @() on both.
-
-            ONE-TIME WAVE: that changes the serialisation, so the ConfigurationHash of every
-            policy with detail settings (Settings Catalog, ADMX, intents) and every Win32 app
-            with supersedence relationships moves once. The first run after upgrading reports
-            those as modified; the run after that is clean.
-
-            Added -IncludeSettingDefinitions. With the switch, Settings Catalog detail is
-            fetched with $expand=settingDefinitions and a run-wide
-            _settingdefinitions_<stamp>.json is written (schemaVersion / generatedUtc /
-            definitionCount / definitions), deduplicated on definition id across all policies,
-            each projected to id / displayName / description / options[itemId, displayName].
-            A consumer uses it to turn a settingDefinitionId - and a choice value such as
-            ..._letappsaccesslocation_1 - into readable text.
-
-            The switch does NOT move any ConfigurationHash: the expanded settingDefinitions
-            are lifted out and stripped from each policy's configuration - recursively, since
-            the Settings Catalog tree nests settingInstance under choiceSettingValue.children
-            arbitrarily deep - before the configuration is canonicalised and hashed. Intents
-            do not support the same expand, so their definitions stay opaque.
-
-            The manifest gains settingDefinitionsCount; the result object gains
-            SettingDefinitionsPath.
-
-        1.10.1 - 2026-08-28
-            Fixed -IncludeAppInstallStatus, which had stopped producing anything: Graph
-            retired the mobileApps/{id}/installSummary navigation property and now answers
-            400 "Resource not found for the segment 'installSummary'" on beta and v1.0 alike.
-            Replaced with a single POST to
-            deviceManagement/reports/getAppsInstallSummaryReport, which returns every app in
-            one call instead of one call per app.
-
-            SEMANTIC CHANGE: the numbers are now a cached aggregation, not a live per-app
-            lookup. How old the aggregation is cannot be recovered - Graph returns the
-            report's LastUpdatedTime as null, and RunTimestamp on each row is when the export
-            fetched the report, not when Intune computed it. Apps the report has no row for
-            are left out of the CSV rather than written as zeros - "no data" and "zero
-            installs" are different, and the run warns once with the count.
-
-            The manifest gains appInstallStatusRequested and appInstallStatusRows so a
-            requested-but-empty result is visible to a scheduled consumer, the same way
-            areasSkipped already is. As before, a failure here never fails the export.
-
-        1.10.0 - 2026-08-27
-            Added -IncludeAuditActor. With the switch, the export reads Intune audit events
-            for the window since the previous run (deviceManagement/auditEvents, v1.0) and
-            writes a projected _auditevents_<stamp>.json sidecar; the comparison then attaches
-            an auditActors list to every added or modified policy in the change set. Needs no
-            new Entra permission - the audit log sits behind DeviceManagementApps.Read.All,
-            which the app already has. Without the switch no auditEvents call is made.
-
-            What the field does NOT tell you. It answers "a person or an automation", not
-            "which technician". In the 2026-08-27 measurement, of 25 Patch events - "someone
-            edited an existing policy" - exactly one carried a named person; the rest were the
-            tenant's own service principals. Reads (Get, Search) are filtered out, as are
-            events whose resources never match a policy the change set already flagged.
-
-            The actor is modelled as three states, never null: person (a userPrincipalName was
-            present), app (only an applicationDisplayName), unknown (no actor at all). The
-            field is a list, not a LastModifiedBy - several events can hit one policy in a
-            window, and assignment changes ride along on the parent policy's resource.
-
-            Privacy: actor.ipAddress, actor.userId, actor.userPermissions and
-            resources[].modifiedProperties are dropped before anything is written to disk.
-
-            The change set and the audit log are two signals, not one truth with an
-            explanation: service-side drift (the excluded usedLicenseCount / releaseDateTime)
-            leaves no audit trail, and an audit event can exist with no hash change. A 30-day
-            window is not necessarily representative of a month with real portal edits.
-
         Earlier releases, one line each. Full entries are in git history.
 
+        1.14.0 - 2026-10-21  -IncludeDeviceInventory: DeviceInventory_<stamp>.csv with one row per
+                            managed device (OS, build and release, compliance, last sync, owner
+                            type); needs DeviceManagementManagedDevices.Read.All.
+        1.13.0 - 2026-09-03  Script bodies of remediations, platform and shell scripts exported,
+                            in the sidecar and as .ps1/.sh files. ONE-TIME WAVE: the hash of the
+                            three script areas moved once.
+        1.12.1 - 2026-08-31  Documentation only: changelog entries 1.9.0 and older compressed.
+        1.12.0 - 2026-08-31  Sidecar folders packed into one <Tenant>_<stamp>_sidecars.zip per
+                            run; BREAKING for a consumer that opened ConfigurationFile as a
+                            path. -CompressOutput removed.
+        1.11.0 - 2026-08-28  [[...]] double-wrapping of detail settings and relationships fixed
+                            (ONE-TIME WAVE for those policies); -IncludeSettingDefinitions added.
+        1.10.1 - 2026-08-28  -IncludeAppInstallStatus moved to the getAppsInstallSummaryReport
+                            report: a cached aggregation, apps without a row left out.
+        1.10.0 - 2026-08-27  -IncludeAuditActor: a projected _auditevents_ sidecar and auditActors
+                            on added and modified policies in the change set.
         1.9.0 - 2026-08-27  Merged Compare-IntuneConfigurationInventory.ps1 in as the Comparison
                             region and Invoke-InventoryComparison; -ComparePath removed.
         1.8.0 - 2026-08-26  Certificate authentication (-CertificateThumbprint / -CertificatePath)

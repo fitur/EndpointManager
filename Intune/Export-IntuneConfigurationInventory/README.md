@@ -250,7 +250,9 @@ one example of each. Defining a certificate for a customer wins over `clientSecr
 does, so a secret left over from the environment or a previously selected customer cannot
 shadow it. The confirmation line prints the customer name and tenant ID only, never the
 secret or the certificate password, and the script warns if the file is readable beyond its
-owner.
+owner (the mode bits on macOS and Linux; on Windows read access for Everyone, Users or
+Authenticated Users). Once the chosen customer's values are read, the rest of the file is
+dropped from memory.
 
 **An optional value the selected customer does not define is cleared, not inherited.** That
 is the rule the whole design hangs on. `tenantName` names the output folder, so a customer
@@ -259,6 +261,11 @@ security configuration lands in another tenant's directory. Cleared, it falls ba
 name read from Graph, which is always right for the tenant actually being exported.
 `outputDirectory` and `includeConditionalAccess` behave the same way. `jsonDepth` is the
 exception: it has a working default, so it is replaced when defined and never cleared.
+
+The folder is still chosen by name, so a wrong or copied `tenantName` could point two tenants
+at one folder. The script therefore compares the `tenantId` in the manifest of the newest run
+there with the token's tenant, and stops before writing anything if they differ; the
+comparison step likewise refuses a baseline from another tenant.
 
 Explicitly passed parameters beat the file, checked with `$PSBoundParameters.ContainsKey()`,
 which is true only for parameters the caller actually supplied. Without
@@ -520,8 +527,8 @@ One row per managed device, all platforms, eleven columns: `RunTimestamp` · `De
 machine patched" independently of the release. No user principal name, e-mail address, serial
 number or IMEI is requested or written. The manifest also carries
 `deviceInventorySummary` — device counts by operating system and, for Windows, by release and
-compliance state — so a report can quote the numbers without parsing the CSV. It is `null`
-when the switch was not used.
+compliance state, keys in ordinal order — so a report can quote the numbers without parsing
+the CSV. It is `null` when the switch was not used.
 
 Like `AppInstallStatus`, the file is a point-in-time reading: it stays out of the inventory
 CSV, out of every `ConfigurationHash`, out of the change set and out of the sidecar archive.
