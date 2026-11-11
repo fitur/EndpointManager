@@ -858,7 +858,7 @@ if (-not [string]::IsNullOrWhiteSpace($env:FUNCTIONS_WORKER_RUNTIME) -and
     throw '-OutputDirectory is required when running in Azure Functions; point it at mounted storage (for example Azure Files).'
 }
 
-#endregion
+#endregion Customer selection
 
 #region Credential preflight
 
@@ -1001,6 +1001,7 @@ function Get-OrdinalSortedRow {
     # Sort-Object has no ordinal mode. OrderBy is stable and takes an explicit comparer;
     # the key joins the properties with NUL so they compare field by field.
     [CmdletBinding()]
+    [OutputType([object[]])]
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Row,
         [Parameter(Mandatory)][string[]]$Property
@@ -1497,6 +1498,7 @@ function Invoke-GraphRequest {
 function Get-GraphCollection {
     # Follows @odata.nextLink until exhausted; returns a flat list.
     [CmdletBinding()]
+    [OutputType([object[]])]
     param([Parameter(Mandatory)][string]$Uri)
 
     $results = [System.Collections.Generic.List[object]]::new()
@@ -1629,6 +1631,7 @@ function Get-DeviceInventory {
         Returns a flat list, comma-guarded like Get-GraphCollection.
     #>
     [CmdletBinding()]
+    [OutputType([object[]])]
     param([Parameter(Mandatory)][string]$RunTimestamp)
 
     $select = 'id,deviceName,operatingSystem,osVersion,complianceState,lastSyncDateTime,managedDeviceOwnerType'
@@ -2079,6 +2082,7 @@ function Get-AuditEventWindow {
         let the export finish. Returns a flat list, comma-guarded like Get-GraphCollection.
     #>
     [CmdletBinding()]
+    [OutputType([object[]])]
     param(
         [Parameter(Mandatory)][datetime]$Since,
         [int]$MaxPages = 20
@@ -2562,11 +2566,15 @@ function Format-DiffValue {
 }
 
 function Test-IsMap {
+    [CmdletBinding()]
+    [OutputType([bool])]
     param([AllowNull()]$Value)
     return ($Value -is [System.Management.Automation.PSCustomObject])
 }
 
 function Test-IsList {
+    [CmdletBinding()]
+    [OutputType([bool])]
     param([AllowNull()]$Value)
     # Strings are IEnumerable but not IList, so this is safe for them.
     return ($Value -is [System.Collections.IList])
@@ -2724,6 +2732,7 @@ function Get-PolicyAuditActor {
         emitting an empty list, so "no field" and "field is []" stay distinguishable.
     #>
     [CmdletBinding()]
+    [OutputType([object[]])]
     param(
         [AllowNull()]$Index,
         [Parameter(Mandatory)][AllowEmptyString()][string]$PolicyId
