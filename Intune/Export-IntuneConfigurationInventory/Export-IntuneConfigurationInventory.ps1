@@ -932,6 +932,9 @@ $script:AuthContext = [pscustomobject]@{
 }
 $script:GroupNameCache = @{}
 $script:FilterNameCache = @{}
+# True once the assignment-filter area has been read, so an id missing from the cache then
+# means a filter that no longer exists, not a lookup that could not be made.
+$script:FilterAreaRead = $false
 # Group ids whose lookup failed for a reason other than 404 - the name is unknown, not gone.
 $script:GroupLookupFailed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
@@ -1887,7 +1890,7 @@ function ConvertTo-AssignmentDetail {
             $filterType = [string](Get-ObjectProperty -InputObject $target -Name 'deviceAndAppManagementAssignmentFilterType')
             $filterName = $filterId
             if ($script:FilterNameCache.ContainsKey($filterId)) { $filterName = $script:FilterNameCache[$filterId] }
-            else { $degraded = $true }
+            elseif (-not $script:FilterAreaRead) { $degraded = $true }
             $filters.Add(('{0} ({1})' -f $filterName, $filterType))
         }
     }
@@ -3508,6 +3511,7 @@ foreach ($definition in $policyDefinitions) {
 
     # Doubles as the filter-name cache source - see the ordering note on $policyDefinitions.
     if ($definition.Resource -eq 'deviceManagement/assignmentFilters') {
+        $script:FilterAreaRead = $true
         foreach ($filter in $items) {
             $script:FilterNameCache[[string]$filter.id] = [string]$filter.displayName
         }
