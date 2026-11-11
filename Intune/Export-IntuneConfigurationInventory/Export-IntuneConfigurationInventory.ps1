@@ -502,6 +502,23 @@ $ErrorActionPreference = 'Stop'
 # by setting the environment. This must also run BEFORE the credential preflight below,
 # which throws on an empty TenantId - with a customer file the environment is legitimately
 # empty until this block has populated the variables.
+function Get-BroadReadRule {
+    # The allow rules among the given file access rules that let Everyone, Users or
+    # Authenticated Users read the file. SIDs are compared, since the group names are
+    # localised. Same logic as New-IntuneWin32AppJson.ps1, so the two scripts warn alike.
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rule)
+
+    $broadSids = 'S-1-1-0', 'S-1-5-32-545', 'S-1-5-11'
+    $readData = [System.Security.AccessControl.FileSystemRights]::ReadData
+    return , @($Rule | Where-Object {
+        [string]$PSItem.AccessControlType -eq 'Allow' -and
+        $PSItem.IdentityReference.Value -in $broadSids -and
+        ($PSItem.FileSystemRights -band $readData) -eq $readData
+    })
+}
+
 function ConvertFrom-SelectionAnswer {
     # '1,3,5-7' or 'A' for all -> 1-based indexes in the order given, no duplicates.
     # Returns nothing for anything that is not a valid selection; callers wrap the call in @().
@@ -559,6 +576,19 @@ if ($CustomerConfigPath) {
         if ($configItem.PSObject.Properties.Name -contains "UnixMode" -and
             $configItem.UnixMode.Substring(4) -match '[rwx]') {
             Write-Warning "'$customerConfigResolved' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$customerConfigResolved'"
+        }
+    }
+    else {
+        # Windows has no UnixMode; look at the ACL for read access granted to everyone. A failure
+        # to read the ACL is not worth stopping for, so it only produces a verbose note.
+        try {
+            $broadRules = Get-BroadReadRule -Rule (Get-Acl -LiteralPath $customerConfigResolved).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
+            if ($broadRules.Count -gt 0) {
+                Write-Warning "'$customerConfigResolved' is readable by Everyone, Users or Authenticated Users. Run: icacls '$customerConfigResolved' /inheritance:r /grant:r `"$($env:USERNAME):(R,W)`""
+            }
+        }
+        catch {
+            Write-Verbose "Could not read the ACL of '$customerConfigResolved': $($PSItem.Exception.Message)"
         }
     }
 
