@@ -2451,8 +2451,7 @@ function Get-SidecarPlatform {
     [OutputType([string[]])]
     param(
         [Parameter(Mandatory)][string]$RunPath,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$RelativeFile,
-        [Parameter(Mandatory)][hashtable]$Aliases
+        [Parameter(Mandatory)][AllowEmptyString()][string]$RelativeFile
     )
 
     # Comma operator on every return: PowerShell unrolls a returned array, so an empty
@@ -2478,7 +2477,7 @@ function Get-SidecarPlatform {
         $value = Get-ObjectProperty -InputObject $json -Name $property
         foreach ($token in @($value)) {
             $key = ([string]$token).Trim().ToLowerInvariant()
-            if ($Aliases.ContainsKey($key)) { $found.Add($Aliases[$key]) }
+            if ($script:platformAliases.ContainsKey($key)) { $found.Add($script:platformAliases[$key]) }
         }
     }
 
@@ -2505,17 +2504,14 @@ function Get-SidecarPlatform {
 function Resolve-RowPlatform {
     <#
         Four-step resolution described in .DESCRIPTION. Returns one or more canonical
-        platform names; never returns an empty set.
+        platform names; never returns an empty set. The taxonomy is read from the $script:
+        platformAliases / typePatterns / areaPlatformDefaults / sidecarPeekAreas tables.
     #>
     [CmdletBinding()]
     [OutputType([string[]])]
     param(
         [Parameter(Mandatory)]$Row,
-        [Parameter(Mandatory)][string]$RunPath,
-        [Parameter(Mandatory)][hashtable]$Aliases,
-        [Parameter(Mandatory)][object[]]$TypePattern,
-        [Parameter(Mandatory)][hashtable]$AreaDefault,
-        [Parameter(Mandatory)][string[]]$PeekArea
+        [Parameter(Mandatory)][string]$RunPath
     )
 
     # 1 - the Platform column, which the exporter joins with ';' for multi-platform policies.
@@ -2523,28 +2519,28 @@ function Resolve-RowPlatform {
     foreach ($token in ([string]$Row.Platform -split ';')) {
         $key = $token.Trim().ToLowerInvariant()
         if ([string]::IsNullOrWhiteSpace($key)) { continue }
-        if ($Aliases.ContainsKey($key)) { $resolved.Add($Aliases[$key]) }
+        if ($script:platformAliases.ContainsKey($key)) { $resolved.Add($script:platformAliases[$key]) }
     }
     if ($resolved.Count -gt 0) { return , [string[]]@($resolved | Sort-Object -Unique) }
 
     # 2 - PolicyType, which holds the Graph odata type for most areas.
     $policyType = [string]$Row.PolicyType
     if (-not [string]::IsNullOrWhiteSpace($policyType)) {
-        foreach ($pattern in $TypePattern) {
+        foreach ($pattern in $script:typePatterns) {
             if ($policyType -match $pattern.Pattern) { return , [string[]]@($pattern.Platform) }
         }
     }
 
     # 3 - the area's implicit platform.
     $area = [string]$Row.PolicyArea
-    if ($AreaDefault.ContainsKey($area)) { return , [string[]]@($AreaDefault[$area]) }
+    if ($script:areaPlatformDefaults.ContainsKey($area)) { return , [string[]]@($script:areaPlatformDefaults[$area]) }
 
     # 4 - a look inside the sidecar file, for the few areas where that is cheap.
-    if ($area -in $PeekArea) {
+    if ($area -in $script:sidecarPeekAreas) {
         # No @() here: Get-SidecarPlatform already protects its return with the comma
         # operator. Wrapping it again nests the array inside a second one-element array,
         # which makes every later -in comparison fail silently.
-        $peeked = Get-SidecarPlatform -RunPath $RunPath -RelativeFile ([string]$Row.ConfigurationFile) -Aliases $Aliases
+        $peeked = Get-SidecarPlatform -RunPath $RunPath -RelativeFile ([string]$Row.ConfigurationFile)
         if ($peeked.Count -gt 0) { return , [string[]]$peeked }
     }
 
@@ -2911,20 +2907,16 @@ function Invoke-InventoryComparison {
     # Platform is resolved once per record and cached on RecordKey. The current run wins when
     # a policy exists in both, so a policy that changed platform is filed under its new one.
     $platformCache = @{}
-    $resolveArgs = @{
-        Aliases = $script:platformAliases; TypePattern = $script:typePatterns
-        AreaDefault = $script:areaPlatformDefaults; PeekArea = $script:sidecarPeekAreas
-    }
     foreach ($row in $current.Records.Values) {
         # No @() here either, for the same reason as the Get-SidecarPlatform call above:
         # Resolve-RowPlatform's return values already use the comma operator to survive
         # unrolling. An extra @() nests them a second time instead of flattening anything.
-        $platformCache[$row.RecordKey] = Resolve-RowPlatform -Row $row -RunPath $current.Path @resolveArgs
+        $platformCache[$row.RecordKey] = Resolve-RowPlatform -Row $row -RunPath $current.Path
     }
     if (-not $isBaselineMode) {
         foreach ($row in $baseline.Records.Values) {
             if (-not $platformCache.ContainsKey($row.RecordKey)) {
-                $platformCache[$row.RecordKey] = Resolve-RowPlatform -Row $row -RunPath $baseline.Path @resolveArgs
+                $platformCache[$row.RecordKey] = Resolve-RowPlatform -Row $row -RunPath $baseline.Path
             }
         }
     }
