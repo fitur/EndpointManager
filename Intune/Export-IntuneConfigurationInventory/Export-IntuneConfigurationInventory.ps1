@@ -2156,11 +2156,8 @@ $script:areaPlatformDefaults = @{
 # is the only way to tell a Windows baseline from a macOS Defender one.
 $script:sidecarPeekAreas = @('Assignment Filter', 'Enrollment Configuration', 'Endpoint Security (Intent)')
 
-function Get-RunContext {
-    <#
-        Loads one run folder: its manifest, its CSV rows indexed by RecordKey, and the set
-        of areas that cannot support deletion claims.
-    #>
+function Get-RunManifest {
+    # Just the manifest of one run folder, without reading its CSV.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
 
@@ -2169,7 +2166,18 @@ function Get-RunContext {
     if ($null -eq $manifestFile) {
         throw ('No _manifest_*.json found in "{0}". Is this an export run folder?' -f $Path)
     }
-    $manifest = Get-Content -Path $manifestFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
+    return (Get-Content -Path $manifestFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json)
+}
+
+function Get-RunContext {
+    <#
+        Loads one run folder: its manifest, its CSV rows indexed by RecordKey, and the set
+        of areas that cannot support deletion claims.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    $manifest = Get-RunManifest -Path $Path
 
     $schema = [int](Get-ObjectProperty -InputObject $manifest -Name 'schemaVersion')
     if ($schema -ne 2) {
@@ -2599,6 +2607,16 @@ function Invoke-InventoryComparison {
 
     $isBaselineMode = [string]::IsNullOrWhiteSpace($baselineFolder)
     $baseline = $isBaselineMode ? $null : (Get-RunContext -Path (Join-Path -Path $TenantDirectory -ChildPath $baselineFolder))
+
+    # Two runs of different tenants must never be diffed against each other.
+    if (-not $isBaselineMode) {
+        $baselineTenantId = [string](Get-ObjectProperty -InputObject $baseline.Manifest -Name 'tenantId')
+        $currentTenantId = [string](Get-ObjectProperty -InputObject $current.Manifest -Name 'tenantId')
+        if ($baselineTenantId -ne $currentTenantId) {
+            throw ('Baseline "{0}" is for tenant {1} and the current run for tenant {2}; they cannot be compared.' -f
+                $baselineFolder, $baselineTenantId, $currentTenantId)
+        }
+    }
 
     if ($isBaselineMode) {
         Write-Verbose 'Only one run folder present - emitting a baseline change set (every policy listed as baseline).'
@@ -3161,6 +3179,25 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 
 $tenantRoot = Join-Path -Path $OutputDirectory -ChildPath $tenantNamePart
 $runDirectory = Join-Path -Path $tenantRoot -ChildPath $folderStamp
+
+# The folder is chosen by name, the data by token. If the newest run here was written for
+# another tenant, a wrong or colliding tenant name is about to put this tenant's security
+# configuration in someone else's folder and diff the two against each other. Stop before
+# anything is written. An unreadable old manifest only warns.
+$existingRun = Get-LatestRunFolder -TenantDirectory $tenantRoot
+if ($null -ne $existingRun) {
+    $existingTenantId = ''
+    try {
+        $existingTenantId = [string](Get-ObjectProperty -InputObject (Get-RunManifest -Path $existingRun.FullName) -Name 'tenantId')
+    }
+    catch [System.Exception] {
+        Write-Warning ('Could not check which tenant "{0}" belongs to: {1}' -f $existingRun.FullName, $PSItem.Exception.Message)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($existingTenantId) -and $existingTenantId -ne $tokenTenantId) {
+        throw ('Tenant folder "{0}" holds runs for tenant {1}, but this token is for tenant {2}. Use another -TenantName / tenantName or another -OutputDirectory.' -f
+            $tenantRoot, $existingTenantId, $tokenTenantId)
+    }
+}
 
 # Minute precision collides when two exports start within the same minute. BOTH stamps
 # get the seconds: $fileStamp names the CSV, the manifest, every JSON file and the zip,
