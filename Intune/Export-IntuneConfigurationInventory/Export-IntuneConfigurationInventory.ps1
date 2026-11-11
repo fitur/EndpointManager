@@ -348,13 +348,25 @@
     .\Export-IntuneConfigurationInventory.ps1 -CompareWithPrevious -Verbose
 
 .EXAMPLE
-    # Pick a customer from a local credential file - prompts when -CustomerName is omitted
+    # Pick one or more customers from a local credential file - prompts when -CustomerName is
+    # omitted (1,3,5-7 or A for all in the console menu; multiple selection on macOS)
     .\Export-IntuneConfigurationInventory.ps1 -CustomerConfigPath ~/.intune/customers.json -Verbose
 
 .EXAMPLE
     # Unattended run against one named customer
     .\Export-IntuneConfigurationInventory.ps1 -CustomerConfigPath ~/.intune/customers.json `
         -CustomerName 'Contoso' -CompareWithPrevious
+
+.EXAMPLE
+    # Several customers in one command, one after the other; one customer's failure does not
+    # stop the rest, and the run ends with an error if any failed
+    .\Export-IntuneConfigurationInventory.ps1 -CustomerConfigPath ~/.intune/customers.json `
+        -CustomerName 'Contoso', 'Fabrikam' -OutputDirectory ~/Intune-Data -CompareWithPrevious
+
+.EXAMPLE
+    # Permission check for every customer in the file - one line per customer
+    .\Export-IntuneConfigurationInventory.ps1 -CustomerConfigPath ~/.intune/customers.json `
+        -AllCustomers -TestPermissionOnly
 
 .EXAMPLE
     # Permission check only - decodes the token, reports tenant, roles and affected areas.
@@ -461,11 +473,17 @@ param(
     [switch]$IncludeConditionalAccess,
 
     # Local JSON file holding per-customer credentials. When supplied, the customer is
-    # selected (prompted for unless -CustomerName is given) and its values are used
-    # instead of the environment variables.
+    # selected (prompted for unless -CustomerName or -AllCustomers is given) and its values
+    # are used instead of the environment variables.
     [string]$CustomerConfigPath,
 
-    [string]$CustomerName,
+    # One or more customers from the customer file. With more than one, the script runs once
+    # per customer, in turn, and the credential parameters (-TenantId, -ClientId,
+    # -ClientSecret, -Certificate*) and -TenantName cannot be used: they belong to one tenant.
+    [string[]]$CustomerName,
+
+    # Every customer in the customer file, without the picker. Not combinable with -CustomerName.
+    [switch]$AllCustomers,
 
     # Decode the token, report tenant, roles and affected areas, exit.
     [switch]$TestPermissionOnly
@@ -484,6 +502,50 @@ $ErrorActionPreference = 'Stop'
 # by setting the environment. This must also run BEFORE the credential preflight below,
 # which throws on an empty TenantId - with a customer file the environment is legitimately
 # empty until this block has populated the variables.
+function ConvertFrom-SelectionAnswer {
+    # '1,3,5-7' or 'A' for all -> 1-based indexes in the order given, no duplicates.
+    # Returns nothing for anything that is not a valid selection; callers wrap the call in @().
+    [CmdletBinding()]
+    [OutputType([int[]])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Answer,
+        [Parameter(Mandatory)][int]$Count
+    )
+
+    $trimmed = $Answer.Trim()
+    if ($trimmed -match '^(a|all|\*)$') { return (1..$Count) }
+
+    $indexes = [System.Collections.Generic.List[int]]::new()
+    $tokens = @($trimmed -split '[,\s]+' | Where-Object { $PSItem -ne '' })
+    if ($tokens.Count -eq 0) { return }
+
+    foreach ($token in $tokens) {
+        $first = 0
+        $last = 0
+        if ($token -match '^(\d+)$' -and [int]::TryParse($Matches[1], [ref]$first)) {
+            $last = $first
+        }
+        elseif ($token -match '^(\d+)-(\d+)$' -and
+               [int]::TryParse($Matches[1], [ref]$first) -and [int]::TryParse($Matches[2], [ref]$last)) {
+            if ($first -gt $last) { return }
+        }
+        else { return }
+
+        if ($first -lt 1 -or $last -gt $Count) { return }
+        foreach ($index in $first..$last) {
+            if (-not $indexes.Contains($index)) { $indexes.Add($index) }
+        }
+    }
+    return $indexes.ToArray()
+}
+
+if ($AllCustomers -and $CustomerName) {
+    throw '-AllCustomers and -CustomerName cannot be combined.'
+}
+if (($AllCustomers -or $CustomerName) -and -not $CustomerConfigPath) {
+    throw '-CustomerName and -AllCustomers select from a customer file; pass -CustomerConfigPath.'
+}
+
 if ($CustomerConfigPath) {
 
     if (-not (Test-Path -Path $CustomerConfigPath -PathType Leaf)) {
@@ -522,49 +584,132 @@ if ($CustomerConfigPath) {
         throw "Duplicate customer names in '$customerConfigResolved': $(($duplicateNames.Name) -join ', ')"
     }
 
-    # Select the customer: by name when given, otherwise ask
-    if ($CustomerName) {
-        $customer = $customers | Where-Object { $_["name"] -eq $CustomerName } | Select-Object -First 1
-        if (-not $customer) {
-            throw "Customer '$CustomerName' not found. Available: $((($customers | ForEach-Object { $_["name"] }) -join ', '))"
+    # Select the customers: all of them, by name, or ask. $selectedNames holds the names as
+    # the file spells them, in the order chosen, without duplicates.
+    $selectedNames = [System.Collections.Generic.List[string]]::new()
+    if ($AllCustomers) {
+        foreach ($entry in $customers) { $selectedNames.Add([string]$entry['name']) }
+    }
+    elseif ($CustomerName) {
+        foreach ($requested in $CustomerName) {
+            $match = $customers | Where-Object { $PSItem['name'] -eq $requested } | Select-Object -First 1
+            if (-not $match) {
+                throw ('Customer ''{0}'' not found. Available: {1}' -f $requested, (($customers | ForEach-Object { $PSItem['name'] }) -join ', '))
+            }
+            if ($selectedNames -notcontains [string]$match['name']) { $selectedNames.Add([string]$match['name']) }
         }
     }
     else {
         # No console to ask in: Read-Host would hang or throw in a non-interactive host.
         if (-not [string]::IsNullOrWhiteSpace($env:FUNCTIONS_WORKER_RUNTIME)) {
-            throw '-CustomerName is required when running in Azure Functions; there is no console to pick a customer in.'
+            throw '-CustomerName or -AllCustomers is required when running in Azure Functions; there is no console to pick a customer in.'
         }
-        $customerNames = $customers | ForEach-Object { $_["name"] }
-        $customer      = $null
 
         # Native picker on macOS, console menu everywhere else and on cancel/failure
         if ($IsMacOS) {
-            $quotedNames  = ($customerNames | ForEach-Object { '"' + (($_ -replace '\\', '\\') -replace '"', '\"') + '"' }) -join ", "
-            $chosenName   = & osascript -e ("choose from list {$quotedNames} with prompt ""Select customer tenant"" with title ""EndpointManager""") 2>$null
-            if ($chosenName -eq "false") { throw "Customer selection cancelled." }
-            if ($LASTEXITCODE -eq 0 -and $chosenName) {
-                $customer = $customers | Where-Object { $_["name"] -eq $chosenName.Trim() } | Select-Object -First 1
+            $quotedNames = ($customers | ForEach-Object { '"' + (($PSItem['name'] -replace '\\', '\\') -replace '"', '\"') + '"' }) -join ', '
+            # One name per line: a joined list would be ambiguous for a name that contains ', '.
+            $appleScript = @(
+                ('set chosen to choose from list {{{0}}} with prompt "Select customer tenant(s)" with title "EndpointManager" with multiple selections allowed' -f $quotedNames)
+                'if chosen is false then return "false"'
+                'set AppleScript''s text item delimiters to linefeed'
+                'return chosen as text'
+            )
+            $osaArgs = foreach ($line in $appleScript) { '-e'; $line }
+            $chosenNames = @(& osascript @osaArgs 2>$null)
+            if ($chosenNames.Count -eq 1 -and $chosenNames[0] -eq 'false') { throw 'Customer selection cancelled.' }
+            if ($LASTEXITCODE -eq 0) {
+                foreach ($chosen in $chosenNames) {
+                    $match = $customers | Where-Object { $PSItem['name'] -eq ([string]$chosen).Trim() } | Select-Object -First 1
+                    if ($match -and $selectedNames -notcontains [string]$match['name']) { $selectedNames.Add([string]$match['name']) }
+                }
             }
         }
 
-        if (-not $customer) {
+        if ($selectedNames.Count -eq 0) {
             Write-Host "`nAvailable customers:" -ForegroundColor Cyan
             for ($i = 0; $i -lt $customers.Count; $i++) {
-                Write-Host ("  [{0}] {1}" -f ($i + 1), $customers[$i]["name"])
+                Write-Host ('  [{0}] {1}' -f ($i + 1), $customers[$i]['name'])
             }
-            while (-not $customer) {
-                $answer = Read-Host "`nSelect customer (1-$($customers.Count), or Q to quit)"
-                if ($answer -match '^[Qq]') { throw "Customer selection cancelled." }
-                $index = 0
-                if ([int]::TryParse($answer, [ref]$index) -and $index -ge 1 -and $index -le $customers.Count) {
-                    $customer = $customers[$index - 1]
+            while ($selectedNames.Count -eq 0) {
+                $answer = Read-Host "`nSelect customer(s) (e.g. 1,3,5-7, A for all, Q to quit)"
+                if ($answer -match '^\s*[Qq]') { throw 'Customer selection cancelled.' }
+                $picked = @(ConvertFrom-SelectionAnswer -Answer $answer -Count $customers.Count)
+                if ($picked.Count -eq 0) {
+                    Write-Warning ('Enter numbers between 1 and {0}, for example 1,3,5-7, or A for all, or Q to quit.' -f $customers.Count)
+                    continue
                 }
-                else {
-                    Write-Warning "Enter a number between 1 and $($customers.Count), or Q to quit."
-                }
+                foreach ($index in $picked) { $selectedNames.Add([string]$customers[$index - 1]['name']) }
             }
         }
     }
+
+    # More than one customer: run this script once per customer and stop here. Each run gets
+    # its own script scope, so the token cache, the name caches and the policy definitions
+    # (which the $expand fallback mutates) cannot follow one tenant into the next. The child
+    # reads the customer file itself - only the name is passed on, never a secret.
+    if ($selectedNames.Count -gt 1) {
+        $tenantBound = @(@('TenantId', 'ClientId', 'ClientSecret', 'CertificateThumbprint', 'CertificatePath',
+                'CertificatePassword', 'TenantName') | Where-Object { $PSBoundParameters.ContainsKey($PSItem) })
+        if ($tenantBound.Count -gt 0) {
+            throw ('-{0} belongs to one tenant and cannot be combined with several customers. Remove it, or select one customer.' -f ($tenantBound -join ', -'))
+        }
+        if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
+            throw 'Several customers need the script to run from a file, so that it can start itself once per customer.'
+        }
+
+        $sharedTenants = @($customers | Where-Object { $selectedNames -contains [string]$PSItem['name'] } |
+            Group-Object -Property { [string]$PSItem['tenantId'] } | Where-Object { $PSItem.Count -gt 1 })
+        foreach ($shared in $sharedTenants) {
+            Write-Warning ('Tenant {0} is selected more than once under different customer names.' -f $shared.Name)
+        }
+
+        $customerConfig = $null
+        $customers = $null
+
+        $outcomes = [System.Collections.Generic.List[pscustomobject]]::new()
+        $position = 0
+        foreach ($selectedName in $selectedNames) {
+            $position++
+            Write-Host ('=== [{0}/{1}] {2} ===' -f $position, $selectedNames.Count, $selectedName) -ForegroundColor Cyan
+
+            $childArgs = @{} + $PSBoundParameters
+            [void]$childArgs.Remove('AllCustomers')
+            $childArgs['CustomerName'] = @($selectedName)
+
+            $emitted = [System.Collections.Generic.List[object]]::new()
+            try {
+                # Emitted as they arrive, with the customer attached, so a pipeline consumer
+                # sees the same object as from a single run plus one property.
+                & $PSCommandPath @childArgs | ForEach-Object {
+                    $emitted.Add($PSItem)
+                    $PSItem | Add-Member -NotePropertyName Customer -NotePropertyValue $selectedName -PassThru
+                }
+                $childResult = ($emitted.Count -gt 0) ? $emitted[$emitted.Count - 1] : $null
+                $complete = ($null -ne $childResult -and $null -ne $childResult.PSObject.Properties['ExportComplete']) ? [bool]$childResult.ExportComplete : $true
+                $outcomes.Add([pscustomobject]@{ Customer = $selectedName; Succeeded = $true; Complete = $complete; Message = '' })
+            }
+            catch [System.Exception] {
+                # One tenant's failure must not cost the others their run.
+                Write-Warning ('{0}: failed - {1}' -f $selectedName, $PSItem.Exception.Message)
+                $outcomes.Add([pscustomobject]@{ Customer = $selectedName; Succeeded = $false; Complete = $false; Message = $PSItem.Exception.Message })
+            }
+        }
+
+        $failed = @($outcomes | Where-Object { -not $PSItem.Succeeded })
+        $incomplete = @($outcomes | Where-Object { $PSItem.Succeeded -and -not $PSItem.Complete })
+        Write-Host ('Customers: {0} succeeded, {1} failed.' -f ($outcomes.Count - $failed.Count), $failed.Count)
+        if ($incomplete.Count -gt 0) {
+            Write-Warning ('Export incomplete for: {0}' -f (($incomplete | ForEach-Object { $PSItem.Customer }) -join ', '))
+        }
+        if ($failed.Count -gt 0) {
+            # Terminating (ErrorActionPreference is Stop), so a scheduled caller sees a failure.
+            Write-Error ('{0} of {1} customer(s) failed: {2}' -f $failed.Count, $outcomes.Count, (($failed | ForEach-Object { $PSItem.Customer }) -join ', '))
+        }
+        return
+    }
+
+    $customer = $customers | Where-Object { $PSItem['name'] -eq $selectedNames[0] } | Select-Object -First 1
 
     foreach ($requiredKey in "tenantId", "clientId") {
         if (-not ($customer.ContainsKey($requiredKey) -and $customer[$requiredKey])) {
@@ -663,7 +808,16 @@ if ($CustomerConfigPath) {
         $JsonDepth = [int]$customer["jsonDepth"]
     }
 
-    Write-Host "Customer: $($customer["name"])  (tenant $TenantId)" -ForegroundColor Green
+    # The customer file holds every customer's secret in clear text. Only the chosen one was
+    # needed, and it is now in the credential parameters; do not let the rest outlive the
+    # read (a dot-sourced run or a reused runspace would keep them).
+    $selectedCustomerName = [string]$customer['name']
+    $customerConfig = $null
+    $customers = $null
+    $customer = $null
+    $customerCertPassword = $null
+
+    Write-Host ('Customer: {0}  (tenant {1})' -f $selectedCustomerName, $TenantId) -ForegroundColor Green
 }
 
 # Azure Functions: the default output folder is $PSScriptRoot, which is read-only under

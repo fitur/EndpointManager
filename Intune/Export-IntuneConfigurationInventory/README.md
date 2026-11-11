@@ -230,8 +230,9 @@ control, the same as you would a client secret.
 ### Several customers
 
 For more than one tenant, `-CustomerConfigPath` reads credentials from a local JSON file
-instead. `-CustomerName` picks one without prompting; leaving it out prompts — a native
-picker on macOS, a numbered console menu elsewhere.
+instead. `-CustomerName` picks one or more without prompting, `-AllCustomers` takes every
+customer in the file, and leaving both out prompts — a native picker on macOS (cmd-click for
+several), a numbered console menu elsewhere (`1,3,5-7`, `A` for all, `Q` to quit).
 
 ```powershell
 cp customers.sample.json ~/.intune/customers.json
@@ -264,6 +265,39 @@ which is true only for parameters the caller actually supplied. Without
 `-CustomerConfigPath`, the environment variables behave exactly as before.
 
 Add the filled-in copy to `.gitignore`.
+
+#### More than one customer in one run
+
+```powershell
+./Export-IntuneConfigurationInventory.ps1 -CustomerConfigPath ~/.intune/customers.json `
+    -CustomerName 'Contoso', 'Fabrikam' -OutputDirectory ~/Intune-Data -CompareWithPrevious
+
+./Export-IntuneConfigurationInventory.ps1 -CustomerConfigPath ~/.intune/customers.json `
+    -AllCustomers -TestPermissionOnly
+```
+
+With more than one customer the script starts itself once per customer, in the order given
+and one at a time, each run in its own script scope. Nothing but the customer name is passed
+on; each run reads the customer file itself, so no secret reaches a command line, and a value
+the customer does not define is still cleared, never inherited. A customer that fails is
+reported and the next one still runs. After the last one the script prints how many
+succeeded and failed, warns about customers whose export was incomplete (a skipped area), and
+ends with an error if any failed, so a scheduled caller sees it. Each customer's result object
+is passed on with a `Customer` property added.
+
+- `-AllCustomers` and `-CustomerName` cannot be combined, and both need `-CustomerConfigPath`.
+- `-TenantId`, `-ClientId`, `-ClientSecret`, `-CertificateThumbprint`, `-CertificatePath`,
+  `-CertificatePassword` and `-TenantName` belong to one tenant and are refused together with
+  several customers (`-TenantName` would put them all in one folder). `-OutputDirectory` can
+  be shared: each customer gets its own tenant folder under it.
+- The list is given to PowerShell as an array (`-CustomerName 'A', 'B'`). From outside
+  PowerShell, `pwsh -File script.ps1 -CustomerName A,B` passes one string `A,B`, which is not
+  a customer name; use `pwsh -Command` for that.
+- `-TestPermissionOnly` prints one result per customer, a quick way to check the permissions
+  and the certificate expiry of all of them.
+- A thumbprint certificate on macOS shows a Keychain prompt per customer.
+- In Azure Functions call the script once per customer: several customers in one call add up
+  to one run time against the plan's timeout.
 
 ## Usage
 
