@@ -1211,9 +1211,12 @@ function Get-ClientCertificate {
         client secret authentication.
 
     .NOTES
-        Kept byte-for-byte in step with the copy in New-IntuneWin32AppJson.ps1 so both
-        scripts resolve certificates identically. A later move to Key Vault is a one-line
-        addition here: fetch the PFX bytes and construct the same object.
+        New-IntuneWin32AppJson.ps1 has a similar function, but the two are deliberately not
+        kept in step (decided when that script was reviewed). The copies have drifted: this
+        one takes the PFX password as a SecureString, like -CertificatePassword everywhere in
+        this script, and its catch around the EphemeralKeySet attempt is broad, for the reason
+        given at the catch. A later move to Key Vault is a one-line addition here: fetch the
+        PFX bytes and construct the same object.
     #>
     [CmdletBinding()]
     [OutputType([System.Security.Cryptography.X509Certificates.X509Certificate2])]
