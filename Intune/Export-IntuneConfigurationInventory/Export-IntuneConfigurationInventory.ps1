@@ -1655,8 +1655,8 @@ function Get-DeviceInventory {
 }
 
 function Get-DeviceInventorySummary {
-    # Invariant-culture key order (case-insensitive: iOS sorts before Windows) so the
-    # manifest is byte-stable between runs and machines with the same devices.
+    # Ordinal key order (Windows sorts before iOS) so the manifest is byte-stable between
+    # runs and machines with the same devices, whatever the host culture or ICU version.
     [CmdletBinding()]
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Row)
 
@@ -1664,7 +1664,7 @@ function Get-DeviceInventorySummary {
         param($Items, $Property)
         $map = [ordered]@{}
         $groups = @($Items | Group-Object -Property $Property)
-        foreach ($group in ($groups | Sort-Object -Property Name -Culture ([cultureinfo]::InvariantCulture))) {
+        foreach ($group in (Get-OrdinalSortedRow -Row $groups -Property Name)) {
             $map[([string]::IsNullOrEmpty($group.Name) ? '<empty>' : $group.Name)] = $group.Count
         }
         return $map
@@ -2632,8 +2632,10 @@ function Compare-JsonNode {
     }
 
     if ((Test-IsMap $Reference) -and (Test-IsMap $Difference)) {
-        $names = @($Reference.PSObject.Properties.Name) + @($Difference.PSObject.Properties.Name)
-        foreach ($name in ($names | Sort-Object -Unique)) {
+        # Ordinal and case-sensitive, so the order of fieldChanges does not depend on the host.
+        $names = [System.Collections.Generic.SortedSet[string]]::new(
+            [string[]]@(@($Reference.PSObject.Properties.Name) + @($Difference.PSObject.Properties.Name)), [System.StringComparer]::Ordinal)
+        foreach ($name in $names) {
             Compare-JsonNode -Reference (Get-ObjectProperty -InputObject $Reference -Name $name) `
                 -Difference (Get-ObjectProperty -InputObject $Difference -Name $name) `
                 -Path (([string]::IsNullOrEmpty($Path)) ? $name : ('{0}.{1}' -f $Path, $name)) `
@@ -2653,7 +2655,9 @@ function Compare-JsonNode {
             $diffMap = @{}
             foreach ($element in $diffItems) { $diffMap[[string](Get-ObjectProperty -InputObject $element -Name $matchKey)] = $element }
 
-            foreach ($key in (@($refMap.Keys) + @($diffMap.Keys) | Sort-Object -Unique)) {
+            $matchKeys = [System.Collections.Generic.SortedSet[string]]::new(
+                [string[]]@(@($refMap.Keys) + @($diffMap.Keys)), [System.StringComparer]::Ordinal)
+            foreach ($key in $matchKeys) {
                 Compare-JsonNode -Reference ($refMap.ContainsKey($key) ? $refMap[$key] : $null) `
                     -Difference ($diffMap.ContainsKey($key) ? $diffMap[$key] : $null) `
                     -Path ('{0}[{1}={2}]' -f $Path, $matchKey, $key) `
@@ -2821,10 +2825,8 @@ function Invoke-InventoryComparison {
     }
 
     # Union of areas skipped in either run. Deletions cannot be asserted for these.
-    $unreliableAreas = @(
-        @($current.Unreliable) + ($isBaselineMode ? @() : @($baseline.Unreliable)) |
-            Sort-Object -Unique
-    )
+    $unreliableAreas = @([System.Collections.Generic.SortedSet[string]]::new(
+        [string[]]@(@($current.Unreliable) + ($isBaselineMode ? @() : @($baseline.Unreliable))), [System.StringComparer]::Ordinal))
 
     # An area present in only one manifest was not read at all in the other run - typically
     # -IncludeConditionalAccess toggled between runs, or a baseline from an older version.
@@ -2834,7 +2836,8 @@ function Invoke-InventoryComparison {
         $currentAreas = @(@(Get-ObjectProperty -InputObject $current.Manifest -Name 'areas') | ForEach-Object { [string]$PSItem.area })
         $baselineAreas = @(@(Get-ObjectProperty -InputObject $baseline.Manifest -Name 'areas') | ForEach-Object { [string]$PSItem.area })
         $oneSided = @($baselineAreas | Where-Object { $PSItem -cnotin $currentAreas })
-        $unreliableAreas = @(@($unreliableAreas) + $oneSided | Sort-Object -Unique)
+        $unreliableAreas = @([System.Collections.Generic.SortedSet[string]]::new(
+            [string[]]@(@($unreliableAreas) + $oneSided), [System.StringComparer]::Ordinal))
 
         # The other way round: an area read now but not in the baseline lists all its policies
         # as added, with nothing to say that they were not read before.
@@ -3830,7 +3833,7 @@ Write-Utf8File -Path $manifestPath -Content (ConvertTo-StableJson -InputObject $
 $settingDefinitionsPath = $null
 if ($IncludeSettingDefinitions) {
     $settingDefinitionsPath = Join-Path -Path $runDirectory -ChildPath ('_settingdefinitions_{0}.json' -f $fileStamp)
-    $definitionList = @($settingDefinitions.Values | Sort-Object -Property { [string]$PSItem.id })
+    $definitionList = Get-OrdinalSortedRow -Row @($settingDefinitions.Values) -Property id
     $settingDefinitionsDocument = [ordered]@{
         schemaVersion   = 1
         generatedUtc    = (Get-Date).ToUniversalTime().ToString('o')
