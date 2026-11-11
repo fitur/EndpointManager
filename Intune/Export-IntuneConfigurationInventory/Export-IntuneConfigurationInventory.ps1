@@ -1948,7 +1948,9 @@ function Get-AuditEventWindow {
             }
 
             $projected.Add([ordered]@{
-                activityDateTime      = [string](Get-ObjectProperty -InputObject $auditEvent -Name 'activityDateTime')
+                # Not [string]: Invoke-RestMethod has already turned the value into a DateTime,
+                # and a cast would write it as MM/dd/yyyy with no zone.
+                activityDateTime      = ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject $auditEvent -Name 'activityDateTime')
                 activityType          = [string](Get-ObjectProperty -InputObject $auditEvent -Name 'activityType')
                 activityOperationType = $operation
                 activityResult        = [string](Get-ObjectProperty -InputObject $auditEvent -Name 'activityResult')
@@ -2229,7 +2231,7 @@ function Get-LatestRunFolder {
         try {
             $manifest = Get-Content -Path $manifestFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
             $parsed = [datetimeoffset]::MinValue
-            $stamp = [string](Get-ObjectProperty -InputObject $manifest -Name 'runTimestampUtc')
+            $stamp = ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject $manifest -Name 'runTimestampUtc')
             if (-not [datetimeoffset]::TryParse($stamp, [cultureinfo]::InvariantCulture,
                     [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsed)) { continue }
             [pscustomobject]@{ Folder = $folder; RunUtc = $parsed.UtcDateTime }
@@ -2536,7 +2538,8 @@ function Get-PolicyAuditActor {
     # Newest first. Two events can share a timestamp, and the index holds them in the order
     # the audit pages happened to arrive, so activityType and the first resource id break the
     # tie. Ordinal throughout, like every other sort that reaches disk.
-    $byTime = [System.Func[object, string]] { param($e) [string]$e.activityDateTime }
+    # ISO 8601 in UTC sorts chronologically as text; a DateTime cast to string does not.
+    $byTime = [System.Func[object, string]] { param($e) ConvertTo-StableDateString -Value $e.activityDateTime }
     $byType = [System.Func[object, string]] { param($e) [string]$e.activityType }
     $byResource = [System.Func[object, string]] {
         param($e)
@@ -2938,8 +2941,8 @@ function Invoke-InventoryComparison {
         # this name, one in each run folder; a consumer opens <run>/<sidecarArchive> and reads
         # the entry rather than the loose path. Empty only when the archive step did not run.
         sidecarArchive  = [string]$SidecarArchiveName
-        baselineRunUtc  = $isBaselineMode ? $null : [string](Get-ObjectProperty -InputObject $baseline.Manifest -Name 'runTimestampUtc')
-        currentRunUtc   = [string](Get-ObjectProperty -InputObject $current.Manifest -Name 'runTimestampUtc')
+        baselineRunUtc  = $isBaselineMode ? $null : (ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject $baseline.Manifest -Name 'runTimestampUtc'))
+        currentRunUtc   = ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject $current.Manifest -Name 'runTimestampUtc')
         platformSplit   = (-not $NoPlatformSplit.IsPresent)
         # False means at least one area is unreadable in one of the runs, so the change set is
         # not a complete picture and deletions in those areas are unproven.
@@ -3180,7 +3183,7 @@ if ($IncludeAuditActor) {
     $priorRun = Get-LatestRunFolder -TenantDirectory $tenantRoot
     if ($null -ne $priorRun) {
         try {
-            $priorStamp = [string](Get-ObjectProperty -InputObject (Get-RunContext -Path $priorRun.FullName).Manifest -Name 'runTimestampUtc')
+            $priorStamp = ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject (Get-RunContext -Path $priorRun.FullName).Manifest -Name 'runTimestampUtc')
             if (-not [string]::IsNullOrWhiteSpace($priorStamp)) {
                 $auditSince = [datetimeoffset]::Parse($priorStamp, [cultureinfo]::InvariantCulture,
                     [System.Globalization.DateTimeStyles]::RoundtripKind).UtcDateTime
