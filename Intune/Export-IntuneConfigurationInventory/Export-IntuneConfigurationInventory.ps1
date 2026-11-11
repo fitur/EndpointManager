@@ -565,14 +565,14 @@ if (($AllCustomers -or $CustomerName) -and -not $CustomerConfigPath) {
 
 if ($CustomerConfigPath) {
 
-    if (-not (Test-Path -Path $CustomerConfigPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $CustomerConfigPath -PathType Leaf)) {
         throw "Customer config '$CustomerConfigPath' does not exist or is not a file."
     }
-    $customerConfigResolved = (Resolve-Path -Path $CustomerConfigPath).Path
+    $customerConfigResolved = (Resolve-Path -LiteralPath $CustomerConfigPath).Path
 
     # Warn when the file is readable by more than its owner. UnixMode is not populated on Windows.
     if (-not $IsWindows) {
-        $configItem = Get-Item -Path $customerConfigResolved
+        $configItem = Get-Item -LiteralPath $customerConfigResolved
         if ($configItem.PSObject.Properties.Name -contains "UnixMode" -and
             $configItem.UnixMode.Substring(4) -match '[rwx]') {
             Write-Warning "'$customerConfigResolved' is readable beyond its owner ($($configItem.UnixMode)). Run: chmod 600 '$customerConfigResolved'"
@@ -593,7 +593,7 @@ if ($CustomerConfigPath) {
     }
 
     try {
-        $customerConfig = Get-Content -Path $customerConfigResolved -Raw -Encoding UTF8 |
+        $customerConfig = Get-Content -LiteralPath $customerConfigResolved -Raw -Encoding UTF8 |
             ConvertFrom-Json -AsHashtable -ErrorAction Stop
     }
     catch {
@@ -1248,10 +1248,10 @@ function Get-ClientCertificate {
     }
 
     if ($Path) {
-        if (-not (Test-Path -Path $Path -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
             throw "Certificate file '$Path' does not exist or is not a file."
         }
-        $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -Path $Path).Path)
+        $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path).Path)
         $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]
 
         # EphemeralKeySet keeps the private key out of any on-disk keystore, but it is not
@@ -2188,12 +2188,12 @@ function Get-SidecarContent {
     if ([string]::IsNullOrWhiteSpace($RelativeFile)) { return '' }
 
     $loosePath = Join-Path -Path $RunPath -ChildPath $RelativeFile
-    if (Test-Path -Path $loosePath -PathType Leaf) {
-        return [string](Get-Content -Path $loosePath -Raw -Encoding utf8)
+    if (Test-Path -LiteralPath $loosePath -PathType Leaf) {
+        return [string](Get-Content -LiteralPath $loosePath -Raw -Encoding utf8)
     }
 
     if (-not $script:sidecarArchiveCache.ContainsKey($RunPath)) {
-        $archiveFile = @(Get-ChildItem -Path $RunPath -Filter '*_sidecars.zip' -File) | Select-Object -First 1
+        $archiveFile = @(Get-ChildItem -LiteralPath $RunPath -Filter '*_sidecars.zip' -File) | Select-Object -First 1
         if ($null -eq $archiveFile) {
             $script:sidecarArchiveCache[$RunPath] = $null
         }
@@ -2345,12 +2345,12 @@ function Get-RunManifest {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
 
-    $manifestFile = Get-ChildItem -Path $Path -Filter '_manifest_*.json' -File |
+    $manifestFile = Get-ChildItem -LiteralPath $Path -Filter '_manifest_*.json' -File |
         Sort-Object Name | Select-Object -Last 1
     if ($null -eq $manifestFile) {
         throw ('No _manifest_*.json found in "{0}". Is this an export run folder?' -f $Path)
     }
-    return (Get-Content -Path $manifestFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json)
+    return (Get-Content -LiteralPath $manifestFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json)
 }
 
 function Get-RunContext {
@@ -2370,7 +2370,7 @@ function Get-RunContext {
 
     $csvName = [string](Get-ObjectProperty -InputObject $manifest -Name 'csvFile')
     $csvPath = Join-Path -Path $Path -ChildPath $csvName
-    if (-not (Test-Path -Path $csvPath)) {
+    if (-not (Test-Path -LiteralPath $csvPath)) {
         throw ('CSV "{0}" named by the manifest is missing from "{1}".' -f $csvName, $Path)
     }
 
@@ -2380,7 +2380,7 @@ function Get-RunContext {
     if ([string]::IsNullOrEmpty($csvDelimiter)) { $csvDelimiter = ',' }
 
     $index = @{}
-    foreach ($row in (Import-Csv -Path $csvPath -Delimiter $csvDelimiter)) {
+    foreach ($row in (Import-Csv -LiteralPath $csvPath -Delimiter $csvDelimiter)) {
         $index[$row.RecordKey] = $row
     }
     Write-Verbose ('Loaded {0} record(s) from {1}' -f $index.Count, $csvName)
@@ -2413,15 +2413,15 @@ function Get-LatestRunFolder {
         [string]$ExcludeName
     )
 
-    if (-not (Test-Path -Path $TenantDirectory -PathType Container)) { return $null }
+    if (-not (Test-Path -LiteralPath $TenantDirectory -PathType Container)) { return $null }
 
-    $candidates = foreach ($folder in @(Get-ChildItem -Path $TenantDirectory -Directory)) {
+    $candidates = foreach ($folder in @(Get-ChildItem -LiteralPath $TenantDirectory -Directory)) {
         if ($folder.Name -ceq $ExcludeName) { continue }
-        $manifestFile = @(Get-ChildItem -Path $folder.FullName -Filter '_manifest_*.json' -File |
+        $manifestFile = @(Get-ChildItem -LiteralPath $folder.FullName -Filter '_manifest_*.json' -File |
             Sort-Object Name) | Select-Object -Last 1
         if ($null -eq $manifestFile) { continue }
         try {
-            $manifest = Get-Content -Path $manifestFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
+            $manifest = Get-Content -LiteralPath $manifestFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
             $parsed = [datetimeoffset]::MinValue
             $stamp = ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject $manifest -Name 'runTimestampUtc')
             if (-not [datetimeoffset]::TryParse($stamp, [cultureinfo]::InvariantCulture,
@@ -2772,7 +2772,7 @@ function Invoke-InventoryComparison {
     )
 
     # Run folders are named yyyy-MM-dd HH-mm, so lexical order is chronological.
-    $runFolders = @(Get-ChildItem -Path $TenantDirectory -Directory | Sort-Object -Property Name)
+    $runFolders = @(Get-ChildItem -LiteralPath $TenantDirectory -Directory | Sort-Object -Property Name)
     if ($runFolders.Count -eq 0) {
         throw ('No run folders found under "{0}".' -f $TenantDirectory)
     }
@@ -2813,7 +2813,7 @@ function Invoke-InventoryComparison {
     # already archived, so the name can be read off disk. The wired caller passes it because
     # the archive does not exist yet when the comparison runs.
     if ([string]::IsNullOrWhiteSpace($SidecarArchiveName)) {
-        $discoveredArchive = @(Get-ChildItem -Path $current.Path -Filter '*_sidecars.zip' -File) | Select-Object -First 1
+        $discoveredArchive = @(Get-ChildItem -LiteralPath $current.Path -Filter '*_sidecars.zip' -File) | Select-Object -First 1
         if ($null -ne $discoveredArchive) { $SidecarArchiveName = $discoveredArchive.Name }
     }
 
@@ -2857,13 +2857,13 @@ function Invoke-InventoryComparison {
     # assignment change reaches its parent policy through the parent resource in the same
     # event. $auditByPolicy stays $null when the file is absent, which the field emit checks.
     $auditByPolicy = $null
-    $auditFile = @(Get-ChildItem -Path $current.Path -Filter '_auditevents_*.json' -File |
+    $auditFile = @(Get-ChildItem -LiteralPath $current.Path -Filter '_auditevents_*.json' -File |
         Sort-Object -Property Name) | Select-Object -Last 1
     if ($null -ne $auditFile) {
         try {
             $auditByPolicy = @{}
             $guidPattern = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
-            $auditDoc = Get-Content -Path $auditFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
+            $auditDoc = Get-Content -LiteralPath $auditFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
             $auditEvents = @(Get-ObjectProperty -InputObject $auditDoc -Name 'events' | Where-Object { $null -ne $PSItem })
             foreach ($auditEvent in $auditEvents) {
                 $eventKeys = [System.Collections.Generic.List[string]]::new()
@@ -3352,8 +3352,8 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     # The script folder is normally a git checkout, and the repository's .gitignore covers
     # *.csv but not the manifest, the change set or the sidecar archive. Say so rather than
     # write a tenant's security configuration one 'git add .' away from a remote.
-    $probe = Get-Item -Path $OutputDirectory
-    while ($null -ne $probe -and -not (Test-Path -Path (Join-Path -Path $probe.FullName -ChildPath '.git'))) {
+    $probe = Get-Item -LiteralPath $OutputDirectory
+    while ($null -ne $probe -and -not (Test-Path -LiteralPath (Join-Path -Path $probe.FullName -ChildPath '.git'))) {
         $probe = $probe.Parent
     }
     if ($null -ne $probe) {
@@ -3387,7 +3387,7 @@ if ($null -ne $existingRun) {
 # get the seconds: $fileStamp names the CSV, the manifest, every JSON file and the zip,
 # so leaving it at minute precision would let a second run silently overwrite the first
 # run's archive even though its folder was uniquely named.
-if (Test-Path -Path $runDirectory) {
+if (Test-Path -LiteralPath $runDirectory) {
     $seconds = $runLocal.ToString('ss')
     $folderStamp = '{0}-{1}' -f $folderStamp, $seconds
     $fileStamp = '{0}{1}' -f $fileStamp, $seconds
@@ -3763,8 +3763,8 @@ Export-StableCsv -Path $csvPath -Delimiter $Delimiter `
 # comparison, so the current run is still diffed loose (see the archive block below). The
 # name is fixed and every sidecar file exists by now, so the count and the name go into the
 # single manifest write here rather than forcing a second one.
-$sidecarAreaFolders = @(Get-ChildItem -Path $runDirectory -Directory)
-$sidecarFiles = @($sidecarAreaFolders | ForEach-Object { Get-ChildItem -Path $PSItem.FullName -File -Recurse })
+$sidecarAreaFolders = @(Get-ChildItem -LiteralPath $runDirectory -Directory)
+$sidecarFiles = @($sidecarAreaFolders | ForEach-Object { Get-ChildItem -LiteralPath $PSItem.FullName -File -Recurse })
 $sidecarArchiveName = '{0}_{1}_sidecars.zip' -f $tenantNamePart, $fileStamp
 
 # The manifest is what lets a diffing agent tell an empty area from an unreadable one.
@@ -3918,9 +3918,9 @@ try {
 
         # Unreachable now that $fileStamp gains seconds on a folder collision; a guard so a
         # manually re-created archive cannot fail the run.
-        if (Test-Path -Path $sidecarArchivePath) {
+        if (Test-Path -LiteralPath $sidecarArchivePath) {
             Write-Warning ('Overwriting existing archive {0}.' -f $sidecarArchivePath)
-            Remove-Item -Path $sidecarArchivePath -Force
+            Remove-Item -LiteralPath $sidecarArchivePath -Force
         }
 
         # ZipFile::Open + explicit entries, not CreateFromDirectory: the latter would sweep in
