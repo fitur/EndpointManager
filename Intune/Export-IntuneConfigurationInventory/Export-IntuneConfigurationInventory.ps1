@@ -3524,18 +3524,21 @@ foreach ($definition in $policyDefinitions) {
         $id = [string](Get-ObjectProperty -InputObject $item -Name 'id')
         $assignments = Get-ObjectProperty -InputObject $item -Name 'assignments'
 
+        $assignmentReadFailed = $false
         if ($definition.FetchAssignmentsPerItem -and -not [string]::IsNullOrWhiteSpace($id)) {
             try {
                 $assignments = Get-GraphCollection -Uri ('{0}/{1}/assignments' -f $baseUri, $id)
             }
             catch [System.Exception] {
-                Write-Verbose ('No assignments for {0} {1}: {2}' -f $definition.Area, $id, $PSItem.Exception.Message)
+                # An empty assignment list would read as "unassigned"; this is "unknown".
+                Write-Warning ('{0} "{1}": could not read assignments - {2}' -f $definition.Area, $id, $PSItem.Exception.Message)
                 $assignments = $null
+                $assignmentReadFailed = $true
             }
         }
 
         $assignmentDetail = ConvertTo-AssignmentDetail -Assignment $assignments
-        $recordDegraded = $assignmentDetail.Degraded
+        $recordDegraded = $assignmentDetail.Degraded -or $assignmentReadFailed
 
         # Resolved here rather than just before the write: Expand-ScriptContent below needs the
         # sidecar's base name to name the .ps1/.sh beside it. Both are pure reads of $item, $id
