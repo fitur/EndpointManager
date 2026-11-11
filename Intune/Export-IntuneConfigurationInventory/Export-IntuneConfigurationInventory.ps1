@@ -3365,17 +3365,23 @@ if ($TestPermissionOnly) {
 # sidecar files are written as policies are read.
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = -not [string]::IsNullOrWhiteSpace($PSScriptRoot) ? $PSScriptRoot : (Get-Location).Path
+}
 
-    # The script folder is normally a git checkout, and the repository's .gitignore covers
-    # *.csv but not the manifest, the change set or the sidecar archive. Say so rather than
-    # write a tenant's security configuration one 'git add .' away from a remote.
-    $probe = Get-Item -LiteralPath $OutputDirectory
-    while ($null -ne $probe -and -not (Test-Path -LiteralPath (Join-Path -Path $probe.FullName -ChildPath '.git'))) {
-        $probe = $probe.Parent
-    }
-    if ($null -ne $probe) {
-        Write-Warning ('-OutputDirectory not set: writing into the git work tree "{0}". Pass -OutputDirectory outside the repository.' -f $probe.FullName)
-    }
+# The output folder, wherever it came from (parameter, customer file or the script folder),
+# may sit inside a git checkout. The repository's .gitignore covers *.csv but not the
+# manifest, the change set or the sidecar archive. Say so rather than write a tenant's
+# security configuration one 'git add .' away from a remote. The folder may not exist yet, so
+# the search starts at its nearest existing parent.
+$probePath = [System.IO.Path]::GetFullPath($OutputDirectory)
+while (-not [string]::IsNullOrEmpty($probePath) -and -not (Test-Path -LiteralPath $probePath)) {
+    $probePath = Split-Path -Path $probePath -Parent
+}
+$probe = [string]::IsNullOrEmpty($probePath) ? $null : (Get-Item -LiteralPath $probePath)
+while ($null -ne $probe -and -not (Test-Path -LiteralPath (Join-Path -Path $probe.FullName -ChildPath '.git'))) {
+    $probe = $probe.Parent
+}
+if ($null -ne $probe) {
+    Write-Warning ('The output folder "{0}" is inside the git work tree "{1}". Use an -OutputDirectory outside the repository, or make sure the run output is ignored.' -f $OutputDirectory, $probe.FullName)
 }
 
 $tenantRoot = Join-Path -Path $OutputDirectory -ChildPath $tenantNamePart
