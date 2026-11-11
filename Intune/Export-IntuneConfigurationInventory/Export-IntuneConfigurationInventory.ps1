@@ -2836,6 +2836,13 @@ function Invoke-InventoryComparison {
         $oneSided = @($baselineAreas | Where-Object { $PSItem -cnotin $currentAreas })
         $unreliableAreas = @(@($unreliableAreas) + $oneSided | Sort-Object -Unique)
 
+        # The other way round: an area read now but not in the baseline lists all its policies
+        # as added, with nothing to say that they were not read before.
+        $newAreas = @($currentAreas | Where-Object { $PSItem -cnotin $baselineAreas })
+        foreach ($newArea in $newAreas) {
+            $comparabilityNotes.Add(('Area "{0}" was not read in the baseline; its policies are listed as added.' -f $newArea))
+        }
+
         # A hash taken with and without detail settings, or at another depth, is not the same
         # measurement - every policy with detail would read as modified.
         foreach ($setting in @('detailedSettingsIncluded', 'jsonDepth')) {
