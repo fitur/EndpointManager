@@ -1,5 +1,3 @@
-#Requires -Version 7.4
-
 <#
 .SYNOPSIS
     Packages and uploads an Intune Win32 app from a zip-packaged PSADT application.
@@ -199,9 +197,9 @@
         -DeadlineTime  (Get-Date "2026-09-08 17:00")
 
 .NOTES
-    Version:        3.1.0
+    Version:        3.1.1
     Creation Date:  2026-05-07
-    Last Updated:   2026-11-03
+    Last Updated:   2026-11-17
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -213,6 +211,10 @@
     copies in the export and import scripts lack. It was deliberately not synced to them.
 
     CHANGELOG
+
+        3.1.1 - 2026-11-17
+            #Requires moved below the comment-based help block. Above it, Get-Help did not
+            associate the help with the script.
 
         3.1.0 - 2026-11-03
             Fixes from a review of 3.0.2. The package may now carry ApplicationInformation.md
@@ -416,6 +418,8 @@
             1641 is patched to softReboot afterwards, since passing return codes to the
             module appends them to its defaults and produces duplicates.
 #>
+
+#Requires -Version 7.4
 
 [CmdletBinding(SupportsShouldProcess)]
 param (
