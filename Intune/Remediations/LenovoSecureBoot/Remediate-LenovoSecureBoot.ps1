@@ -1,5 +1,4 @@
 <#
-
 .SYNOPSIS
     PowerShell script to enable Secure Boot in the BIOS on Lenovo devices.
 
@@ -21,21 +20,24 @@
     Exit 1 = remediation failed
 
 .LINK
-    https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
+    https://learn.microsoft.com/intune/device-management/tools/deploy-remediations
 
 .LINK
     https://www.github.com/fitur
 
 .NOTES
-    Version:        1.0.0
+    Version:        1.0.1
     Creation Date:  2026-10-19
-    Last Updated:   2026-10-19
+    Last Updated:   2026-11-17
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     Part of remediation pair: Detect-LenovoSecureBoot.ps1 / Remediate-LenovoSecureBoot.ps1
-    Intune Remediation settings: "Run this script using the logged-on credentials" = No,
-    "Run script in 64-bit PowerShell" = Yes.
+    Intune Remediation settings:
+        Run this script using the logged-on credentials = No
+        Run script in 64-bit PowerShell                 = Yes
+        Schedule                                        = Daily
+    Runs in Windows PowerShell 5.1 (Intune Management Extension) - no PS7 syntax.
 
     Secure Boot requires UEFI boot mode. If CSM/Legacy boot is enabled, the BIOS may
     reject the change.
@@ -45,6 +47,10 @@
 
     Note: this script runs as a plain script (no CmdletBinding/ShouldProcess) since Intune
     Remediations invoke it as a single, non-interactive unit via powershell.exe -File.
+
+    Changelog
+    1.0.1 - Summary lines use Write-Output. Header aligned with the repository standard.
+    1.0.0 - Initial published version.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -55,14 +61,14 @@ try {
     # Applicability: Lenovo only
     $Manufacturer = (Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
     if ($Manufacturer -notmatch 'Lenovo') {
-        Write-Host "Not applicable: Manufacturer is '$Manufacturer'."
+        Write-Output "Not applicable: Manufacturer is '$Manufacturer'."
         exit 0
     }
 
     # Lenovo BIOS WMI interface is missing on some models (e.g. many IdeaPads)
     $BiosClass = Get-CimClass -Namespace 'root\wmi' -ClassName 'Lenovo_BiosSetting' -ErrorAction SilentlyContinue
     if (-not $BiosClass) {
-        Write-Host "Not supported: Lenovo_BiosSetting WMI class not found on this model."
+        Write-Output "Not supported: Lenovo_BiosSetting WMI class not found on this model."
         exit 0
     }
 
@@ -72,7 +78,7 @@ try {
         Select-Object -First 1
 
     if (-not $SecureBootSetting) {
-        Write-Host "Not supported: No SecureBoot setting exposed in the Lenovo BIOS WMI interface."
+        Write-Output "Not supported: No SecureBoot setting exposed in the Lenovo BIOS WMI interface."
         exit 0
     }
 
@@ -80,7 +86,7 @@ try {
     $SettingValue = (($SecureBootSetting.CurrentSetting -split ',', 2)[1] -split ';')[0].Trim()
 
     if ($SettingValue -match '^Enabled?$') {
-        Write-Host "Already compliant: BIOS '$SettingName' = '$SettingValue'. No change made."
+        Write-Output "Already compliant: BIOS '$SettingName' = '$SettingValue'. No change made."
         exit 0
     }
 
@@ -90,7 +96,7 @@ try {
     # Supervisor (2) or System Management (64) password blocks unauthenticated BIOS changes
     $PasswordSettings = Get-CimInstance -Namespace 'root\wmi' -ClassName 'Lenovo_BiosPasswordSettings' -ErrorAction SilentlyContinue
     if ($PasswordSettings -and ($PasswordSettings.PasswordState -band (2 -bor 64))) {
-        Write-Host "Remediation failed: BIOS supervisor/system management password is set (PasswordState = $($PasswordSettings.PasswordState)). Secure Boot cannot be changed without it."
+        Write-Output "Remediation failed: BIOS supervisor/system management password is set (PasswordState = $($PasswordSettings.PasswordState)). Secure Boot cannot be changed without it."
         exit 1
     }
 
@@ -118,13 +124,13 @@ try {
     }
 
     $BitLockerNote = if ($BitLockerSuspended) { ' BitLocker suspended for 1 reboot.' } else { '' }
-    Write-Host "Remediated: BIOS '$SettingName' set to '$TargetValue'. Reboot required to take effect.$BitLockerNote"
+    Write-Output "Remediated: BIOS '$SettingName' set to '$TargetValue'. Reboot required to take effect.$BitLockerNote"
     exit 0
 } catch {
     # Resume BitLocker if the BIOS change did not go through
     if ($BitLockerSuspended) {
         try { Resume-BitLocker -MountPoint $env:SystemDrive | Out-Null } catch { }
     }
-    Write-Host "Remediation failed: $($_.Exception.Message)"
+    Write-Output "Remediation failed: $($_.Exception.Message)"
     exit 1
 }

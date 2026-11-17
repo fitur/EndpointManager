@@ -1,52 +1,110 @@
 <#
-
 .SYNOPSIS
-    PowerShell script to remediate the settings for Realtek USB GbE Family Controller driver.
-    Realtek USB GbE Family Controller enables Green Ethernet as default, which causes intermittent disconnects.
+    Disables power-saving settings on Realtek USB GbE Family Controller adapters that cause
+    intermittent disconnects.
 
 .EXAMPLE
     .\Remediate-RealtekGbEFamilyControllerSettings.ps1
 
 .DESCRIPTION
-    This PowerShell script is deployed as a remediation script using Proactive Remediations in Microsoft Endpoint Manager/Intune.
+    Sets these advanced properties on every matching adapter where the driver exposes
+    them and the current value differs:
+
+        *EEE                    = 0  (Energy-Efficient Ethernet off)
+        *PriorityVLANTag        = 3  (Priority and VLAN enabled)
+        EnableExtraPowerSaving  = 0
+        EnableGreenEthernet     = 0
+
+    Changes are written without restarting the adapter, then each changed adapter is
+    restarted once so the new values take effect.
+
+    Exit 0 = all differing properties set (or no matching adapter)
+    Exit 1 = remediation failed
 
 .LINK
-    https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
+    https://learn.microsoft.com/intune/device-management/tools/deploy-remediations
+
+.LINK
+    https://www.github.com/fitur
 
 .NOTES
-    Version:        1.0.0
+    Version:        1.1.0
     Creation Date:  2022-05-31
-    Last Updated:   2022-05-31
+    Last Updated:   2026-11-17
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
+    Part of remediation pair: Detect-RealtekGbEFamilyControllerSettings.ps1 / Remediate-RealtekGbEFamilyControllerSettings.ps1
+    Intune Remediation settings:
+        Run this script using the logged-on credentials = No
+        Run script in 64-bit PowerShell                 = Yes
+        Schedule                                        = Daily
+    Runs in Windows PowerShell 5.1 (Intune Management Extension) - no PS7 syntax.
+
+    Known limitations:
+    - Restarting the adapter drops the wired connection for a few seconds.
+    - 1.0.0 never changed anything (see Changelog), so 1.1.0 is the first version that
+      actually writes these settings. Pilot it before broad rollout.
+
+    Note: this script runs as a plain script (no CmdletBinding/ShouldProcess) since Intune
+    Remediations invoke it as a single, non-interactive unit via powershell.exe -File.
+
+    Changelog
+    1.1.0 - Removed a hard-coded -WhatIf on Set-NetAdapterAdvancedProperty, which meant
+            1.0.0 only simulated the change and the pair re-triggered on every run.
+            Evaluates each matching adapter separately, restarts each changed adapter
+            once instead of once per property, and writes a summary line before exit.
+    1.0.0 - Initial published version.
 #>
 
-[CmdletBinding()]
-param (
-)
-## Variables
-$AdapterName = "Realtek USB GbE Family Controller*"
-$AdapterSettings = ("*EEE", "*PriorityVLANTag", "EnableExtraPowerSaving", "EnableGreenEthernet")
-$AdapterValues = (0, 3, 0, 0)
+$ErrorActionPreference = 'Stop'
+
+$AdapterPattern  = 'Realtek USB GbE Family Controller*'
+$DesiredSettings = [ordered]@{
+    '*EEE'                   = '0'
+    '*PriorityVLANTag'       = '3'
+    'EnableExtraPowerSaving' = '0'
+    'EnableGreenEthernet'    = '0'
+}
+
 try {
-    if (!($NetAdapter = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like $AdapterName})) {
-        Write-Warning "Network adapter $AdapterName not found."
+    $Adapters = @(Get-NetAdapter | Where-Object { $_.InterfaceDescription -like $AdapterPattern })
+
+    if ($Adapters.Count -eq 0) {
+        Write-Output "Not applicable: no '$AdapterPattern' adapter present."
         exit 0
     }
-    foreach ($DesiredSetting in $AdapterSettings) {
-        $CurrentValue = ($NetAdapter | Get-NetAdapterAdvancedProperty -RegistryKeyword $DesiredSetting -ErrorAction SilentlyContinue | Select-Object -ExpandProperty RegistryValue)
-        if (($CurrentValue -ne $AdapterValues[$AdapterSettings.IndexOf($DesiredSetting)]) -and (![string]::IsNullOrEmpty($CurrentValue))) {
-            Write-Verbose "$DesiredSetting is incorrect. Remediating." -Verbose
-            $NetAdapter | Set-NetAdapterAdvancedProperty -RegistryKeyword $DesiredSetting -RegistryValue $AdapterValues[$AdapterSettings.IndexOf($DesiredSetting)] -WhatIf -Verbose -ErrorAction Stop
+
+    $Changed = @()
+
+    foreach ($Adapter in $Adapters) {
+        $AdapterChanged = $false
+
+        foreach ($Keyword in $DesiredSettings.Keys) {
+            $Property = Get-NetAdapterAdvancedProperty -Name $Adapter.Name -RegistryKeyword $Keyword -ErrorAction SilentlyContinue
+            if (-not $Property) { continue }
+
+            $Current = [string]($Property.RegistryValue | Select-Object -First 1)
+            if ($Current -ne $DesiredSettings[$Keyword]) {
+                # -NoRestart: collect all changes, then restart the adapter once below
+                Set-NetAdapterAdvancedProperty -Name $Adapter.Name -RegistryKeyword $Keyword -RegistryValue $DesiredSettings[$Keyword] -NoRestart
+                $Changed += "$($Adapter.Name): $Keyword $Current->$($DesiredSettings[$Keyword])"
+                $AdapterChanged = $true
+            }
         }
-        else {
-            Write-Verbose "$DesiredSetting is correct or N/A. Skipping." -Verbose
+
+        if ($AdapterChanged) {
+            Restart-NetAdapter -Name $Adapter.Name -Confirm:$false
         }
     }
-}
-catch {
-    $ErrorMessage = $_.Exception.Message 
-    Write-Warning $ErrorMessage
+
+    if ($Changed.Count -eq 0) {
+        Write-Output "Remediated: nothing to change on $($Adapters.Count) adapter(s)."
+    } else {
+        Write-Output "Remediated: $($Changed -join '; ')."
+    }
+    exit 0
+} catch {
+    Write-Output "Remediation failed: $($_.Exception.Message)"
     exit 1
 }

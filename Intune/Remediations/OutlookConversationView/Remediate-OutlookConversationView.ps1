@@ -1,5 +1,4 @@
 <#
-
 .SYNOPSIS
     PowerShell script to remediate (turn off) Conversation view as a default in Outlook.
 
@@ -19,17 +18,24 @@
     in Microsoft Endpoint Manager/Intune, in the USER context.
 
 .LINK
-    https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
+    https://learn.microsoft.com/intune/device-management/tools/deploy-remediations
 
 .LINK
     https://www.github.com/fitur
 
-    .NOTES
-    Version:        1.0.0
+.NOTES
+    Version:        1.0.1
     Creation Date:  2026-10-20
-    Last Updated:   2026-10-20
+    Last Updated:   2026-11-17
     Author:         Peter Olausson
     Contact:        fitur@duck.com
+
+    Part of remediation pair: Detect-OutlookConversationView.ps1 / Remediate-OutlookConversationView.ps1
+    Intune Remediation settings:
+        Run this script using the logged-on credentials = Yes
+        Run script in 64-bit PowerShell                 = Yes
+        Schedule                                        = Daily
+    Runs in Windows PowerShell 5.1 (Intune Management Extension) - no PS7 syntax.
 
     VERIFY BEFORE ROLLOUT:
     The registry path, value name and value ($RegPath, $ValueName, $Desired)
@@ -43,13 +49,17 @@
 
     Runs in the USER context (per-user setting).
 
+    Note: this script runs as a plain script (no CmdletBinding/ShouldProcess) since Intune
+    Remediations invoke it as a single, non-interactive unit via powershell.exe -File.
+
+    Changelog
+    1.0.1 - Summary lines use Write-Output; the empty CmdletBinding scaffold is replaced
+            by $ErrorActionPreference = 'Stop'. Header aligned with the repository
+            standard.
+    1.0.0 - Initial published version.
 #>
 
-[CmdletBinding()]
-
-Param (
-
-)
+$ErrorActionPreference = 'Stop'
 
 # VERIFY these against ADMX / test machine before rollout
 $RegPath   = 'HKCU:\Software\Microsoft\Office\16.0\Outlook\Setup'
@@ -76,15 +86,15 @@ try {
     New-ItemProperty -Path $RegPath -Name $ValueName -Value $Desired -PropertyType DWord -Force -ErrorAction Stop | Out-Null
     New-ItemProperty -Path $MarkerPath -Name $MarkerName -Value 1 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
 
-    Write-Host "Remediated"
-    Exit 0
+    Write-Output "Remediated"
+    exit 0
 
 }
 
 catch {
 
     $ErrorMessage = $_.Exception.Message
-    Write-Host $ErrorMessage
-    Exit 1
+    Write-Output $ErrorMessage
+    exit 1
 
 }

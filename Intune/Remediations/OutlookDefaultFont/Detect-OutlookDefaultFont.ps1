@@ -1,38 +1,48 @@
 <#
-
 .SYNOPSIS
-    PowerShell script to detect the default font settings in Outlook.
+    Detects whether Outlook's default compose and reply font is set to Arial 10 pt.
 
 .EXAMPLE
     .\Detect-OutlookDefaultFont.ps1
 
 .DESCRIPTION
-    This Powershell script checks the registry for the default font settings in Outlook.
-    It verifies the values of the ReplyFontComplex and ComposeFontComplex registry keys
-    against predefined values. If the values match, it outputs "Compliant" and exits with
-    a success code (0). If the values do not match or if there is an error accessing the
-    registry, it outputs "Not Compliant" and exits with a failure code (1).
+    Compares ReplyFontComplex and ComposeFontComplex under
+    HKCU:\SOFTWARE\Microsoft\Office\16.0\Common\mailsettings with the expected HTML style
+    blobs, and checks that ThemeFont = 2 (the value the remediation writes).
+
+    Exit 0 = compliant (both blobs match and ThemeFont = 2)
+    Exit 1 = non-compliant (any value missing or different, or detection itself failed)
 
 .LINK
-    https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
+    https://learn.microsoft.com/intune/device-management/tools/deploy-remediations
 
 .LINK
     https://www.github.com/fitur
 
 .NOTES
-
-    Version:        1.0.0
+    Version:        1.0.1
     Creation Date:  2025-04-29
-    Last Updated:   2025-04-29
+    Last Updated:   2026-11-17
     Author:         Peter Olausson
     Contact:        fitur@duck.com
+
+    Part of remediation pair: Detect-OutlookDefaultFont.ps1 / Remediate-OutlookDefaultFont.ps1
+    Intune Remediation settings:
+        Run this script using the logged-on credentials = Yes
+        Run script in 64-bit PowerShell                 = Yes
+        Schedule                                        = Daily
+    Runs in Windows PowerShell 5.1 (Intune Management Extension) - no PS7 syntax.
+
+    Note: this script runs as a plain script (no CmdletBinding/ShouldProcess) since Intune
+    Remediations invoke it as a single, non-interactive unit via powershell.exe -File.
+
+    Changelog
+    1.0.1 - Summary lines use Write-Output; detection errors are labelled as such. Header
+            aligned with the repository standard.
+    1.0.0 - Initial published version.
 #>
 
-[CmdletBinding()]
-
-Param (
-
-)
+$ErrorActionPreference = 'Stop'
 
 $RegPath = 'HKCU:\SOFTWARE\Microsoft\Office\16.0\Common\mailsettings\'
 $Name1 = "ReplyFontComplex"
@@ -48,13 +58,13 @@ try {
 
     if ($Registry1 -eq $Value1 -and $Registry2 -eq $Value2 -and $Registry3 -eq 2) {
         
-        Write-Host "Compliant"
-        Exit 0
+        Write-Output "Compliant"
+        exit 0
 
     } else {
 
-        Write-Host "Not Compliant"
-        Exit 1
+        Write-Output "Not Compliant"
+        exit 1
 
     }
 
@@ -62,8 +72,7 @@ try {
 
 catch {
 
-    $ErrorMessage = $_.Exception.Message
-    Write-Host $ErrorMessage
-    Exit 1
+    Write-Output "Not Compliant: $($_.Exception.Message)"
+    exit 1
 
 }

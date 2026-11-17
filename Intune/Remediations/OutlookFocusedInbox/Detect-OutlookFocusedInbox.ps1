@@ -1,5 +1,4 @@
 <#
-
 .SYNOPSIS
     PowerShell script to detect whether Focused Inbox is disabled in Outlook (classic).
 
@@ -19,18 +18,24 @@
     is true/unparsable, it outputs "Not Compliant" and exits 1.
 
 .LINK
-    https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
+    https://learn.microsoft.com/intune/device-management/tools/deploy-remediations
 
 .LINK
     https://www.github.com/fitur
 
-    .NOTES
-
-    Version:        1.0.0
+.NOTES
+    Version:        1.0.1
     Creation Date:  2026-09-18
-    Last Updated:   2026-09-18
+    Last Updated:   2026-11-17
     Author:         Peter Olausson
     Contact:        fitur@duck.com
+
+    Part of remediation pair: Detect-OutlookFocusedInbox.ps1 / Remediate-OutlookFocusedInbox.ps1
+    Intune Remediation settings:
+        Run this script using the logged-on credentials = Yes
+        Run script in 64-bit PowerShell                 = Yes
+        Schedule                                        = Daily
+    Runs in Windows PowerShell 5.1 (Intune Management Extension) - no PS7 syntax.
 
     IMPORTANT - THIS IS NOT AN OFFICIALLY DOCUMENTED SETTING:
     Unlike the Outlook-Default-Font script this is modelled on, this registry
@@ -50,13 +55,17 @@
 
     Runs in the USER context (per-account, per-user setting).
 
+    Note: this script runs as a plain script (no CmdletBinding/ShouldProcess) since Intune
+    Remediations invoke it as a single, non-interactive unit via powershell.exe -File.
+
+    Changelog
+    1.0.1 - Summary lines use Write-Output; the empty CmdletBinding scaffold is replaced
+            by $ErrorActionPreference = 'Stop'. Header aligned with the repository
+            standard.
+    1.0.0 - Initial published version.
 #>
 
-[CmdletBinding()]
-
-Param (
-
-)
+$ErrorActionPreference = 'Stop'
 
 $RegPath = 'HKCU:\SOFTWARE\Microsoft\Office\Outlook\Settings\Data'
 
@@ -64,8 +73,8 @@ try {
 
     if (!(Test-Path $RegPath)) {
 
-        Write-Host "Not Compliant"
-        Exit 1
+        Write-Output "Not Compliant"
+        exit 1
 
     }
 
@@ -75,8 +84,8 @@ try {
 
     if (-not $Properties -or $Properties.Count -eq 0) {
 
-        Write-Host "Not Compliant"
-        Exit 1
+        Write-Output "Not Compliant"
+        exit 1
 
     }
 
@@ -102,13 +111,13 @@ try {
 
     if ($AllDisabled) {
 
-        Write-Host "Compliant"
-        Exit 0
+        Write-Output "Compliant"
+        exit 0
 
     } else {
 
-        Write-Host "Not Compliant"
-        Exit 1
+        Write-Output "Not Compliant"
+        exit 1
 
     }
 
@@ -117,7 +126,7 @@ try {
 catch {
 
     $ErrorMessage = $_.Exception.Message
-    Write-Host $ErrorMessage
-    Exit 1
+    Write-Output $ErrorMessage
+    exit 1
 
 }

@@ -1,11 +1,10 @@
 <#
 .SYNOPSIS
-    Remediation script for Intune Proactive Remediation: moves all Desktop content to a
-    timestamped backup folder in Documents (preferring OneDrive Documents when available),
-    then ensures a Deny ACE blocks the user from writing to the Desktop going forward.
+    Moves all Desktop content to a timestamped backup folder in Documents and blocks the
+    user from writing to the Desktop going forward.
 
 .DESCRIPTION
-    Runs in USER context, triggered when Detect-DesktopContent.ps1 reports non-compliant.
+    Triggered when Detect-DesktopContent.ps1 reports non-compliant.
 
     1. Resolves Desktop path from HKCU Shell Folders (handles OneDrive KFM).
     2. Resolves a Documents target in this priority order:
@@ -20,15 +19,28 @@
     Exit 0 = remediation completed successfully
     Exit 1 = remediation failed (surfaced in Intune reporting)
 
-.PARAMETER BackupPrefix
-    Prefix for the backup folder name. Default: "Desktop Backup".
+.LINK
+    https://learn.microsoft.com/intune/device-management/tools/deploy-remediations
 
-.PARAMETER LogFolder
-    Folder where the local log file is written. Default: %LOCALAPPDATA%\Advania\Logs
+.LINK
+    https://www.github.com/fitur
 
 .NOTES
-    Advania Sverige AB
-    Part of remediation pair: Detect-DesktopContent.ps1 / Remediate-DesktopBackupAndLock.ps1
+    Version:        1.0.1
+    Creation Date:  2026-10-29
+    Last Updated:   2026-11-17
+    Author:         Peter Olausson
+    Contact:        fitur@duck.com
+
+    Part of remediation pair: Detect-DesktopContent.ps1 / Remediate-DesktopContent.ps1
+    Intune Remediation settings:
+        Run this script using the logged-on credentials = Yes
+        Run script in 64-bit PowerShell                 = Yes
+        Schedule                                        = Daily
+    Runs in Windows PowerShell 5.1 (Intune Management Extension) - no PS7 syntax.
+    Local log: <LogFolder>\DesktopBackupAndLock.log (name kept from the first release so
+    existing devices keep appending to the same file).
+
     Test in pilot before broad rollout (one quarter, per standard governance principle).
 
     Known limitations:
@@ -39,10 +51,17 @@
       ACE rather than an updated one until the old one is manually cleaned up.
     - This script runs as a plain script (no CmdletBinding/ShouldProcess) since Intune
       Remediations invoke it as a single, non-interactive unit via powershell.exe -File.
+
+    Changelog
+    1.0.1 - Corrected the paired script name, moved parameter help inline, added an
+            explicit exit 0. Header aligned with the repository standard.
 #>
 
 param(
+    # Prefix for the backup folder name created in Documents
     [string]$BackupPrefix = "Desktop Backup",
+
+    # Folder for the local log file
     [string]$LogFolder = "$env:LOCALAPPDATA\Advania\Logs"
 )
 
@@ -226,4 +245,5 @@ try {
 #endregion
 
 Write-Log "===== Remediation complete ====="
+exit 0
 exit 0

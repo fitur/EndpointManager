@@ -1,5 +1,4 @@
 <#
-
 .SYNOPSIS
     PowerShell script to detect whether Secure Boot is enabled in the BIOS on Lenovo devices.
 
@@ -17,27 +16,34 @@
     Exit 1 = non-compliant (Secure Boot disabled, or detection itself failed)
 
 .LINK
-    https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
+    https://learn.microsoft.com/intune/device-management/tools/deploy-remediations
 
 .LINK
     https://www.github.com/fitur
 
 .NOTES
-    Version:        1.0.0
+    Version:        1.0.1
     Creation Date:  2026-10-19
-    Last Updated:   2026-10-19
+    Last Updated:   2026-11-17
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     Part of remediation pair: Detect-LenovoSecureBoot.ps1 / Remediate-LenovoSecureBoot.ps1
-    Intune Remediation settings: "Run this script using the logged-on credentials" = No,
-    "Run script in 64-bit PowerShell" = Yes.
+    Intune Remediation settings:
+        Run this script using the logged-on credentials = No
+        Run script in 64-bit PowerShell                 = Yes
+        Schedule                                        = Daily
+    Runs in Windows PowerShell 5.1 (Intune Management Extension) - no PS7 syntax.
 
     Intune shows only the last line of output, so each exit path writes a single
     summary line immediately before exiting.
 
     Note: this script runs as a plain script (no CmdletBinding/ShouldProcess) since Intune
     Remediations invoke it as a single, non-interactive unit via powershell.exe -File.
+
+    Changelog
+    1.0.1 - Summary lines use Write-Output. Header aligned with the repository standard.
+    1.0.0 - Initial published version.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -46,14 +52,14 @@ try {
     # Applicability: Lenovo only
     $Manufacturer = (Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
     if ($Manufacturer -notmatch 'Lenovo') {
-        Write-Host "Not applicable: Manufacturer is '$Manufacturer'."
+        Write-Output "Not applicable: Manufacturer is '$Manufacturer'."
         exit 0
     }
 
     # Lenovo BIOS WMI interface is missing on some models (e.g. many IdeaPads)
     $BiosClass = Get-CimClass -Namespace 'root\wmi' -ClassName 'Lenovo_BiosSetting' -ErrorAction SilentlyContinue
     if (-not $BiosClass) {
-        Write-Host "Not supported: Lenovo_BiosSetting WMI class not found on this model."
+        Write-Output "Not supported: Lenovo_BiosSetting WMI class not found on this model."
         exit 0
     }
 
@@ -63,7 +69,7 @@ try {
         Select-Object -First 1
 
     if (-not $SecureBootSetting) {
-        Write-Host "Not supported: No SecureBoot setting exposed in the Lenovo BIOS WMI interface."
+        Write-Output "Not supported: No SecureBoot setting exposed in the Lenovo BIOS WMI interface."
         exit 0
     }
 
@@ -74,16 +80,16 @@ try {
     $OsState = try { [string](Confirm-SecureBootUEFI) } catch { 'Unknown' }
 
     if ($SettingValue -match '^Enabled?$') {
-        Write-Host "Compliant: BIOS '$SettingName' = '$SettingValue' (OS reports Secure Boot: $OsState)."
+        Write-Output "Compliant: BIOS '$SettingName' = '$SettingValue' (OS reports Secure Boot: $OsState)."
         exit 0
     } elseif ($SettingValue -match '^Disabled?$') {
-        Write-Host "Non-compliant: BIOS '$SettingName' = '$SettingValue' (OS reports Secure Boot: $OsState) - triggering remediation."
+        Write-Output "Non-compliant: BIOS '$SettingName' = '$SettingValue' (OS reports Secure Boot: $OsState) - triggering remediation."
         exit 1
     } else {
-        Write-Host "Non-compliant: Unexpected value for BIOS '$SettingName': '$SettingValue'."
+        Write-Output "Non-compliant: Unexpected value for BIOS '$SettingName': '$SettingValue'."
         exit 1
     }
 } catch {
-    Write-Host "Detection failed: $($_.Exception.Message)"
+    Write-Output "Detection failed: $($_.Exception.Message)"
     exit 1
 }

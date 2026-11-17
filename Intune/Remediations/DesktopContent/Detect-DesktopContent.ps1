@@ -1,24 +1,40 @@
 <#
 .SYNOPSIS
-    Detection script for Intune Proactive Remediation: checks whether the current user's
-    Desktop folder contains any content.
+    Detects whether the current user's Desktop folder contains any content.
 
 .DESCRIPTION
-    Runs in USER context. Resolves the real Desktop path (handles OneDrive Known Folder
-    Move if enabled) and reports non-compliant if anything other than desktop.ini exists
-    there. A non-compliant result triggers Remediate-DesktopBackupAndLock.ps1.
+    Resolves the real Desktop path (handles OneDrive Known Folder Move if enabled) and
+    reports non-compliant if anything other than desktop.ini exists there.
 
-    Exit 0 = compliant (Desktop is empty or missing, no remediation needed)
-    Exit 1 = non-compliant (content found, or detection itself failed)
+    Exit 0 = compliant (Desktop is empty)
+    Exit 1 = non-compliant (content found, Desktop path missing, or detection failed)
+
+.LINK
+    https://learn.microsoft.com/intune/device-management/tools/deploy-remediations
+
+.LINK
+    https://www.github.com/fitur
 
 .NOTES
-    Advania Sverige AB
-    Part of remediation pair: Detect-DesktopContent.ps1 / Remediate-DesktopBackupAndLock.ps1
-    Intune Remediation settings: "Run this script using the logged-on credentials" = Yes,
-    "Enforce script signature check" per customer policy, frequency = Daily.
+    Version:        1.0.1
+    Creation Date:  2026-10-29
+    Last Updated:   2026-11-17
+    Author:         Peter Olausson
+    Contact:        fitur@duck.com
+
+    Part of remediation pair: Detect-DesktopContent.ps1 / Remediate-DesktopContent.ps1
+    Intune Remediation settings:
+        Run this script using the logged-on credentials = Yes
+        Run script in 64-bit PowerShell                 = Yes
+        Schedule                                        = Daily
+    Runs in Windows PowerShell 5.1 (Intune Management Extension) - no PS7 syntax.
 
     Note: this script runs as a plain script (no CmdletBinding/ShouldProcess) since Intune
     Remediations invoke it as a single, non-interactive unit via powershell.exe -File.
+
+    Changelog
+    1.0.1 - Corrected the paired script name and the exit code documented for a
+            missing Desktop path. Header aligned with the repository standard.
 #>
 
 function Get-ShellFolder {

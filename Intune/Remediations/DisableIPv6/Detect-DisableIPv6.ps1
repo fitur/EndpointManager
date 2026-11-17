@@ -1,61 +1,73 @@
 <#
-
 .SYNOPSIS
-    PowerShell script detect if IPv6 is disabled in the registry.
+    Detects whether IPv6 is disabled through the DisabledComponents registry value.
 
 .EXAMPLE
-    .\Detect-DisabledComponents.ps1
+    .\Detect-DisableIPv6.ps1
 
 .DESCRIPTION
-    This Powershell script detects if IPv6 is disabled in the registry by checking the value of the DisabledComponents key.
-    If the value is set to 0xFF, it indicates that IPv6 is disabled. The script will output a message indicating whether remediation is required.
-    
+    Reads HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\DisabledComponents.
+    The value 0xFF disables all IPv6 components except the loopback interface.
+
+    Exit 0 = compliant (DisabledComponents = 0xFF)
+    Exit 1 = non-compliant (value missing or different, or detection itself failed)
+
 .LINK
-    https://docs.microsoft.com/en-us/mem/analytics/proactive-remediations
+    https://learn.microsoft.com/intune/device-management/tools/deploy-remediations
 
 .LINK
     https://www.github.com/fitur
 
 .NOTES
-    Version:        1.0.1
+    Version:        1.1.0
     Creation Date:  2025-05-09
-    Last Updated:   2025-05-13
+    Last Updated:   2026-11-17
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
+    Part of remediation pair: Detect-DisableIPv6.ps1 / Remediate-DisableIPv6.ps1
+    Intune Remediation settings:
+        Run this script using the logged-on credentials = No
+        Run script in 64-bit PowerShell                 = Yes
+        Schedule                                        = Daily
+    Runs in Windows PowerShell 5.1 (Intune Management Extension) - no PS7 syntax.
+
+    Intune shows only the last line of output, so each exit path writes a single
+    summary line immediately before exiting.
+
+    Note: this script runs as a plain script (no CmdletBinding/ShouldProcess) since Intune
+    Remediations invoke it as a single, non-interactive unit via powershell.exe -File.
+
+    Changelog
+    1.1.0 - Renamed from Detect-DisabledComponents.ps1. Compares the value numerically,
+            separates "missing" from "wrong value" in the output, and uses
+            Write-Output for the summary line.
+    1.0.1 - Initial published version.
 #>
 
-[CmdletBinding()]
+$ErrorActionPreference = 'Stop'
 
-Param (
-
-)
-
-$RegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\"
+$RegPath   = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters'
+$ValueName = 'DisabledComponents'
+$Desired   = 0xFF
 
 try {
-    
-    [string[]]$RegValue = Get-ItemPropertyValue $RegPath -Name "DisabledComponents" -ErrorAction Stop
+    # SilentlyContinue: a missing key or value is a compliance result, not an error
+    $Current = (Get-ItemProperty -Path $RegPath -Name $ValueName -ErrorAction SilentlyContinue).$ValueName
 
-    if ("255" -eq $RegValue) {
-
-        Write-Host 'DisabledComponents key found with correct value. No remediation required.'
-        Exit 0
-
-    }
-    else {
-
-        Write-Host 'DisabledComponents key found with incorrect value. Remediation required.'
-        Exit 1
-
+    if ($null -eq $Current) {
+        Write-Output "Non-compliant: $ValueName is not set - triggering remediation."
+        exit 1
     }
 
-}
+    if ([int]$Current -eq $Desired) {
+        Write-Output ("Compliant: {0} = 0x{1:X}." -f $ValueName, [int]$Current)
+        exit 0
+    }
 
-catch {
-
-    $ErrorMessage = $_.Exception.Message
-    Write-Host $ErrorMessage
-    Exit 1
-
+    Write-Output ("Non-compliant: {0} = 0x{1:X}, expected 0x{2:X} - triggering remediation." -f $ValueName, [int]$Current, $Desired)
+    exit 1
+} catch {
+    Write-Output "Detection failed: $($_.Exception.Message)"
+    exit 1
 }
