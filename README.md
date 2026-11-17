@@ -21,8 +21,10 @@ Current instruments. Each occupies its own cell and carries its own briefing.
 | MODULE | MANDATE |
 | --- | --- |
 | `Intune/Export-IntuneConfigurationInventory/` | The ledger. Reads the tenant whole, then names what drifted between one reading and the next. |
+| `Intune/Import-IntuneConfigurationFromJson/` | The transplant. What the ledger recorded in one tenant is grafted onto another. |
 | `Intune/New-IntuneWin32AppJson/` | The forge. A packaged application enters; a published, assigned artifact leaves. |
 | `Intune/Rename-IntunePolicies/` | The nomenclator. Imposes one naming order upon the tenant. |
+| `Intune/Remediations/` | The correctors. Detect the fault; excise the fault. Eleven matched pairs, each in its own cell, and a template for the next. |
 
 ## COLD STORAGE
 
@@ -33,7 +35,7 @@ site designators and dependencies long since retired.
 | --- | --- |
 | `Archive/ActiveDirectory/` | The old registry of identity — policy survey, attribute synchronisation, firmware directives. |
 | `Archive/Azure/` | Retrieval from blob storage. |
-| `Archive/Intune/Remediations/` | Autonomous correction. Detect the fault; excise the fault. Nine matched pairs and one orphan. |
+| `Archive/Remediations/` | Correctors withdrawn from service. The administrator purge, which countermanded the LAPS account on every cycle, and the wallpaper directive, an orphan that never had a detector to answer to. |
 
 ## DIRECTIVE
 
