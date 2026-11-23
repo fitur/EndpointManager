@@ -103,13 +103,29 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.17.0
+    Version:        1.17.1
     Creation Date:  2026-07-30
     Last Updated:   2026-11-23
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.17.1 - 2026-11-23
+            Follow-up fixes (W48). No change in output for an unchanged tenant.
+
+            No more "Parameter 'NoTypeInformation' is obsolete" warning per CSV on PowerShell
+            7.5+: the parameter has had no effect since 7.0 and is gone from Export-StableCsv;
+            the CSV bytes are the same.
+
+            -CustomerName "A,B" now works with pwsh -File, which is how a scheduled task,
+            launchd or cron calls the script and which passes the list as one string. A name
+            that matches a customer as a whole still wins, since a customer name may contain a
+            comma; otherwise the string is split on commas and every part must be a customer.
+            README updated.
+
+            -NoPlatformSplit is removed from the internal comparison: nothing ever set it.
+            platformSplit stays in the change set and is always true.
 
         1.17.0 - 2026-11-23
             Added the area "Windows Quality Update Policy"
