@@ -90,12 +90,13 @@ across all 172 records.
 
 ## What it covers
 
-19 policy areas, all read from `beta` except Conditional Access and group lookups:
+20 policy areas, all read from `beta` except Conditional Access and group lookups:
 
 Settings Catalog · Device Configuration (Templates) · Group Policy Configuration (ADMX) ·
 Endpoint Security (Intents) · Compliance Policies · Remediation Scripts · Platform Scripts
 (Windows) · Shell Scripts (macOS) · Autopilot Deployment Profiles · Enrollment
-Configurations · Windows Feature/Quality/Driver Update Profiles · App Protection (iOS,
+Configurations · Windows Feature/Quality/Driver Update Profiles · Windows Quality Update
+Policies (approval, hotpatch) · App Protection (iOS,
 Android) · App Configuration (Managed Apps, Managed Devices) · Assignment Filters ·
 Conditional Access (opt-in) · **Applications** (`mobileApps` — Win32, Store, LOB, web link)
 
@@ -105,6 +106,13 @@ no new code per type.
 Not covered: custom compliance scripts, Intune RBAC roles, terms and conditions,
 notification templates, imported ADMX files, reusable policy settings, and Endpoint
 Analytics. All are one line each if you want them.
+
+Also not covered, and not a matter of adding a line:
+
+> Windows Autopatch groups themselves (ring layout, device distribution). They live in the
+> Autopatch service, not in Graph; the export sees the policies and assignments a group
+> creates, not the group. Policies created through the Windows Updates API
+> (`admin/windows/updates`) are not read either: that API has no read-only permission.
 
 ## Requirements
 
@@ -119,7 +127,7 @@ version to pin, and no typed deserialisation layer between the response and the 
 
 | Permission | Needed for |
 |---|---|
-| `DeviceManagementConfiguration.Read.All` | Settings Catalog, templates, ADMX, compliance, intents, update profiles |
+| `DeviceManagementConfiguration.Read.All` | Settings Catalog, templates, ADMX, compliance, intents, update profiles and quality update policies |
 | `DeviceManagementScripts.Read.All` | Remediations, platform scripts, shell scripts |
 | `DeviceManagementApps.Read.All` | App protection and app configuration; also the audit log (`-IncludeAuditActor`) |
 | `DeviceManagementServiceConfig.Read.All` | Autopilot, enrollment, assignment filters |
