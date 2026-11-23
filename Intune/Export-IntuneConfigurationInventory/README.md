@@ -305,9 +305,10 @@ is passed on with a `Customer` property added.
   `-CertificatePassword` and `-TenantName` belong to one tenant and are refused together with
   several customers (`-TenantName` would put them all in one folder). `-OutputDirectory` can
   be shared: each customer gets its own tenant folder under it.
-- The list is given to PowerShell as an array (`-CustomerName 'A', 'B'`). From outside
-  PowerShell, `pwsh -File script.ps1 -CustomerName A,B` passes one string `A,B`, which is not
-  a customer name; use `pwsh -Command` for that.
+- `-CustomerName` takes the list either as an array (`-CustomerName 'A', 'B'`) or as one
+  comma-separated string (`pwsh -File script.ps1 -CustomerName "A,B"`, the form a scheduled
+  task, launchd or cron passes). A customer name that itself contains a comma is matched as a
+  whole first, and only otherwise is the string split on commas.
 - `-TestPermissionOnly` prints one result per customer, a quick way to check the permissions
   and the certificate expiry of all of them.
 - A thumbprint certificate on macOS shows a Keychain prompt per customer.
