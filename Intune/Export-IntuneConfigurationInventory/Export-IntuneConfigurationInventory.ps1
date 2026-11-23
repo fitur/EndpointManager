@@ -503,7 +503,15 @@ if ($CustomerConfigPath) {
         foreach ($entry in $customers) { $selectedNames.Add([string]$entry['name']) }
     }
     elseif ($CustomerName) {
-        foreach ($requested in $CustomerName) {
+        # pwsh -File does not split 'A,B' into an array, so a scheduled call passes one string.
+        # A name that matches as a whole wins - a customer name may itself contain a comma -
+        # and only otherwise is the string split on commas.
+        $requestedNames = foreach ($entry in $CustomerName) {
+            $wholeMatch = $customers | Where-Object { $PSItem['name'] -eq $entry } | Select-Object -First 1
+            if ($wholeMatch -or $entry -notmatch ',') { $entry }
+            else { ($entry -split ',') | ForEach-Object { $PSItem.Trim() } | Where-Object { $PSItem } }
+        }
+        foreach ($requested in $requestedNames) {
             $match = $customers | Where-Object { $PSItem['name'] -eq $requested } | Select-Object -First 1
             if (-not $match) {
                 throw ('Customer ''{0}'' not found. Available: {1}' -f $requested, (($customers | ForEach-Object { $PSItem['name'] }) -join ', '))
