@@ -40,9 +40,9 @@
       Application                         needs content upload, not a JSON body
 
 .NOTES
-    Version:        1.3.0
+    Version:        1.4.0
     Creation Date:  2026-09-01
-    Last Updated:   2026-11-02
+    Last Updated:   2026-11-23
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -71,6 +71,15 @@
     This writes to a customer tenant. Run it with -WhatIf first, every time.
 
     CHANGELOG
+
+        1.4.0 - 2026-11-23
+            New area Windows-Quality-Update-Policy (deviceManagement/windowsQualityUpdatePolicies):
+            quality update policies - approval rules, hotpatch, Quick machine recovery - which
+            the export writes from its 1.17.0 on. Until now that folder was reported as
+            unknown-area. Not the same as Windows-Quality-Update-Profile, which is the expedite
+            profiles. Needs DeviceManagementConfiguration.ReadWrite.All like the other update
+            areas; a file without approvalSettings is invalid. Additive: no new parameter, the
+            report's schemaVersion stays 2.
 
         1.3.0 - 2026-11-02
             Follow-up to 1.2.0 from the same review. No new parameter; the report's
@@ -1320,6 +1329,16 @@ $script:AreaMap = [ordered]@{
         Remove = @('releaseDateTime', 'deployableContentDisplayName')
         Require = @('displayName')
     }
+    # Quality update POLICIES - approval rules, hotpatch, Quick machine recovery - not the
+    # expedite PROFILES above. The export writes them as 'Windows Quality Update Policy' from
+    # 1.17.0 on. Graph caps approvalSettings at six entries; a policy without any is useless.
+    'Windows-Quality-Update-Policy' = @{
+        Resource = 'deviceManagement/windowsQualityUpdatePolicies'
+        NameProperty = 'displayName'
+        RequiredScope = 'DeviceManagementConfiguration.ReadWrite.All'
+        Remove = @()
+        Require = @('displayName', 'approvalSettings')
+    }
     'Windows-Driver-Update-Profile' = @{
         Resource = 'deviceManagement/windowsDriverUpdateProfiles'
         NameProperty = 'displayName'
@@ -1817,7 +1836,7 @@ finally {
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
         timeZone           = $reportTimeZone
-        scriptVersion      = '1.3.0'
+        scriptVersion      = '1.4.0'
         whatIf             = [bool]$WhatIfPreference
         targetTenantId     = $tokenTenantId
         targetCustomerName = $script:TargetCustomerName
