@@ -96,7 +96,7 @@ own Create page:
 
 | Permission | Areas it covers |
 |---|---|
-| `DeviceManagementConfiguration.ReadWrite.All` | Assignment filters, Settings Catalog, device configuration templates, compliance policies, feature/quality/driver update profiles |
+| `DeviceManagementConfiguration.ReadWrite.All` | Assignment filters, Settings Catalog, device configuration templates, compliance policies, feature/quality/driver update profiles, quality update policies |
 | `DeviceManagementScripts.ReadWrite.All` | Remediation scripts, platform scripts (Windows), shell scripts (macOS) |
 | `DeviceManagementApps.ReadWrite.All` | App protection (iOS, Android), app configuration (managed apps) |
 | `DeviceManagementServiceConfig.ReadWrite.All` | Autopilot deployment profiles |
@@ -268,7 +268,7 @@ the run carries on with the rest.
 
 ## What it covers
 
-14 areas, all posted to `beta`:
+15 areas, all posted to `beta`:
 
 | Area folder | Graph resource |
 |---|---|
@@ -282,6 +282,7 @@ the run carries on with the rest.
 | `Autopilot-Deployment-Profile` | `deviceManagement/windowsAutopilotDeploymentProfiles` |
 | `Windows-Feature-Update-Profile` | `deviceManagement/windowsFeatureUpdateProfiles` |
 | `Windows-Quality-Update-Profile` | `deviceManagement/windowsQualityUpdateProfiles` |
+| `Windows-Quality-Update-Policy` | `deviceManagement/windowsQualityUpdatePolicies` |
 | `Windows-Driver-Update-Profile` | `deviceManagement/windowsDriverUpdateProfiles` |
 | `App-Protection-Policy-iOS` | `deviceAppManagement/iosManagedAppProtections` |
 | `App-Protection-Policy-Android` | `deviceAppManagement/androidManagedAppProtections` |
@@ -353,7 +354,7 @@ folder is not writable) the run stops with nothing created.
   "runTimestampLocal": "2026-09-01T12:04:54",
   "utcOffset": "02:00:00",
   "timeZone": "Europe/Stockholm",
-  "scriptVersion": "1.3.0",
+  "scriptVersion": "1.4.0",
   "whatIf": true,
   "targetTenantId": "4444-…",
   "targetCustomerName": "Fabrikam AB",
@@ -485,6 +486,12 @@ to be forked to unpack an Intune-internal blob.
   value (`isEncrypted: true`) or a `secretReferenceValueId` is masked or referenced to the
   source tenant in the export, so posting it would fail or create a profile with a placeholder
   instead of the secret. Create those in the portal.
+- **Quality update policies and profiles are two areas.** `Windows-Quality-Update-Policy`
+  holds the approval rules, hotpatch and Quick machine recovery (export 1.17.0 and later);
+  `Windows-Quality-Update-Profile` holds the expedite profiles. A policy with
+  `hotpatchEnabled: true` may need hotpatch prerequisites or licensing in the target tenant
+  (assumed, not verified against one); without them Intune refuses the POST and the row is
+  `blocked` or `failed`, nothing is created.
 - **Everything is created unassigned.** Assignments are never imported.
 - **File order is ordinal, and `._*` files are skipped.** Folders and files are processed in
   byte order of their names, the same on every host, because the order decides which of two
