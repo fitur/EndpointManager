@@ -2660,12 +2660,12 @@ function Invoke-InventoryComparison {
     # $script:-qualified, and the trailing Write-Output stays as the return path.
     #
     # Only -TenantDirectory, -CurrentRunPath and -SidecarArchiveName are ever set by the
-    # in-script caller; the other four are not dead. -BaselineRun and -OutputPath are the seam that let the 1.9.0
+    # in-script caller; the other three are not dead. -BaselineRun and -OutputPath are the seam that let the 1.9.0
     # merge be proven byte-identical against the old standalone script - run the comparison
     # over a chosen pair of runs and write the change set outside the run folder, the only way
-    # to verify a change to this function without writing into a customer's data. -NoPlatformSplit
-    # and -MaxValueLength keep parity with the standalone parameter set, and -MaxValueLength is
-    # the knob the open Format-DiffValue depth question will need.
+    # to verify a change to this function without writing into a customer's data.
+    # -MaxValueLength keeps parity with the standalone parameter set and is the knob the open
+    # Format-DiffValue depth question will need.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$TenantDirectory,
@@ -2677,7 +2677,6 @@ function Invoke-InventoryComparison {
         # consumer knows configurationFile now points inside a zip. Discovered from the
         # current run folder when not supplied.
         [string]$SidecarArchiveName,
-        [switch]$NoPlatformSplit,
         [ValidateRange(50, 10000)][int]$MaxValueLength = 300
     )
 
@@ -2853,14 +2852,8 @@ function Invoke-InventoryComparison {
     $totals = [ordered]@{ baseline = 0; added = 0; removed = 0; uncertain = 0; modified = 0; unchanged = 0 }
     $platformTotals = [ordered]@{}
 
-    # Without a split every category is emitted as a single pseudo-platform page.
-    $ignorePlatform = $NoPlatformSplit.IsPresent
-    $platformScope = $script:platformDefinitions
-    if ($ignorePlatform) {
-        $platformScope = @([pscustomobject]@{ Order = 0; Name = '*'; Slug = 'all' })
-    }
     Write-Verbose ('Grouping {0} categor(ies) across {1} platform(s)' -f
-        $script:categoryDefinitions.Count, $platformScope.Count)
+        $script:categoryDefinitions.Count, $script:platformDefinitions.Count)
 
     foreach ($category in $script:categoryDefinitions) {
 
@@ -2877,13 +2870,11 @@ function Invoke-InventoryComparison {
 
         Write-Verbose ('{0}: {1} record(s) in scope' -f $category.Title, $categoryCurrent.Count)
 
-        foreach ($platform in $platformScope) {
+        foreach ($platform in $script:platformDefinitions) {
 
-            $currentRows = @($categoryCurrent | Where-Object {
-                $ignorePlatform -or ($platform.Name -in $platformCache[$PSItem.RecordKey]) })
+            $currentRows = @($categoryCurrent | Where-Object { $platform.Name -in $platformCache[$PSItem.RecordKey] })
 
-            $baselineRows = @($categoryBaseline | Where-Object {
-                $ignorePlatform -or ($platform.Name -in $platformCache[$PSItem.RecordKey]) })
+            $baselineRows = @($categoryBaseline | Where-Object { $platform.Name -in $platformCache[$PSItem.RecordKey] })
 
             # A category/platform combination with nothing on either side produces no page.
             if ($currentRows.Count -eq 0 -and $baselineRows.Count -eq 0) { continue }
@@ -3017,16 +3008,12 @@ function Invoke-InventoryComparison {
 
             $pageKey = '{0:d2}-{1}-{2:d2}-{3}' -f $category.Order, $category.Key, $platform.Order, $platform.Slug
             $pageTitle = '{0} - {1}' -f $category.Title, $platform.Name
-            if ($ignorePlatform) {
-                $pageKey = '{0:d2}-{1}' -f $category.Order, $category.Key
-                $pageTitle = $category.Title
-            }
 
             $pages.Add([ordered]@{
                 pageKey        = $pageKey
                 pageTitle      = $pageTitle
                 category       = $category.Title
-                platform       = $NoPlatformSplit ? 'All' : $platform.Name
+                platform       = $platform.Name
                 areas          = @($category.Areas)
                 currentCount   = $currentRows.Count
                 baselineItems  = @($baselineItems)
@@ -3057,7 +3044,9 @@ function Invoke-InventoryComparison {
         sidecarArchive  = [string]$SidecarArchiveName
         baselineRunUtc  = $isBaselineMode ? $null : (ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject $baseline.Manifest -Name 'runTimestampUtc'))
         currentRunUtc   = ConvertTo-StableDateString -Value (Get-ObjectProperty -InputObject $current.Manifest -Name 'runTimestampUtc')
-        platformSplit   = (-not $NoPlatformSplit.IsPresent)
+        # Always true since 1.17.1, when the never-set -NoPlatformSplit switch was removed.
+        # Kept because consumers of the change set may read it.
+        platformSplit   = $true
         # False means at least one area is unreadable in one of the runs, so the change set is
         # not a complete picture and deletions in those areas are unproven.
         reliable        = ($unreliableAreas.Count -eq 0 -and $comparabilityNotes.Count -eq 0)
