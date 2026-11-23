@@ -57,7 +57,8 @@
     REQUIRED MICROSOFT GRAPH *APPLICATION* PERMISSIONS (admin consent required):
         DeviceManagementConfiguration.Read.All  - Settings Catalog, templates (deviceConfigurations),
                                                   ADMX, compliance policies, Endpoint Security intents,
-                                                  Windows update profiles
+                                                  Windows update profiles and quality update
+                                                  policies (approval rules, hotpatch)
         DeviceManagementScripts.Read.All        - Remediation scripts (deviceHealthScripts),
                                                   PowerShell platform scripts, macOS shell scripts.
                                                   Enforced separately from Configuration.Read.All -
@@ -2156,9 +2157,11 @@ $script:categoryDefinitions = @(
     [pscustomobject]@{ Order = 7; Key = 'enrollment'; Title = 'Enrollment & Autopilot'
         Areas = @('Autopilot Deployment Profile', 'Enrollment Configuration') }
 
-    [pscustomobject]@{ Order = 8; Key = 'updates'; Title = 'Windows Update Rings'
+    # Not "Update Rings": rings are deviceConfigurations and land on the configuration page.
+    # This page holds the feature, quality and driver update policies.
+    [pscustomobject]@{ Order = 8; Key = 'updates'; Title = 'Windows Updates'
         Areas = @('Windows Feature Update Profile', 'Windows Quality Update Profile',
-                  'Windows Driver Update Profile') }
+                  'Windows Quality Update Policy', 'Windows Driver Update Profile') }
 
     [pscustomobject]@{ Order = 9; Key = 'filters'; Title = 'Assignment Filters'
         Areas = @('Assignment Filter') }
@@ -2235,6 +2238,7 @@ $script:areaPlatformDefaults = @{
     'Autopilot Deployment Profile'      = 'Windows'
     'Windows Feature Update Profile'    = 'Windows'
     'Windows Quality Update Profile'    = 'Windows'
+    'Windows Quality Update Policy'     = 'Windows'
     'Windows Driver Update Profile'     = 'Windows'
     'Group Policy Configuration (ADMX)' = 'Windows'
     'App Protection Policy (iOS)'       = 'iOS/iPadOS'
@@ -3147,6 +3151,11 @@ $policyDefinitions = @(
 
     New-PolicyDefinition -Area 'Windows Feature Update Profile' -Resource 'deviceManagement/windowsFeatureUpdateProfiles' -RequiredRole $roleConfig
     New-PolicyDefinition -Area 'Windows Quality Update Profile' -Resource 'deviceManagement/windowsQualityUpdateProfiles' -RequiredRole $roleConfig
+    # Quality update policies - approval rules, hotpatch, Quick machine recovery. Intune lists
+    # them on the same Quality updates tab as the expedite profiles above, but Graph keeps them
+    # in a separate collection, so reading only windowsQualityUpdateProfiles misses every
+    # hotpatch policy and every approval policy Autopatch deploys with.
+    New-PolicyDefinition -Area 'Windows Quality Update Policy' -Resource 'deviceManagement/windowsQualityUpdatePolicies' -RequiredRole $roleConfig
     New-PolicyDefinition -Area 'Windows Driver Update Profile' -Resource 'deviceManagement/windowsDriverUpdateProfiles' -RequiredRole $roleConfig
 
     New-PolicyDefinition -Area 'App Protection Policy (iOS)' -Resource 'deviceAppManagement/iosManagedAppProtections' -RequiredRole $roleApps

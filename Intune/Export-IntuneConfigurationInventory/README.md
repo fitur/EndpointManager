@@ -90,12 +90,13 @@ across all 172 records.
 
 ## What it covers
 
-19 policy areas, all read from `beta` except Conditional Access and group lookups:
+20 policy areas, all read from `beta` except Conditional Access and group lookups:
 
 Settings Catalog · Device Configuration (Templates) · Group Policy Configuration (ADMX) ·
 Endpoint Security (Intents) · Compliance Policies · Remediation Scripts · Platform Scripts
 (Windows) · Shell Scripts (macOS) · Autopilot Deployment Profiles · Enrollment
-Configurations · Windows Feature/Quality/Driver Update Profiles · App Protection (iOS,
+Configurations · Windows Feature/Quality/Driver Update Profiles · Windows Quality Update
+Policies (approval, hotpatch) · App Protection (iOS,
 Android) · App Configuration (Managed Apps, Managed Devices) · Assignment Filters ·
 Conditional Access (opt-in) · **Applications** (`mobileApps` — Win32, Store, LOB, web link)
 
@@ -119,7 +120,7 @@ version to pin, and no typed deserialisation layer between the response and the 
 
 | Permission | Needed for |
 |---|---|
-| `DeviceManagementConfiguration.Read.All` | Settings Catalog, templates, ADMX, compliance, intents, update profiles |
+| `DeviceManagementConfiguration.Read.All` | Settings Catalog, templates, ADMX, compliance, intents, update profiles and quality update policies |
 | `DeviceManagementScripts.Read.All` | Remediations, platform scripts, shell scripts |
 | `DeviceManagementApps.Read.All` | App protection and app configuration; also the audit log (`-IncludeAuditActor`) |
 | `DeviceManagementServiceConfig.Read.All` | Autopilot, enrollment, assignment filters |
