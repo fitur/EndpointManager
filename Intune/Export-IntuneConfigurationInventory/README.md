@@ -107,6 +107,13 @@ Not covered: custom compliance scripts, Intune RBAC roles, terms and conditions,
 notification templates, imported ADMX files, reusable policy settings, and Endpoint
 Analytics. All are one line each if you want them.
 
+Also not covered, and not a matter of adding a line:
+
+> Windows Autopatch groups themselves (ring layout, device distribution). They live in the
+> Autopatch service, not in Graph; the export sees the policies and assignments a group
+> creates, not the group. Policies created through the Windows Updates API
+> (`admin/windows/updates`) are not read either: that API has no read-only permission.
+
 ## Requirements
 
 **PowerShell 7.4 or later.** Ternary operators, null-coalescing, and
