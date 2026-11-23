@@ -1846,7 +1846,9 @@ function Export-StableCsv {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Delimiter
     )
-    $lines = $InputObject | ConvertTo-Csv -NoTypeInformation -Delimiter $Delimiter
+    # No -NoTypeInformation: it has no effect since PowerShell 7.0 (type information is
+    # omitted by default) and 7.5+ warns that it is obsolete.
+    $lines = $InputObject | ConvertTo-Csv -Delimiter $Delimiter
     [System.IO.File]::WriteAllText($Path, (($lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($true))
 }
 
