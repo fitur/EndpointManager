@@ -103,13 +103,38 @@
     a Keychain to prompt against. A PFX is itself a credential, unlike a thumbprint, and does
     not belong in a synchronised folder (OneDrive, Dropbox) or in version control.
 
-    Version:        1.16.0
+    Version:        1.17.0
     Creation Date:  2026-07-30
-    Last Updated:   2026-11-11
+    Last Updated:   2026-11-23
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
     CHANGELOG
+
+        1.17.0 - 2026-11-23
+            Added the area "Windows Quality Update Policy"
+            (deviceManagement/windowsQualityUpdatePolicies). Intune shows two kinds of object on
+            its Quality updates tab: the expedite profiles, which were already exported, and the
+            quality update policies - approval rules, hotpatch, Quick machine recovery - which
+            Graph keeps in a separate collection and which were missing from the export, the CSV
+            and the change set. Hotpatch policies and the approval policies that Autopatch
+            deploys with are now read. The same permission as the other update profiles,
+            DeviceManagementConfiguration.Read.All; nothing new to consent to. If the list call
+            rejects $expand=assignments, the existing fallback reads the assignments per object.
+
+            The change set page that held the feature, quality and driver update policies is now
+            titled "Windows Updates" instead of "Windows Update Rings": update rings are
+            deviceConfigurations and sit on the configuration page, not there. pageKey is
+            unchanged.
+
+            README: area count and list, the permission table, and a note that Autopatch groups
+            and policies created through the Windows Updates API are not exported.
+
+            CHANGED OUTPUT (once): a new area in the manifest and new CSV rows; the first
+            comparison after upgrading lists every quality update policy as added, and, because
+            the area is absent from the baseline, writes a comparabilityNotes entry and sets
+            reliable = false for that run; pageTitle and category of the updates page change.
+            No ConfigurationHash moves.
 
         1.16.0 - 2026-11-11
             Review fixes (W46) and several customers in one run. No ConfigurationHash moves.
@@ -150,51 +175,11 @@
             area with its role. Not done: -NoPlatformSplit removal (waiting for a decision),
             the hash of raw script bytes, datetime offsets, Functions timeout and folder names.
 
-        1.15.0 - 2026-11-02
-            Review fixes (W44). No hash wave: ConfigurationHash is unchanged for an unchanged
-            tenant. What does change is listed under CHANGED OUTPUT.
-
-            Determinism. JSON and CSV are written with LF whatever the host OS (ConvertTo-
-            StableJson, Export-StableCsv; byte-identical to before on macOS). Assignment
-            strings, the three CSV row orders and the change set order use ordinal, case-
-            sensitive sorting, and the comparator compares assignments as sets so a baseline
-            written with the old culture-sorted strings does not read as re-targeted. The
-            sidecar archive no longer has the run stamp in its entry names and is written with
-            ordinal entry order, a fixed timestamp and no file-mode bits, so two runs against
-            an unchanged tenant give the same archive on the same platform. Ties in the change
-            set and in auditActors are broken by RecordKey / activityType / resource id.
-
-            Comparison. A $expand fallback runs only on 400/501; after throttling or a 5xx the
-            area is skipped, not re-read without its extra query. An area in the baseline's
-            manifest but not in the current one, and runs with different jsonDepth or
-            detailedSettingsIncluded, make the change set reliable = false (new field
-            comparabilityNotes). Records exported after a failed per-object call, or with a
-            group or filter name that could not be resolved, are listed in the manifest's
-            degradedRecords and carry degraded = true when modified. The manifest records
-            csvDelimiter and the baseline CSV is read with it. The baseline and the audit
-            window start are the newest run folder with a manifest, by runTimestampUtc, and
-            the in-script caller passes -CurrentRunPath. Field and metadata comparisons are
-            case-sensitive.
-
-            Other. Standalone script files are written from the raw bytes Graph returned.
-            Tenant and run folders are set to 700 on macOS and Linux. The tenant name part is
-            capped at 40 characters and Windows reserved names get an underscore. With
-            FUNCTIONS_WORKER_RUNTIME set, -OutputDirectory (and -CustomerName with a customer
-            file) is required. A run into a git work tree warns, and the script folder has a
-            .gitignore for run output. Retry-After is capped at 300 s, a failed token request
-            stops instead of being retried, the change set holds only the tenant folder name,
-            and backslashes in customer names are escaped in the macOS picker.
-
-            CHANGED OUTPUT (once): ConfigurationFile in the CSV loses the stamp
-            (..._<id>.json); assignment strings and CSV row order change for policies whose
-            group names mix case or contain underscores or non-ASCII letters; tenant names over
-            40 characters, or reserved on Windows, get a new folder name and so a new baseline;
-            the manifest gains csvDelimiter and degradedRecords and the change set gains
-            comparabilityNotes. Not done: F14 (datetime offsets), the hash of raw script
-            bytes (F11 part 2), F21-F24.
-
         Earlier releases, one line each. Full entries are in git history.
 
+        1.15.0 - 2026-11-02  Review fixes (W44): LF in JSON and CSV on every OS, ordinal sorting,
+                            a deterministic sidecar archive without the run stamp in entry names,
+                            comparability notes and degradedRecords, owner-only output folders.
         1.14.0 - 2026-10-21  -IncludeDeviceInventory: DeviceInventory_<stamp>.csv with one row per
                             managed device (OS, build and release, compliance, last sync, owner
                             type); needs DeviceManagementManagedDevices.Read.All.
