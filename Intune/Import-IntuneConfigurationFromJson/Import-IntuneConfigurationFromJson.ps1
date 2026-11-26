@@ -36,13 +36,19 @@
       Group-Policy-Configuration-ADMX     container first, then one definitionValue per setting
       Endpoint-Security-Intent            bound to a template ID that differs between tenants
       Enrollment-Configuration            largely tenant singletons that cannot be created
-      App-Configuration-Managed-Devices   references app IDs that do not exist in the target
       Application                         needs content upload, not a JSON body
 
+    App-Configuration-Managed-Devices names its apps by the SOURCE tenant's app ids. They are
+    translated to the target tenant's ids before the POST: each source app is looked up in the
+    source folder's Application area and matched in the target by @odata.type plus
+    bundleId/packageId/appIdentifier (display name for apps that have none). Exactly one
+    target app must match per source app, and every app must resolve - otherwise the file is
+    'invalid' and nothing is posted. The apps therefore have to exist in the target first.
+
 .NOTES
-    Version:        1.4.0
+    Version:        1.5.0
     Creation Date:  2026-09-01
-    Last Updated:   2026-11-23
+    Last Updated:   2026-11-26
     Author:         Peter Olausson
     Contact:        fitur@duck.com
 
@@ -71,6 +77,23 @@
     This writes to a customer tenant. Run it with -WhatIf first, every time.
 
     CHANGELOG
+
+        1.5.0 - 2026-11-26
+            App-Configuration-Managed-Devices (deviceAppManagement/mobileAppConfigurations) is
+            importable. Until now the folder was reported as 'unsupported' because the body's
+            targetedMobileApps holds the source tenant's app ids. Those ids are now translated:
+            the source app comes from the source folder's Application area (read for this even
+            when -Area does not select it, and still not imported itself), and the target app
+            is the one with the same @odata.type and a shared bundleId / packageId /
+            appIdentifier - or, for an app with none of those, the same display name. An
+            Android Enterprise configuration with a single app and no Application sidecar falls
+            back to its own packageId. Zero or several matches, or any app left unmapped, make
+            the file 'invalid' with the reason; nothing is posted with fewer apps than the
+            source had. The target tenant's apps are read once per run, paged, with the
+            area's existing scope (DeviceManagementApps.ReadWrite.All). The detail of a 'whatif' or
+            'created' row names each source -> target app id; a real run maps afresh, so it
+            follows apps added to the target after the plan. appSupportsOemConfig (read-only)
+            is dropped. Additive: no new parameter, the report's schemaVersion stays 2.
 
         1.4.0 - 2026-11-23
             New area Windows-Quality-Update-Policy (deviceManagement/windowsQualityUpdatePolicies):
@@ -1237,6 +1260,194 @@ function Get-ExistingName {
     return , $names
 }
 
+function Get-AppField {
+    # Source apps are hashtables (sidecars are read with -AsHashtable), target apps are
+    # PSCustomObjects from Invoke-RestMethod. One StrictMode-safe accessor for both.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()]$InputObject,
+        [Parameter(Mandatory)][string]$Name
+    )
+    if ($null -eq $InputObject) { return $null }
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        return $InputObject.Contains($Name) ? $InputObject[$Name] : $null
+    }
+    return Get-ObjectProperty -InputObject $InputObject -Name $Name
+}
+
+function ConvertTo-AppKey {
+    <#
+        What identifies an app across a tenant move. The id does not: every tenant mints its
+        own. bundleId (Apple), packageId and appIdentifier (Android) do, and they are kept as
+        one set because which of them an app carries depends on its type. An Android Enterprise
+        app configuration writes its own packageId as 'app:<package>' and the app does not, so
+        the prefix is dropped on both sides. Apps that have none of the three - web links, some
+        Microsoft 365 apps - fall back to their display name.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)]$App)
+
+    $identifiers = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($field in 'bundleId', 'packageId', 'appIdentifier') {
+        $value = [string](Get-AppField -InputObject $App -Name $field)
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            [void]$identifiers.Add(($value.Trim() -replace '^app:', ''))
+        }
+    }
+    $name = [string](Get-AppField -InputObject $App -Name 'displayName')
+    return @{
+        Id          = [string](Get-AppField -InputObject $App -Name 'id')
+        Name        = $name
+        NameKey     = Get-NameKey -Name $name
+        # '#microsoft.graph.iosStoreApp' in both the sidecar and the response; compared without
+        # the '#' so a hand-edited sidecar that drops it still matches.
+        Type        = ([string](Get-AppField -InputObject $App -Name '@odata.type')) -replace '^#', ''
+        Identifiers = $identifiers
+    }
+}
+
+function Get-SourceAppIndex {
+    <#
+        Source tenant app id -> app identity, from the export's Application folder in the
+        source directory. That area cannot itself be imported, but it is the only place the
+        source tenant's app ids are tied to something portable - so it is read here whether or
+        not -Area selected it. Missing folder: an empty index, and every app that is not an
+        Android Enterprise one fails to map with a reason that says where to look.
+    #>
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseOutputTypeCorrectly', '',
+        Justification = 'Same comma guard as Get-ExistingName: the caller receives the Dictionary, not an Object[].')]
+    [OutputType([System.Collections.Generic.Dictionary[string, hashtable]])]
+    param([Parameter(Mandatory)][string]$SourceDirectory)
+
+    $index = [System.Collections.Generic.Dictionary[string, hashtable]]::new([StringComparer]::OrdinalIgnoreCase)
+    $folder = Join-Path -Path $SourceDirectory -ChildPath 'Application'
+    if (-not (Test-Path -LiteralPath $folder -PathType Container)) { return , $index }
+
+    foreach ($file in @(Get-SidecarFile -Path $folder)) {
+        try {
+            $app = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($file.FullName)).TrimStart([char]0xFEFF) |
+                ConvertFrom-Json -AsHashtable -Depth 50 -DateKind String
+        }
+        catch [System.Exception] {
+            Write-Warning ('Application/{0}: not readable JSON, not used for app mapping - {1}' -f $file.Name, $PSItem.Exception.Message)
+            continue
+        }
+        if ($app -isnot [System.Collections.IDictionary]) { continue }
+        $key = ConvertTo-AppKey -App $app
+        if ([string]::IsNullOrWhiteSpace($key.Id)) { continue }
+        $index[$key.Id] = $key
+    }
+    return , $index
+}
+
+function Get-TargetAppIndex {
+    # Every app in the target tenant, read once per area. No $select: bundleId and packageId
+    # are properties of the derived app types, not of mobileApp itself.
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseOutputTypeCorrectly', '',
+        Justification = 'Same comma guard as Get-ExistingName: the caller receives the List, not an Object[].')]
+    [OutputType([System.Collections.Generic.List[hashtable]])]
+    param()
+
+    $apps = [System.Collections.Generic.List[hashtable]]::new()
+    $uri = 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps'
+    while (-not [string]::IsNullOrWhiteSpace($uri)) {
+        $page = Invoke-GraphRequest -Uri $uri
+        # Probed directly, not through Get-ObjectProperty - see Get-ExistingName.
+        $valueProperty = $page.PSObject.Properties['value']
+        if ($null -ne $valueProperty -and $null -ne $valueProperty.Value) {
+            foreach ($item in @($valueProperty.Value)) { $apps.Add((ConvertTo-AppKey -App $item)) }
+        }
+        $uri = [string](Get-ObjectProperty -InputObject $page -Name '@odata.nextLink')
+    }
+    return , $apps
+}
+
+function Resolve-TargetedMobileApp {
+    <#
+        Translates a body's targetedMobileApps from source tenant ids to target tenant ids.
+        Returns @{ Problem = ''; Ids = [string[]]; Summary = '' } - Problem set means do not post.
+
+        A target app matches when it has the same @odata.type and shares an identifier
+        (bundleId / packageId / appIdentifier) with the source app, or - for a source app with
+        no identifier at all - the same display name. Exactly one must match. Two candidates
+        (a VPP and a store copy of one bundle, two apps with one name) are reported, not
+        guessed at, and so is a type change: an iosVppApp in the source is not silently
+        replaced by an iosStoreApp in the target.
+
+        Every app must resolve, or nothing is posted. A configuration that quietly lost one of
+        its apps would configure less than the source did and still come back 201.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)][hashtable]$Body,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.Dictionary[string, hashtable]]$SourceApp,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[hashtable]]$TargetApp
+    )
+
+    $sourceIds = @($Body['targetedMobileApps'] | ForEach-Object { [string]$PSItem } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($PSItem) })
+    if ($sourceIds.Count -eq 0) {
+        return @{ Problem = 'targetedMobileApps holds no app id'; Ids = [string[]]@(); Summary = '' }
+    }
+    $configPackage = ($Body.ContainsKey('packageId') ? [string]$Body['packageId'] : '').Trim() -replace '^app:', ''
+
+    $mapped = [System.Collections.Generic.List[string]]::new()
+    $notes = [System.Collections.Generic.List[string]]::new()
+    $unresolved = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($sourceId in $sourceIds) {
+        if ($SourceApp.ContainsKey($sourceId)) {
+            $source = $SourceApp[$sourceId]
+        }
+        elseif ($configPackage -and $sourceIds.Count -eq 1) {
+            # No Application sidecar for it, but an Android Enterprise configuration names its
+            # app's package itself. Trusted only for a single targeted app - with several, the
+            # package cannot be tied to one of them. The type is unknown, so it is not compared.
+            $packageSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            [void]$packageSet.Add($configPackage)
+            $source = @{ Id = $sourceId; Name = $configPackage; NameKey = ''; Type = ''; Identifiers = $packageSet }
+        }
+        else {
+            $unresolved.Add(('{0} is not in the source folder''s Application area - copy the export''s Application folder next to this one' -f $sourceId))
+            continue
+        }
+
+        $candidates = @($TargetApp | Where-Object { -not $source.Type -or $PSItem.Type -eq $source.Type })
+        if ($source.Identifiers.Count -gt 0) {
+            $how = 'by {0}' -f (@($source.Identifiers) -join '/')
+            $hits = @($candidates | Where-Object { $PSItem.Identifiers.Overlaps($source.Identifiers) })
+        }
+        else {
+            $how = 'by name'
+            $hits = @($candidates | Where-Object { $PSItem.NameKey -eq $source.NameKey })
+        }
+        $label = '"{0}" ({1}{2})' -f $source.Name, ($source.Type ? $source.Type + ', ' : ''), $how
+
+        if ($hits.Count -eq 0) {
+            $unresolved.Add(('{0} has no match in the target tenant - add the app there first' -f $label))
+            continue
+        }
+        if ($hits.Count -gt 1) {
+            $unresolved.Add(('{0} matches {1} apps in the target tenant ({2}) - ambiguous' -f
+                $label, $hits.Count, (@($hits | ForEach-Object { $PSItem.Id }) -join ', ')))
+            continue
+        }
+        if (-not $mapped.Contains($hits[0].Id)) { $mapped.Add($hits[0].Id) }
+        $notes.Add(('{0} {1} -> {2}' -f $label, $sourceId, $hits[0].Id))
+    }
+
+    if ($unresolved.Count -gt 0) {
+        return @{ Problem = ('targeted app(s) could not be mapped to the target tenant: {0}' -f ($unresolved -join '; ')); Ids = [string[]]@(); Summary = '' }
+    }
+    return @{ Problem = ''; Ids = [string[]]$mapped.ToArray(); Summary = ('apps mapped: {0}' -f ($notes -join '; ')) }
+}
+
 #endregion Helpers
 
 #region Area definitions
@@ -1367,6 +1578,20 @@ $script:AreaMap = [ordered]@{
         Remove = @('deployedAppCount', 'isAssigned', 'apps')
         Require = @('displayName')
     }
+    # Device-channel app configuration (iOS/iPadOS, Android Enterprise). Unlike the managed-apps
+    # area above, the target apps are part of the body: targetedMobileApps holds the SOURCE
+    # tenant's app ids, which mean nothing here. MapTargetedApps has them translated to the
+    # target tenant's ids before the POST - see Resolve-TargetedMobileApp. A file whose apps
+    # cannot all be found in the target is 'invalid', never posted with fewer apps.
+    # appSupportsOemConfig is read-only on androidManagedStoreAppConfiguration.
+    'App-Configuration-Managed-Devices' = @{
+        Resource = 'deviceAppManagement/mobileAppConfigurations'
+        NameProperty = 'displayName'
+        RequiredScope = 'DeviceManagementApps.ReadWrite.All'
+        Remove = @('appSupportsOemConfig')
+        Require = @('displayName', '@odata.type', 'targetedMobileApps')
+        MapTargetedApps = $true
+    }
 }
 
 # Present in an export but not creatable from a single POST. Listed explicitly so the run
@@ -1375,7 +1600,6 @@ $script:UnsupportedAreas = [ordered]@{
     'Group-Policy-Configuration-ADMX'    = 'needs the container created first, then one definitionValue per setting'
     'Endpoint-Security-Intent'           = 'bound to a template ID that is not portable between tenants'
     'Enrollment-Configuration'           = 'largely tenant singletons that cannot be created, only edited'
-    'App-Configuration-Managed-Devices'  = 'references app IDs that do not exist in the target tenant'
     'Application'                        = 'needs content upload, not a JSON body'
 }
 
@@ -1652,6 +1876,36 @@ try {
             Add-Result -AreaName $areaName -File '' -Name '' -Status 'failed' -Detail ('could not read existing names: {0}' -f $message)
             continue
         }
+
+        # Areas whose body names apps by id: both tenants' apps are read once for the area, and
+        # each file's ids are translated before it is posted. Same three outcomes as the name
+        # read above - without the target's apps nothing in this area can be mapped, so nothing
+        # in it is posted.
+        $sourceApps = $null
+        $targetApps = $null
+        if ($definition.ContainsKey('MapTargetedApps') -and $definition.MapTargetedApps) {
+            $sourceApps = Get-SourceAppIndex -SourceDirectory $sourceDirectoryResolved
+            try {
+                $targetApps = Get-TargetAppIndex
+            }
+            catch [GraphAuthenticationException] {
+                throw ($authAbortMessage -f $PSItem.Exception.Message, [System.Environment]::NewLine)
+            }
+            catch [GraphAuthorizationException] {
+                Write-Warning ('{0}: skipped - {1}' -f $areaName, $PSItem.Exception.Message)
+                Add-Result -AreaName $areaName -File '' -Name '' -Status 'blocked' -Detail $PSItem.Exception.Message
+                continue
+            }
+            catch [System.Exception] {
+                $message = Get-GraphErrorDetail -ErrorRecord $PSItem
+                Write-Warning ('{0}: skipped - could not read the target tenant''s apps: {1}' -f $areaName, $message)
+                Add-Result -AreaName $areaName -File '' -Name '' -Status 'failed' -Detail ('could not read the target tenant''s apps: {0}' -f $message)
+                continue
+            }
+            Write-Verbose ('{0}: {1} app(s) in the source Application folder, {2} in the target tenant.' -f
+                $areaName, $sourceApps.Count, $targetApps.Count)
+        }
+
         $targetUri = 'https://graph.microsoft.com/beta/{0}' -f $definition.Resource
 
         foreach ($file in $files) {
@@ -1681,6 +1935,21 @@ try {
                     continue
                 }
 
+                # The row's detail names the mapping, so the report says which target app each
+                # source app became - in the plan and again in the real run, which maps afresh.
+                $rowDetail = $definition.Resource
+                if ($null -ne $targetApps) {
+                    $mapping = Resolve-TargetedMobileApp -Body $body -SourceApp $sourceApps -TargetApp $targetApps
+                    if ($mapping.Problem) {
+                        Write-Warning ('{0}: skipped - {1}.' -f $file.Name, $mapping.Problem)
+                        Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'invalid' -Detail $mapping.Problem -Sha256 $fileHash
+                        continue
+                    }
+                    $body['targetedMobileApps'] = $mapping.Ids
+                    $rowDetail = '{0}; {1}' -f $definition.Resource, $mapping.Summary
+                    Write-Verbose ('{0}: "{1}" {2}' -f $areaName, $displayName, $mapping.Summary)
+                }
+
                 if ($existing.Contains($nameKey)) {
                     Write-Verbose ('{0}: "{1}" already exists in the tenant, skipping.' -f $areaName, $displayName)
                     Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status 'duplicate' -Detail 'a policy with this name already exists' -Sha256 $fileHash
@@ -1701,7 +1970,7 @@ try {
                     # Claimed in the dry run too, so a second file with the same name shows as
                     # 'duplicate' here exactly as it will in the real run.
                     [void]$existing.Add($nameKey)
-                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status ($WhatIfPreference ? 'whatif' : 'declined') -Detail $definition.Resource -Sha256 $fileHash
+                    Add-Result -AreaName $areaName -File $file.Name -Name $displayName -Status ($WhatIfPreference ? 'whatif' : 'declined') -Detail $rowDetail -Sha256 $fileHash
                     continue
                 }
 
@@ -1719,7 +1988,7 @@ try {
 
                 $created = Invoke-GraphRequest -Uri $targetUri -Method 'POST' -Body $json
                 $pendingRow.Status = 'created'
-                $pendingRow.Detail = $definition.Resource
+                $pendingRow.Detail = $rowDetail
                 $pendingRow.CreatedId = [string](Get-ObjectProperty -InputObject $created -Name 'id')
                 Write-Verbose ('{0}: created "{1}" ({2}).' -f $areaName, $displayName, $pendingRow.CreatedId)
                 $pendingRow = $null
@@ -1836,7 +2105,7 @@ finally {
         runTimestampLocal  = $runLocal.ToString('yyyy-MM-ddTHH:mm:ss')
         utcOffset          = [System.TimeZoneInfo]::Local.GetUtcOffset($runLocal).ToString()
         timeZone           = $reportTimeZone
-        scriptVersion      = '1.4.0'
+        scriptVersion      = '1.5.0'
         whatIf             = [bool]$WhatIfPreference
         targetTenantId     = $tokenTenantId
         targetCustomerName = $script:TargetCustomerName
