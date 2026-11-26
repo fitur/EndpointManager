@@ -98,7 +98,7 @@ own Create page:
 |---|---|
 | `DeviceManagementConfiguration.ReadWrite.All` | Assignment filters, Settings Catalog, device configuration templates, compliance policies, feature/quality/driver update profiles, quality update policies |
 | `DeviceManagementScripts.ReadWrite.All` | Remediation scripts, platform scripts (Windows), shell scripts (macOS) |
-| `DeviceManagementApps.ReadWrite.All` | App protection (iOS, Android), app configuration (managed apps) |
+| `DeviceManagementApps.ReadWrite.All` | App protection (iOS, Android), app configuration (managed apps, managed devices — and reading the target tenant's apps to map their ids) |
 | `DeviceManagementServiceConfig.ReadWrite.All` | Autopilot deployment profiles |
 
 Application, not Delegated — client credentials ignores delegated permissions entirely.
@@ -268,7 +268,7 @@ the run carries on with the rest.
 
 ## What it covers
 
-15 areas, all posted to `beta`:
+16 areas, all posted to `beta`:
 
 | Area folder | Graph resource |
 |---|---|
@@ -287,8 +287,9 @@ the run carries on with the rest.
 | `App-Protection-Policy-iOS` | `deviceAppManagement/iosManagedAppProtections` |
 | `App-Protection-Policy-Android` | `deviceAppManagement/androidManagedAppProtections` |
 | `App-Configuration-Managed-Apps` | `deviceAppManagement/targetedManagedAppConfigurations` |
+| `App-Configuration-Managed-Devices` | `deviceAppManagement/mobileAppConfigurations` — app ids are mapped, see [App configuration for managed devices](#app-configuration-for-managed-devices) |
 
-Five more areas appear in an export and are **not** importable. They are listed explicitly in
+Four more areas appear in an export and are **not** importable. They are listed explicitly in
 the script so a run reports them with the reason rather than leaving you wondering why a folder
 was ignored — see [Known limitations](#known-limitations).
 
@@ -302,6 +303,37 @@ each file before it is posted:
 
 Duplicates are handled by reading the existing display names once per area. A file whose name
 matches something already in the target tenant is skipped and reported.
+
+### App configuration for managed devices
+
+An app configuration policy for managed devices (iOS/iPadOS, Android Enterprise) names its apps
+in `targetedMobileApps` — by the **source** tenant's app ids, which do not exist in the target.
+The script translates them before the POST:
+
+1. **The source app** is looked up by id in the source folder's `Application` area. That folder
+   is not imported itself (it stays `unsupported`), but it is read for this even when `-Area`
+   does not select it. **Copy it into the source folder together with
+   `App-Configuration-Managed-Devices`.**
+2. **The target app** must have the same `@odata.type` and share a `bundleId`, `packageId` or
+   `appIdentifier` with the source app. An app with none of those (a web link, for example) is
+   matched on its display name, compared the same way as the duplicate check.
+3. **Exactly one** target app must match. Two candidates — a VPP and a store copy of the same
+   bundle, or two apps with one name — are reported as ambiguous, not guessed at. A type change
+   is not followed either: an `iosVppApp` in the source does not map to an `iosStoreApp` in the
+   target.
+
+An Android Enterprise configuration that targets a single app also carries the app's package
+itself (`packageId: "app:<package>"`). When that app has no sidecar in `Application`, the
+package is used instead, without the type check.
+
+If any app cannot be mapped, the file is `invalid` and `detail` says which app and why. Nothing
+is posted with fewer apps than the source had. **The apps therefore have to exist in the target
+tenant first** — add them, then run `-WhatIf` again.
+
+The `detail` of a `whatif` or `created` row lists every mapping, `source-id -> target-id`. The
+target tenant's apps are read once per run, so a real run maps again rather than reusing the
+plan's mapping. The plan binds the file's content; an app added to or removed from the target
+between the plan and the run changes what the run maps to, and the run's report shows that.
 
 ## Parameters
 
@@ -436,7 +468,7 @@ to be forked to unpack an Intune-internal blob.
 
 ## Known limitations
 
-- **Five areas cannot be imported.** They are reported with the reason when their folder is
+- **Four areas cannot be imported.** They are reported with the reason when their folder is
   present, rather than silently ignored:
 
   | Area | Why |
@@ -444,8 +476,12 @@ to be forked to unpack an Intune-internal blob.
   | `Group-Policy-Configuration-ADMX` | Needs the container created first, then one `definitionValue` per setting |
   | `Endpoint-Security-Intent` | Bound to a template ID that is not portable between tenants |
   | `Enrollment-Configuration` | Largely tenant singletons that can be edited but not created |
-  | `App-Configuration-Managed-Devices` | References app IDs that do not exist in the target tenant |
-  | `Application` | Needs content upload, not a JSON body |
+  | `Application` | Needs content upload, not a JSON body. Still read as a lookup for `App-Configuration-Managed-Devices` |
+
+- **App configuration for managed devices needs its apps in the target tenant first.** Until
+  1.5.0 the area was not imported at all. Now its app ids are mapped, and a file whose apps
+  cannot all be found is `invalid`. See
+  [App configuration for managed devices](#app-configuration-for-managed-devices).
 
 - **Template-bound Settings Catalog policies may not be portable.** A policy whose
   `templateReference.templateFamily` is anything other than `none` — security baselines, and
